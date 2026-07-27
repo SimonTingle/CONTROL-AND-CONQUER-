@@ -55,14 +55,18 @@ export function buildVehicleMesh(def) {
   const wheelGeo = new THREE.CylinderGeometry(dims.wheelRadius, dims.wheelRadius, dims.wheelWidth, 16);
   const axleX = dims.hullLength / 2 - dims.wheelRadius * 1.1;
   const axleZ = dims.hullWidth / 2 + dims.wheelWidth * 0.15;
+  const contacts = [];
   for (const sx of [-1, 1]) {
     for (const sz of [-1, 1]) {
       const wheel = new THREE.Mesh(wheelGeo, wheelMat);
       wheel.rotation.x = Math.PI / 2;
+      // Wheel centre sits one radius up, so the tyre bottoms out at local y = 0
+      // — the group origin IS the ground contact plane.
       wheel.position.set(sx * axleX, dims.wheelRadius, sz * axleZ);
       wheel.castShadow = true;
       wheel.receiveShadow = true;
       group.add(wheel);
+      contacts.push({ x: sx * axleX, z: sz * axleZ, mesh: wheel, baseY: dims.wheelRadius });
     }
   }
 
@@ -89,6 +93,14 @@ export function buildVehicleMesh(def) {
   group.add(barrel);
 
   // Vehicle "forward" is +X by construction; callers rotate the whole group.
-  group.userData.groundClearance = dims.wheelRadius;
+  // The contact offsets let the controller sample terrain under each wheel and
+  // sit the vehicle on the ground plane they define, rather than guessing from
+  // a single point under the chassis.
+  group.userData.wheelContacts = contacts;
+  group.userData.wheelbase = axleX * 2;
+  group.userData.track = axleZ * 2;
+  // How far a wheel may move in its arch to reach ground the rigid body plane
+  // can't touch — real ground is curved, a four-point plane fit is not.
+  group.userData.suspensionTravel = dims.wheelRadius * 0.7;
   return group;
 }
