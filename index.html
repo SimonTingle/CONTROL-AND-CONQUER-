@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Procedural Terrain — RTS Sandbox</title>
+    <link rel="stylesheet" href="/src/ui/style.css" />
+  </head>
+  <body>
+    <canvas id="viewport"></canvas>
+
+    <button id="menu-toggle" aria-label="Open settings" aria-expanded="false">
+      <span></span><span></span><span></span>
+    </button>
+
+    <aside id="panel" aria-hidden="true">
+      <header>
+        <h1>World Settings</h1>
+        <p id="hud-stats">—</p>
+      </header>
+      <div id="panel-body"></div>
+    </aside>
+
+    <div id="loading">generating world…</div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
