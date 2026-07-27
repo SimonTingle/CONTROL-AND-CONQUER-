@@ -211,6 +211,119 @@ button.action {
 
 button.action:hover { background: rgba(79, 209, 197, 0.22); }
 
+/* ---- vehicle picker (mirrors the settings hamburger/drawer, right side) ---- */
+
+#vehicle-toggle {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 20;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+#vehicle-toggle:hover { border-color: rgba(120, 190, 220, 0.45); }
+
+#vehicle-toggle span {
+  display: block;
+  width: 20px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--text);
+  transition: transform 0.22s ease, opacity 0.18s ease;
+}
+
+#vehicle-toggle.active span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+#vehicle-toggle.active span:nth-child(2) { opacity: 0; }
+#vehicle-toggle.active span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
+
+#vehicle-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 15;
+  width: var(--panel-width);
+  height: 100%;
+  padding: 76px 18px 20px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--panel-bg);
+  backdrop-filter: blur(14px);
+  border-left: 1px solid var(--panel-border);
+  transform: translateX(100%);
+  transition: transform 0.26s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+#vehicle-panel.open { transform: translateX(0); }
+
+#vehicle-panel header { padding-bottom: 14px; }
+
+#vehicle-panel h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+#vehicle-panel .hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+#vehicle-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.vehicle-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.vehicle-card:hover {
+  border-color: var(--accent);
+  background: rgba(79, 209, 197, 0.08);
+}
+
+.vehicle-card canvas {
+  display: block;
+  width: 100%;
+  height: 108px;
+}
+
+.vehicle-card-label {
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  text-align: left;
+}
+
 /* ---- loading ---- */
 
 #loading {

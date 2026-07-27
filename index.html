@@ -21,6 +21,18 @@
       <div id="panel-body"></div>
     </aside>
 
+    <button id="vehicle-toggle" aria-label="Choose vehicle" aria-expanded="false">
+      <span></span><span></span><span></span>
+    </button>
+
+    <aside id="vehicle-panel" aria-hidden="true">
+      <header>
+        <h1>Vehicles</h1>
+        <p class="hint">Click a vehicle to spawn it at the map edge.</p>
+      </header>
+      <div id="vehicle-grid"></div>
+    </aside>
+
     <div id="loading">generating world…</div>
 
     <script type="module" src="/src/main.js"></script>

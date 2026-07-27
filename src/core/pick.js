@@ -78,3 +78,37 @@ export function isBuildable(heightmap, x, z, maxSlope = 0.35) {
   if (heightmap.heightAt(x, z) <= heightmap.seaLevelY) return false;
   return heightmap.slopeAt(x, z) <= maxSlope;
 }
+
+/**
+ * Finds a dry-land spawn point on the map's edge, along the angle the camera
+ * is currently facing (so a spawned vehicle appears where the player is
+ * looking, not on an arbitrary fixed side of the map).
+ *
+ * The continental falloff in Heightmap means the literal boundary is usually
+ * ocean, so this starts at the edge and steps inward until it clears the
+ * waterline — the closest-to-edge point that is still land.
+ */
+export function findEdgeSpawnPoint(heightmap, camera, target = new THREE.Vector3()) {
+  const { size } = heightmap.params;
+
+  const forward = new THREE.Vector3();
+  camera.getWorldDirection(forward);
+  let angle = Math.atan2(forward.z, forward.x);
+  if (!Number.isFinite(angle)) angle = 0;
+
+  const dirX = Math.cos(angle);
+  const dirZ = Math.sin(angle);
+  const maxRadius = size * 0.5 - 2;
+  const step = size / 400;
+
+  for (let r = maxRadius; r > 0; r -= step) {
+    const x = dirX * r;
+    const z = dirZ * r;
+    if (heightmap.heightAt(x, z) > heightmap.seaLevelY) {
+      return { point: target.set(x, heightmap.heightAt(x, z), z), heading: Math.atan2(-dirZ, -dirX) };
+    }
+  }
+
+  // Degenerate fallback (e.g. a fully-flooded map): spawn at the centre.
+  return { point: target.set(0, heightmap.heightAt(0, 0), 0), heading: 0 };
+}

@@ -1,9 +1,12 @@
 import * as THREE from 'three';
 import { World } from './core/world.js';
 import { createCameraControls } from './core/controls.js';
-import { pickTerrain, isBuildable } from './core/pick.js';
+import { pickTerrain, isBuildable, findEdgeSpawnPoint } from './core/pick.js';
 import { Menu } from './ui/menu.js';
 import { buildSchema } from './ui/controlSchema.js';
+import { VehiclePicker } from './ui/vehiclePicker.js';
+import { VehicleController } from './vehicles/vehicleController.js';
+import { VEHICLE_CATALOG } from './vehicles/catalog.js';
 
 const canvas = document.getElementById('viewport');
 
@@ -35,6 +38,8 @@ marker.castShadow = true;
 marker.visible = false;
 world.scene.add(marker);
 
+const vehicles = new VehicleController(world.scene);
+
 const hit = new THREE.Vector3();
 let dragged = false;
 canvas.addEventListener('pointerdown', () => (dragged = false));
@@ -48,11 +53,56 @@ canvas.addEventListener('pointerup', (e) => {
     marker.visible = false;
     return;
   }
+
+  const underwater = point.y <= heightmap.seaLevelY + 0.001;
+  const moved = !underwater && vehicles.commandActive(point.x, point.z, heightmap);
+
   marker.position.copy(point);
   marker.position.y += 5;
   marker.visible = true;
-  marker.material.color.set(isBuildable(heightmap, point.x, point.z) ? 0x4fd1c5 : 0xd9534f);
+  marker.material.color.set(
+    moved || isBuildable(heightmap, point.x, point.z) ? 0x4fd1c5 : 0xd9534f
+  );
 });
+
+// WASD camera panning, additive to MapControls' drag-pan/orbit/zoom.
+const panKeys = { w: false, a: false, s: false, d: false };
+addEventListener('keydown', (e) => {
+  const k = e.key.toLowerCase();
+  if (k in panKeys && !isTextInputFocused()) panKeys[k] = true;
+});
+addEventListener('keyup', (e) => {
+  const k = e.key.toLowerCase();
+  if (k in panKeys) panKeys[k] = false;
+});
+
+function isTextInputFocused() {
+  const el = document.activeElement;
+  return el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA');
+}
+
+const PAN_SPEED = 140; // world units / second
+const _panForward = new THREE.Vector3();
+const _panRight = new THREE.Vector3();
+function applyKeyboardPan(dt) {
+  if (!panKeys.w && !panKeys.a && !panKeys.s && !panKeys.d) return;
+
+  camera.getWorldDirection(_panForward);
+  _panForward.y = 0;
+  _panForward.normalize();
+  _panRight.crossVectors(_panForward, camera.up).normalize();
+
+  const move = new THREE.Vector3();
+  if (panKeys.w) move.add(_panForward);
+  if (panKeys.s) move.addScaledVector(_panForward, -1);
+  if (panKeys.d) move.add(_panRight);
+  if (panKeys.a) move.addScaledVector(_panRight, -1);
+  if (move.lengthSq() === 0) return;
+
+  move.normalize().multiplyScalar(PAN_SPEED * dt);
+  camera.position.add(move);
+  controls.target.add(move);
+}
 
 // The UI needs a handle that can both regenerate terrain and reach the renderer.
 const view = {
@@ -65,6 +115,15 @@ const view = {
 };
 
 const menu = new Menu(buildSchema(world, view));
+
+const vehiclePicker = new VehiclePicker(VEHICLE_CATALOG, {
+  onSelect(def) {
+    vehiclePicker.setOpen(false);
+    const { point, heading } = findEdgeSpawnPoint(heightmap, camera);
+    point.y += 0.05; // avoid z-fighting with the ground on the spawn frame
+    vehicles.spawn(def, point, heading);
+  },
+});
 
 addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -81,8 +140,11 @@ function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.1);
 
+  applyKeyboardPan(dt);
   controls.update();
   world.update(dt, camera);
+  vehicles.update(dt, heightmap);
+  vehiclePicker.update(dt);
   renderer.render(world.scene, camera);
 
   frames++;
@@ -136,4 +198,4 @@ window.__probe = (count = 100) => {
   return group;
 };
 
-Object.assign(window, { world, camera, renderer, THREE });
+Object.assign(window, { world, camera, renderer, controls, THREE, vehicles, vehiclePicker });
