@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { World } from './core/world.js';
 import { createCameraControls } from './core/controls.js';
-import { pickTerrain, isBuildable, findEdgeSpawnPoint } from './core/pick.js';
+import { pickTerrain, findEdgeSpawnPoint } from './core/pick.js';
 import { Menu } from './ui/menu.js';
 import { buildSchema } from './ui/controlSchema.js';
 import { VehiclePicker } from './ui/vehiclePicker.js';
@@ -27,16 +27,42 @@ const controls = createCameraControls(camera, canvas, heightmap);
 controls.target.set(0, heightmap.heightAt(0, 0), 0);
 controls.update();
 
-// A marker showing where the ground was picked — the seed of unit selection and
-// build placement. It sits on the CPU heightfield, which is the proof that the
-// CPU field and the GPU displacement agree.
+// Move-order marker: a floating red metallic ball dropped on the clicked point.
+// It hovers and bobs so it reads against any terrain colour, and it disappears
+// the moment the vehicle's order finishes.
+const MARKER_HOVER = 4.5;
 const marker = new THREE.Mesh(
-  new THREE.ConeGeometry(3, 10, 6),
-  new THREE.MeshStandardMaterial({ color: 0x4fd1c5, emissive: 0x113a36, roughness: 0.4 })
+  new THREE.SphereGeometry(1.6, 24, 16),
+  new THREE.MeshStandardMaterial({
+    color: 0xd91f2e,
+    emissive: 0x3a0206,
+    metalness: 1.0,
+    roughness: 0.18,
+  })
 );
 marker.castShadow = true;
 marker.visible = false;
+marker.userData.groundY = 0;
 world.scene.add(marker);
+
+function showMarker(point) {
+  marker.userData.groundY = point.y;
+  marker.position.set(point.x, point.y + MARKER_HOVER, point.z);
+  marker.visible = true;
+}
+
+/** Bob and spin the marker, and retire it once the vehicle's order is done. */
+function updateMarker(elapsed) {
+  if (!marker.visible) return;
+
+  if (vehicles.active && !vehicles.active.hasOrder) {
+    marker.visible = false;
+    return;
+  }
+
+  marker.position.y = marker.userData.groundY + MARKER_HOVER + Math.sin(elapsed * 2.4) * 0.6;
+  marker.rotation.y = elapsed * 0.8;
+}
 
 const vehicles = new VehicleController(world.scene);
 
@@ -54,15 +80,10 @@ canvas.addEventListener('pointerup', (e) => {
     return;
   }
 
-  const underwater = point.y <= heightmap.seaLevelY + 0.001;
-  const moved = !underwater && vehicles.commandActive(point.x, point.z, heightmap);
-
-  marker.position.copy(point);
-  marker.position.y += 5;
-  marker.visible = true;
-  marker.material.color.set(
-    moved || isBuildable(heightmap, point.x, point.z) ? 0x4fd1c5 : 0xd9534f
-  );
+  // The ball marks an accepted move order, so a refused one (water, or no
+  // vehicle spawned yet) leaves nothing behind to chase.
+  if (vehicles.commandActive(point.x, point.z, heightmap)) showMarker(point);
+  else marker.visible = false;
 });
 
 // WASD camera panning, additive to MapControls' drag-pan/orbit/zoom.
@@ -144,6 +165,7 @@ function animate() {
   controls.update();
   world.update(dt, camera);
   vehicles.update(dt, heightmap);
+  updateMarker(clock.elapsedTime);
   vehiclePicker.update(dt);
   renderer.render(world.scene, camera);
 
@@ -154,9 +176,18 @@ function animate() {
     frames = 0;
     statsTimer = 0;
     const info = renderer.info.render;
+    let line3 = '';
+    if (vehicles.active) {
+      const v = vehicles.active;
+      const gradePct = (v.grade * 100).toFixed(0);
+      line3 = v.blocked
+        ? `\nvehicle: blocked — ${gradePct}% grade too steep`
+        : `\nvehicle: ${v.speed.toFixed(1)} u/s · ${gradePct}% grade`;
+    }
     menu.setStats(
       `${fps} fps · ${info.calls} draws · ${(info.triangles / 1000).toFixed(0)}k tris\n` +
-      `sun ${world.atmosphere.params.elevation.toFixed(0)}° · seed ${heightmap.params.seed}`
+      `sun ${world.atmosphere.params.elevation.toFixed(0)}° · seed ${heightmap.params.seed}` +
+      line3
     );
   }
 }

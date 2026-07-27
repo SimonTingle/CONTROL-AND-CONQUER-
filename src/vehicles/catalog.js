@@ -8,8 +8,11 @@ export const VEHICLE_CATALOG = [
     id: 'scout-buggy',
     name: 'Scout Buggy',
     description: 'Fast, light recon vehicle.',
-    speed: 22, // world units / second
+    speed: 22, // world units / second on the flat
     turnSpeed: 3.2, // radians / second
+    // Steepest grade (rise/run) it can climb. 0.8 ≈ 39°; anything steeper is
+    // impassable and the vehicle abandons the order rather than grinding.
+    maxClimbGrade: 0.8,
     dims: {
       hullLength: 5.2,
       hullWidth: 2.6,
