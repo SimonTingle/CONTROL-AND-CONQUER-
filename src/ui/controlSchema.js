@@ -108,6 +108,20 @@ export function buildSchema(world, view) {
       ],
     },
     {
+      title: 'Camera',
+      controls: [
+        toggle('Chase camera', () => view.chase.enabled, (v) => view.setChase(v)),
+        slider('Chase distance', 8, 140, 1,
+          () => view.chase.distance, (v) => (view.chase.distance = v)),
+        slider('Chase height', 2, 80, 1,
+          () => view.chase.height, (v) => (view.chase.height = v)),
+        slider('Look ahead', 0, 40, 1,
+          () => view.chase.lookAhead, (v) => (view.chase.lookAhead = v)),
+        slider('Follow lag', 0.5, 12, 0.1,
+          () => view.chase.headingStiffness, (v) => (view.chase.headingStiffness = v)),
+      ],
+    },
+    {
       title: 'Game / debug',
       controls: [
         toggle('Buildable-ground overlay',

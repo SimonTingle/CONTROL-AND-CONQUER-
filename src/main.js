@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { World } from './core/world.js';
 import { createCameraControls } from './core/controls.js';
+import { ChaseCamera } from './core/chaseCamera.js';
 import { pickTerrain, findEdgeSpawnPoint } from './core/pick.js';
 import { Menu } from './ui/menu.js';
 import { buildSchema } from './ui/controlSchema.js';
@@ -102,6 +103,43 @@ function isTextInputFocused() {
   return el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA');
 }
 
+const chase = new ChaseCamera(camera, heightmap);
+
+/** True when the camera is locked to a vehicle rather than free-flying. */
+function isChasing() {
+  return chase.enabled && vehicles.active;
+}
+
+const ORBIT_SPEED = 1.6; // radians / second
+const DOLLY_SPEED = 40; // world units / second
+const MIN_CHASE_DISTANCE = 8;
+const MAX_CHASE_DISTANCE = 140;
+
+/** While chasing, the pan keys swing and dolly the camera around the vehicle. */
+function applyChaseKeys(dt) {
+  if (panKeys.a) chase.azimuthOffset += ORBIT_SPEED * dt;
+  if (panKeys.d) chase.azimuthOffset -= ORBIT_SPEED * dt;
+  if (panKeys.w) chase.distance -= DOLLY_SPEED * dt;
+  if (panKeys.s) chase.distance += DOLLY_SPEED * dt;
+  chase.distance = THREE.MathUtils.clamp(chase.distance, MIN_CHASE_DISTANCE, MAX_CHASE_DISTANCE);
+}
+
+// MapControls owns the wheel when it is enabled, so this only has to cover the
+// chase case — otherwise both would zoom at once.
+canvas.addEventListener(
+  'wheel',
+  (e) => {
+    if (!isChasing()) return;
+    e.preventDefault();
+    chase.distance = THREE.MathUtils.clamp(
+      chase.distance + Math.sign(e.deltaY) * 3,
+      MIN_CHASE_DISTANCE,
+      MAX_CHASE_DISTANCE
+    );
+  },
+  { passive: false }
+);
+
 const PAN_SPEED = 140; // world units / second
 const _panForward = new THREE.Vector3();
 const _panRight = new THREE.Vector3();
@@ -128,10 +166,22 @@ function applyKeyboardPan(dt) {
 // The UI needs a handle that can both regenerate terrain and reach the renderer.
 const view = {
   renderer,
+  chase,
   regenerate(params) {
     world.regenerate(params);
     // The marker is anchored to terrain that no longer exists.
     marker.visible = false;
+  },
+  setChase(enabled) {
+    chase.enabled = enabled;
+    if (enabled) {
+      if (vehicles.active) chase.reset(vehicles.active);
+    } else if (vehicles.active) {
+      // Hand the camera back to MapControls looking at the vehicle, or it
+      // snaps somewhere unexpected the first time the player drags.
+      controls.target.copy(vehicles.active.group.position);
+      controls.update();
+    }
   },
 };
 
@@ -142,7 +192,9 @@ const vehiclePicker = new VehiclePicker(VEHICLE_CATALOG, {
     vehiclePicker.setOpen(false);
     const { point, heading } = findEdgeSpawnPoint(heightmap, camera);
     point.y += 0.05; // avoid z-fighting with the ground on the spawn frame
-    vehicles.spawn(def, point, heading);
+    const instance = vehicles.spawn(def, point, heading);
+    // Snap in behind the new vehicle rather than flying across the map to it.
+    if (chase.enabled) chase.reset(instance);
   },
 });
 
@@ -161,10 +213,21 @@ function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.1);
 
-  applyKeyboardPan(dt);
-  controls.update();
+  // Vehicles move first so the camera frames where they actually ended up.
   world.update(dt, camera);
   vehicles.update(dt, heightmap);
+
+  if (isChasing()) {
+    // MapControls would fight the chase rig for the camera transform.
+    controls.enabled = false;
+    applyChaseKeys(dt);
+    chase.update(dt, vehicles.active);
+  } else {
+    controls.enabled = true;
+    applyKeyboardPan(dt);
+    controls.update();
+  }
+
   updateMarker(clock.elapsedTime);
   vehiclePicker.update(dt);
   renderer.render(world.scene, camera);
@@ -229,4 +292,4 @@ window.__probe = (count = 100) => {
   return group;
 };
 
-Object.assign(window, { world, camera, renderer, controls, THREE, vehicles, vehiclePicker });
+Object.assign(window, { world, camera, renderer, controls, chase, THREE, vehicles, vehiclePicker });

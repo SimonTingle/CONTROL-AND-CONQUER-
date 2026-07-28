@@ -1,6 +1,12 @@
 import * as THREE from 'three';
 
 /**
+ * Multiples of the map size the ocean spans. 12x a 1024 map puts the edge
+ * 6144 units out, past the camera's 6000 far plane in every direction.
+ */
+const OCEAN_EXTENT = 12;
+
+/**
  * Sea plane.
  *
  * Rather than a depth pre-pass, the shore blend reads the same heightmap the
@@ -115,7 +121,12 @@ export class Water {
 
     this.material.customProgramCacheKey = () => 'water-v1';
 
-    const geometry = new THREE.PlaneGeometry(p.size, p.size, 1, 1);
+    // The sea extends far past the map so its own edge is never the horizon.
+    // At this size the half-extent is beyond the camera's far plane, so the
+    // water is always clipped by the far plane instead of ending somewhere
+    // visible — which holds up even if the player turns the fog right down.
+    // Still 1x1 segments, so this costs two triangles no matter how big it is.
+    const geometry = new THREE.PlaneGeometry(p.size * OCEAN_EXTENT, p.size * OCEAN_EXTENT, 1, 1);
     geometry.rotateX(-Math.PI / 2);
     this.mesh = new THREE.Mesh(geometry, this.material);
     this.mesh.name = 'water';
