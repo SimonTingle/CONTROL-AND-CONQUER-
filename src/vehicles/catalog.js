@@ -8,6 +8,13 @@ export const VEHICLE_CATALOG = [
     id: 'scout-buggy',
     name: 'Scout Buggy',
     description: 'Fast, light recon vehicle.',
+    // Always available — it is the vehicle that does the unlocking.
+    unlock: null,
+    maxHealth: 100,
+    // World units of fog it clears. Tuned against the island's actual land area:
+    // at 22 u/s a straight run sweeps ~2r per unit travelled, so 55 puts Easy
+    // (15%) a bit under a minute of driving away rather than fifteen seconds.
+    sightRadius: 55,
     speed: 22, // top speed, world units / second on the flat
     reverseSpeed: 9,
     acceleration: 16, // units/s² under power
@@ -60,5 +67,79 @@ export const VEHICLE_CATALOG = [
       trim: '#8a8f78',
     },
     previewDistance: 9,
+  },
+
+  {
+    id: 'base-station',
+    name: 'Base Station',
+    description: 'Eight-wheeled mobile base. Slow, heavy, hard to turn.',
+    // Earned by exploring the island with the scout, not available from the
+    // start — see the difficulty thresholds in ui/difficultyScreen.js.
+    unlock: 'exploration',
+    maxHealth: 400,
+    sightRadius: 30, // it is a base, not a scout
+    speed: 9,
+    reverseSpeed: 4,
+    acceleration: 3.5, // laden: it takes its time getting there
+    braking: 9,
+    rollingResistance: 2.6, // and a long time stopping
+    maxSteerAngle: 0.35, // ~20° — a heavy 8x8 does not have buggy lock
+    steerRate: 1.1,
+    maxClimbGrade: 0.5, // less than the scout: weight, not traction
+    // Four axles: a steering pair up front and a close-coupled rear bogie, the
+    // real 8x8 layout. The second axle takes partial lock, which is what claws
+    // back some of the turning circle a four-axle rigid body would otherwise
+    // have — see steeringWheelbase() for why more axles resist yaw.
+    axles: 4,
+    axleFractions: [1.0, 0.52, -0.5, -1.0],
+    steerRatios: [1.0, 0.45, 0, 0],
+    shape: {
+      nose: false,
+      turret: false,
+      tank: true,
+      tankLength: 0.6,
+      tankX: -0.16,
+      cabinLength: 0.17, // short cab, right at the front
+      cabinX: 0.38,
+    },
+    lights: {
+      // A full-width bar at each end rather than four discrete lamps.
+      style: 'bar',
+      headlampInset: 0.3,
+      headlampDrop: 0.28,
+      beamAngle: 0.5,
+      beamDistance: 150,
+      beamIntensity: 1100,
+      beamColor: '#f6fbff',
+      tailColor: '#ff2b18',
+      reverseColor: '#f4f8ff',
+      reverseBeamIntensity: 420,
+      reverseBeamDistance: 60,
+      reverseBeamAngle: 0.7,
+      duskElevation: 8,
+    },
+    dims: {
+      hullLength: 15.6, // three times the scout
+      hullWidth: 3.4,
+      hullHeight: 1.5,
+      cabinHeight: 1.5,
+      wheelRadius: 1.1,
+      wheelWidth: 0.7,
+      // A body this long spans far more terrain curvature than a buggy, and
+      // plane-fit residual grows with the square of the span — so the arches
+      // need real travel rather than the wheel-radius default.
+      suspensionTravel: 1.8,
+      turretRadius: 0,
+      turretHeight: 0,
+      barrelRadius: 0,
+      barrelLength: 0,
+    },
+    colors: {
+      hull: '#3d444d',
+      cabin: '#222932',
+      wheel: '#161616',
+      trim: '#9aa6b2',
+    },
+    previewDistance: 26,
   },
 ];

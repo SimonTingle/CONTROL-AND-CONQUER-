@@ -6,6 +6,8 @@ import { pickTerrain, findEdgeSpawnPoint } from './core/pick.js';
 import { Menu } from './ui/menu.js';
 import { buildSchema } from './ui/controlSchema.js';
 import { VehiclePicker } from './ui/vehiclePicker.js';
+import { DifficultyScreen, DIFFICULTIES } from './ui/difficultyScreen.js';
+import { Hud } from './ui/hud.js';
 import { VehicleController } from './vehicles/vehicleController.js';
 import { VEHICLE_CATALOG } from './vehicles/catalog.js';
 
@@ -145,7 +147,9 @@ canvas.addEventListener(
 const driveKeys = { w: false, a: false, s: false, d: false };
 addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
-  if (k in driveKeys && !isTextInputFocused()) driveKeys[k] = true;
+  // Keys are bound to the window, so the difficulty overlay has to swallow them
+  // explicitly or the player drives a vehicle that does not exist yet.
+  if (k in driveKeys && !isTextInputFocused() && !game.difficultyScreen?.open) driveKeys[k] = true;
 });
 addEventListener('keyup', (e) => {
   const k = e.key.toLowerCase();
@@ -204,15 +208,58 @@ const view = {
 
 const menu = new Menu(buildSchema(world, view));
 
+/**
+ * Progression state. The unlock is *latched*: raising the sea level shrinks the
+ * island and can push the explored percentage back down, so a threshold
+ * crossing is not monotone and must not be able to take the vehicle away again.
+ */
+const game = {
+  difficulty: DIFFICULTIES[1],
+  unlocked: false,
+  difficultyScreen: null,
+};
+
+const hud = new Hud();
+
 const vehiclePicker = new VehiclePicker(VEHICLE_CATALOG, {
   onSelect(def) {
     vehiclePicker.setOpen(false);
-    const { point, heading } = findEdgeSpawnPoint(heightmap, camera);
-    point.y += 0.05; // avoid z-fighting with the ground on the spawn frame
-    const instance = vehicles.spawn(def, point, heading);
+    // Selecting a vehicle that is already out there takes the keys back rather
+    // than spawning a second one — both stay alive, so the scout can carry on
+    // exploring once the base station has arrived.
+    const existing = vehicles.instanceOf(def);
+    const instance = existing
+      ? vehicles.setActive(existing)
+      : (() => {
+          const { point, heading } = findEdgeSpawnPoint(heightmap, camera);
+          point.y += 0.05; // avoid z-fighting with the ground on the spawn frame
+          return vehicles.spawn(def, point, heading);
+        })();
     // Snap in behind the new vehicle rather than flying across the map to it.
     if (chase.enabled) chase.reset(instance);
   },
+});
+
+vehiclePicker.lockText = (def) =>
+  def.unlock === 'exploration'
+    ? `Locked — chart ${Math.round(game.difficulty.unlockAt * 100)}% of the island`
+    : 'Locked';
+
+/** Latch the unlock once the island is charted enough. */
+function updateProgression(explored) {
+  if (game.unlocked || explored < game.difficulty.unlockAt) return;
+  game.unlocked = true;
+  for (const def of VEHICLE_CATALOG) {
+    if (def.unlock === 'exploration') vehiclePicker.setUnlocked(def.id, true);
+  }
+}
+
+game.difficultyScreen = new DifficultyScreen((difficulty) => {
+  game.difficulty = difficulty;
+  // Re-render the lock hint now that the target percentage is known.
+  for (const def of VEHICLE_CATALOG) vehiclePicker.applyLockState(def.id);
+  // Nothing is spawned yet, so open the drawer on the one vehicle available.
+  vehiclePicker.setOpen(true);
 });
 
 addEventListener('resize', () => {
@@ -235,6 +282,13 @@ function animate() {
   world.update(dt, camera);
   vehicles.update(dt, heightmap, headlightsWanted());
 
+  // Reveal after the vehicles have moved — world.update() runs before them, so
+  // committing there would upload a frame stale.
+  for (const v of vehicles.instances) {
+    world.fog.reveal(v.group.position.x, v.group.position.z, v.def.sightRadius, v);
+  }
+  world.fog.commit();
+
   if (isChasing()) {
     // MapControls would fight the chase rig for the camera transform.
     controls.enabled = false;
@@ -254,6 +308,14 @@ function animate() {
     fps = Math.round(frames / statsTimer);
     frames = 0;
     statsTimer = 0;
+
+    // Exploration is polled here rather than per frame: it re-derives the land
+    // mask whenever the sea-level slider has moved, and twice a second is
+    // plenty for a percentage a player reads.
+    const explored = world.fog.exploredFraction;
+    updateProgression(explored);
+    hud.update(vehicles.active, explored, game.difficulty, game.unlocked);
+
     const info = renderer.info.render;
     let line3 = '';
     if (vehicles.active) {
@@ -314,4 +376,5 @@ window.__probe = (count = 100) => {
 
 Object.assign(window, {
   world, camera, renderer, controls, chase, THREE, vehicles, vehiclePicker, input, lighting, driveKeys,
+  game, hud,
 });

@@ -31,6 +31,10 @@ export class Water {
       uWaveScale: { value: 0.06 },
       uWaveStrength: { value: 0.5 },
       uDepthFade: { value: 14.0 },
+      // Shares the terrain's mask texture — assigned by World.
+      uFogMask: { value: null },
+      uFogEnabled: { value: 1 },
+      uFogDarken: { value: 0.34 },
     };
 
     this.material = new THREE.MeshStandardMaterial({
@@ -66,6 +70,9 @@ export class Water {
           uniform float uWaveScale;
           uniform float uWaveStrength;
           uniform float uDepthFade;
+          uniform sampler2D uFogMask;
+          uniform float uFogEnabled;
+          uniform float uFogDarken;
           varying vec3 vWorld;
 
           float w_hash(vec2 p) {
@@ -111,7 +118,18 @@ export class Water {
             // Foam where the water meets the ground, wobbled by the wave field
             // so the shoreline isn't a clean contour.
             float foam = 1.0 - smoothstep(0.0, 1.6, depth - w_waves(vWorld.xz * uWaveScale * 3.0) * 0.9);
+
+            // Fog of war, matching the terrain. Suppressing foam matters more
+            // than the darkening here: an unfogged shoreline traces the whole
+            // island outline and gives the map away before it is explored.
+            float seen = 1.0;
+            if (uFogEnabled > 0.5) {
+              seen = smoothstep(0.25, 0.6, texture2D(uFogMask, uv).r);
+              foam *= seen;
+            }
+
             diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.92, 0.96, 0.98), foam * 0.65);
+            diffuseColor.rgb *= mix(uFogDarken, 1.0, seen);
 
             // Fade out entirely at the waterline instead of ending on a hard edge.
             diffuseColor.a *= smoothstep(0.0, 0.6, depth) * mix(0.72, 0.94, t);
@@ -119,7 +137,7 @@ export class Water {
         );
     };
 
-    this.material.customProgramCacheKey = () => 'water-v1';
+    this.material.customProgramCacheKey = () => 'water-v2';
 
     // The sea extends far past the map so its own edge is never the horizon.
     // At this size the half-extent is beyond the camera's far plane, so the

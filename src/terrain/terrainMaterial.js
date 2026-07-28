@@ -77,6 +77,13 @@ export function createTerrainUniforms(heightmap) {
     uOverlay: { value: 0 },
     uOverlayMaxSlope: { value: 0.35 },
     uOverlayColor: { value: new THREE.Color('#2fd6a0') },
+
+    // Fog of war. The mask texture is assigned by World once it owns one.
+    uFogMask: { value: null },
+    uFogEnabled: { value: 1 },
+    uFogDarken: { value: 0.3 },
+    uFogDesat: { value: 0.8 },
+    uFogTint: { value: new THREE.Color('#39435a') },
   };
 }
 
@@ -189,6 +196,14 @@ export function createTerrainMaterial(heightmap, uniforms = createTerrainUniform
         uniform float uOverlay;
         uniform float uOverlayMaxSlope;
         uniform vec3 uOverlayColor;
+        // uMapSize is declared in VERTEX_COMMON for the vertex stage; the
+        // fragment stage is a separate compilation unit and needs its own.
+        uniform float uMapSize;
+        uniform sampler2D uFogMask;
+        uniform float uFogEnabled;
+        uniform float uFogDarken;
+        uniform float uFogDesat;
+        uniform vec3 uFogTint;
         varying vec3 vWorldPos;
         varying float vHeightN;
         varying float vSlope;
@@ -241,6 +256,21 @@ export function createTerrainMaterial(heightmap, uniforms = createTerrainUniform
             col = mix(col, uOverlayColor, buildable * (0.18 + 0.35 * (1.0 - grid)));
           }
 
+          // Fog of war. Applied to the albedo rather than to the final lit
+          // colour, so unexplored ground keeps its normals, shadows and tone
+          // mapping and only loses its colour — ridges stay legible, which is
+          // what makes unexplored ground worth driving into. It also means a
+          // headlight beam still lights fogged terrain dimly: that is the
+          // reveal cue, not a leak.
+          if (uFogEnabled > 0.5) {
+            vec2 fogUv = clamp(vWorldPos.xz / uMapSize + 0.5, 0.0, 1.0);
+            float seen = texture2D(uFogMask, fogUv).r;
+            float unseen = 1.0 - smoothstep(0.25, 0.6, seen);
+            float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+            vec3 neutral = mix(vec3(lum), uFogTint * (lum * 2.0), 0.5);
+            col = mix(col, mix(col, neutral, uFogDesat) * uFogDarken, unseen);
+          }
+
           diffuseColor.rgb *= col;
         }`
       )
@@ -259,7 +289,7 @@ export function createTerrainMaterial(heightmap, uniforms = createTerrainUniform
   };
 
   // Force a distinct program from any other MeshStandardMaterial in the scene.
-  material.customProgramCacheKey = () => 'terrain-splat-v1';
+  material.customProgramCacheKey = () => 'terrain-splat-v2';
 
   return material;
 }

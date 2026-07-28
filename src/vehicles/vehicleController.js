@@ -13,7 +13,14 @@ const _yawQuat = new THREE.Quaternion();
 const _pitchQuat = new THREE.Quaternion();
 const _rollQuat = new THREE.Quaternion();
 const _contact = new THREE.Vector3();
-const _needed = [0, 0, 0, 0]; // per-wheel travel scratch, reused each frame
+
+// Per-wheel travel scratch, reused each frame and grown for the widest rig seen.
+// Shared across instances safely because it never outlives a single call.
+let _needed = new Float64Array(8);
+function travelScratch(n) {
+  if (_needed.length < n) _needed = new Float64Array(n);
+  return _needed;
+}
 
 /** One spawned, drivable vehicle. */
 class VehicleInstance {
@@ -23,6 +30,9 @@ class VehicleInstance {
     this.group.position.copy(spawnPoint);
     this.heading = facing;
     this.target = null;
+    // Nothing damages a vehicle yet; the field exists so the HUD has a real
+    // value to read and combat has somewhere to write.
+    this.health = def.maxHealth;
     this.speed = 0; // magnitude, for HUD
     this.forwardSpeed = 0; // signed, negative in reverse
     this.throttle = 0;
@@ -134,8 +144,14 @@ class VehicleInstance {
       this.heading += (this.forwardSpeed / wheelbase) * Math.tan(this.steerAngle) * dt;
     }
 
-    // Point the front wheels where they are actually steering.
-    for (const wheel of this.group.userData.steeredWheels) wheel.rotation.y = -this.steerAngle;
+    // Point the steered wheels where they are actually steering. A second
+    // steering axle takes a fraction of full lock, as on a real 8x8.
+    // Both wheels on an axle take the same angle: true Ackermann turns the
+    // inner wheel more than the outer, which is only visible at full lock from
+    // very close in — deliberately skipped, not overlooked.
+    for (const wheel of this.group.userData.steeredWheels) {
+      wheel.rotation.y = -this.steerAngle * wheel.userData.steerRatio;
+    }
   }
 
   /** Advance along the current heading and keep `speed` reporting magnitude. */
@@ -283,23 +299,26 @@ class VehicleInstance {
    *
    * Sampling one point under the chassis is not enough — on any slope the body
    * has to pitch and roll, and rotating a centre-sampled body lifts the wheels
-   * off the ground. Instead we sample the terrain under each of the four wheel
-   * contacts and fit the body to the plane they describe: pitch from the
-   * front/rear difference, roll from the left/right difference, and ride height
-   * from the mean, which is exactly where the contact plane's centroid sits.
+   * off the ground. Instead we sample the terrain under every wheel contact and
+   * fit the body to the least-squares plane through them, with ride height from
+   * the mean, which is exactly where that plane's centroid sits.
+   *
+   * The fit rather than a front/rear average because axles need not be evenly
+   * spaced: an 8x8 with a close-coupled rear bogie has its wheel centroid off
+   * the body centre, and group averages silently mis-report pitch for it. For a
+   * symmetric four-wheeler the two are algebraically identical.
    */
   settleOnGround(heightmap) {
     const pos = this.group.position;
-    const { wheelContacts, wheelbase, track } = this.group.userData;
+    const { wheelContacts, contactFit } = this.group.userData;
+    const { cx, cz, dxx, dzz } = contactFit;
 
     const cos = Math.cos(this.heading);
     const sin = Math.sin(this.heading);
 
     let sum = 0;
-    let front = 0;
-    let rear = 0;
-    let left = 0;
-    let right = 0;
+    let sxh = 0;
+    let szh = 0;
 
     for (const c of wheelContacts) {
       // Rotate the local contact offset into world space by the current heading.
@@ -308,13 +327,13 @@ class VehicleInstance {
       const h = heightmap.heightAt(wx, wz);
 
       sum += h;
-      if (c.x > 0) front += h; else rear += h;
-      if (c.z > 0) right += h; else left += h;
+      // Σ(x−x̄)h is Σ(x−x̄)(h−h̄), since Σ(x−x̄) is zero by construction.
+      sxh += (c.x - cx) * h;
+      szh += (c.z - cz) * h;
     }
 
-    // Two wheels contribute to each of front/rear and left/right.
-    const pitch = Math.atan2((front - rear) / 2, wheelbase);
-    const roll = Math.atan2((right - left) / 2, track);
+    const pitch = Math.atan(dxx > 0 ? sxh / dxx : 0);
+    const roll = Math.atan(dzz > 0 ? szh / dzz : 0);
 
     pos.y = sum / wheelContacts.length;
 
@@ -339,6 +358,7 @@ class VehicleInstance {
     const g = this.group;
     const contacts = g.userData.wheelContacts;
     const limit = g.userData.suspensionTravel;
+    const needed = travelScratch(contacts.length);
     g.updateMatrixWorld(true);
 
     // How far each wheel must move to reach the ground it is over. Measured
@@ -348,9 +368,9 @@ class VehicleInstance {
     for (let i = 0; i < contacts.length; i++) {
       const c = contacts[i];
       _contact.set(c.x, 0, c.z).applyMatrix4(g.matrixWorld);
-      _needed[i] = heightmap.heightAt(_contact.x, _contact.z) - _contact.y;
-      if (_needed[i] > maxNeeded) maxNeeded = _needed[i];
-      if (_needed[i] < minNeeded) minNeeded = _needed[i];
+      needed[i] = heightmap.heightAt(_contact.x, _contact.z) - _contact.y;
+      if (needed[i] > maxNeeded) maxNeeded = needed[i];
+      if (needed[i] < minNeeded) minNeeded = needed[i];
     }
 
     // Ride at the midpoint of what the wheels need rather than their mean.
@@ -362,7 +382,7 @@ class VehicleInstance {
 
     for (let i = 0; i < contacts.length; i++) {
       contacts[i].mesh.position.y =
-        contacts[i].baseY + THREE.MathUtils.clamp(_needed[i] - ride, -limit, limit);
+        contacts[i].baseY + THREE.MathUtils.clamp(needed[i] - ride, -limit, limit);
     }
   }
 }
@@ -379,6 +399,29 @@ export class VehicleController {
     const instance = new VehicleInstance(def, spawnPoint, facing);
     this.instances.push(instance);
     this.scene.add(instance.group);
+    // Through setActive, so a vehicle left with the throttle held does not
+    // drive off on its own the moment the player spawns another one.
+    return this.setActive(instance);
+  }
+
+  /** The spawned instance of a catalog entry, if there is one. */
+  instanceOf(def) {
+    return this.instances.find((i) => i.def.id === def.id) ?? null;
+  }
+
+  /**
+   * Hand control to an already-spawned vehicle. The others stay in the world
+   * and keep being updated — a parked scout is still a scout, it just is not
+   * the one the keys are wired to.
+   */
+  setActive(instance) {
+    if (!instance) return null;
+    // Drop any input the outgoing vehicle was holding, or it drives off on its
+    // own the moment the player takes the keys elsewhere.
+    if (this.active && this.active !== instance) {
+      this.active.setDriveInput(0, 0);
+      this.active.target = null;
+    }
     this.active = instance;
     return instance;
   }

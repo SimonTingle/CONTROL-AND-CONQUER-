@@ -3,6 +3,7 @@ import { Heightmap } from '../terrain/heightmap.js';
 import { TerrainMesh } from '../terrain/terrainMesh.js';
 import { Water } from '../terrain/water.js';
 import { Atmosphere } from '../sky/atmosphere.js';
+import { FogOfWar } from './fogOfWar.js';
 
 /**
  * Assembles the world and owns the one rule that everything else depends on:
@@ -26,6 +27,13 @@ export class World {
     this.atmosphere = new Atmosphere(this.scene, renderer, {
       mapSize: this.heightmap.params.size,
     });
+
+    // One mask, sampled by both surfaces. The texture object is never replaced
+    // (unlike the heightmap's), so these two assignments are the only ones
+    // ever needed — regeneration rewrites the mask in place.
+    this.fog = new FogOfWar(this.heightmap);
+    this.terrain.uniforms.uFogMask.value = this.fog.texture;
+    this.water.uniforms.uFogMask.value = this.fog.texture;
   }
 
   /**
@@ -37,6 +45,7 @@ export class World {
     this.heightmap.generate(params);
     this.terrain.refresh();
     this.water.updateLevel();
+    this.fog.refresh();
     this.lastGenerateMs = performance.now() - t0;
     return this.lastGenerateMs;
   }

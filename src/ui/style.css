@@ -332,6 +332,183 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
   text-align: left;
 }
 
+/* ---- locked vehicle cards ---- */
+
+.vehicle-card.locked {
+  cursor: default;
+  opacity: 0.45;
+  filter: grayscale(0.7);
+}
+
+/* Hover feedback would imply it can be clicked. */
+.vehicle-card.locked:hover {
+  border-color: var(--panel-border);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.vehicle-card-lock {
+  padding: 0 10px 8px;
+  font-size: 10px;
+  color: var(--accent);
+  text-align: left;
+}
+
+/* ---- HUD ---- */
+
+#hud {
+  position: fixed;
+  bottom: 16px;
+  left: 16px;
+  z-index: 15;
+  width: 260px;
+  padding: 12px 14px;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(14px);
+  pointer-events: none;
+}
+
+#hud.hidden { display: none; }
+
+.hud-name {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.hud-health {
+  position: relative;
+  height: 10px;
+  margin: 8px 0 4px;
+  border: 1px solid var(--panel-border);
+  border-radius: 3px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+/* Dotted rather than solid: repeating hard-stop gradient makes the bar read as
+   discrete cells, so a partial bar is countable at a glance. */
+.hud-health-fill {
+  height: 100%;
+  background: repeating-linear-gradient(
+    90deg,
+    #46e08a 0 5px,
+    transparent 5px 8px
+  );
+  transition: width 0.25s ease;
+}
+
+.hud-line {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.hud-line-done { color: var(--accent); }
+
+.hud-discovery {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.hud-discovery.hidden { display: none; }
+
+.hud-discovery-value {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+/* ---- difficulty select ---- */
+
+#difficulty {
+  position: fixed;
+  inset: 0;
+  z-index: 31; /* above the loading screen, which fades out behind it */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(5, 8, 12, 0.94);
+  backdrop-filter: blur(6px);
+  transition: opacity 0.35s ease;
+}
+
+#difficulty.hidden { opacity: 0; pointer-events: none; }
+
+.difficulty-panel {
+  width: 100%;
+  max-width: 720px;
+  text-align: center;
+}
+
+.difficulty-panel h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.difficulty-panel .hint {
+  margin: 10px auto 24px;
+  max-width: 460px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.difficulty-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.difficulty-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 18px 14px;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.difficulty-card:hover {
+  border-color: var(--accent);
+  background: rgba(79, 209, 197, 0.08);
+}
+
+.difficulty-card-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.difficulty-card-target {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+.difficulty-card-blurb {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+@media (max-width: 620px) {
+  .difficulty-grid { grid-template-columns: 1fr; }
+}
+
 /* ---- loading ---- */
 
 #loading {

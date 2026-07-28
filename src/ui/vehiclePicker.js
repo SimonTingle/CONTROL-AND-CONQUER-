@@ -18,6 +18,10 @@ export class VehiclePicker {
     this.onSelect = onSelect;
     this.open = false;
     this.previews = [];
+    // Entries with no `unlock` requirement are available from the start.
+    this.unlocked = new Set(catalog.filter((d) => !d.unlock).map((d) => d.id));
+    this.cards = new Map();
+    this.lockText = () => 'Locked';
 
     this.toggleButton = document.getElementById('vehicle-toggle');
     this.panel = document.getElementById('vehicle-panel');
@@ -52,15 +56,49 @@ export class VehiclePicker {
       // number typed into the catalog, so it can never drift from the model.
       const stats = document.createElement('span');
       stats.className = 'vehicle-card-stats';
+      // A def with no steered axle has no finite turning circle at all.
+      const circle = turningCircleOf(def);
       stats.textContent =
-        `${def.speed} u/s · turning circle ${turningCircleOf(def).toFixed(1)} u`;
+        `${def.speed} u/s · turning circle ` +
+        (Number.isFinite(circle) ? `${circle.toFixed(1)} u` : 'none');
       card.appendChild(stats);
 
-      card.addEventListener('click', () => this.onSelect?.(def));
+      const lock = document.createElement('span');
+      lock.className = 'vehicle-card-lock';
+      card.appendChild(lock);
+
+      card.addEventListener('click', () => {
+        if (!this.unlocked.has(def.id)) return;
+        this.onSelect?.(def);
+      });
       this.grid.appendChild(card);
+      this.cards.set(def.id, { card, lock, def });
+      this.applyLockState(def.id);
 
       this.previews.push(this.createPreview(def, canvas));
     }
+  }
+
+  /** Unlock (or re-lock) a catalog entry and update its card in place. */
+  setUnlocked(id, unlocked) {
+    if (unlocked === this.unlocked.has(id)) return false;
+    if (unlocked) this.unlocked.add(id);
+    else this.unlocked.delete(id);
+    this.applyLockState(id);
+    return true;
+  }
+
+  applyLockState(id) {
+    const entry = this.cards.get(id);
+    if (!entry) return;
+    const unlocked = this.unlocked.has(id);
+    entry.card.classList.toggle('locked', !unlocked);
+    entry.card.disabled = !unlocked;
+    entry.card.setAttribute(
+      'aria-label',
+      unlocked ? `Select ${entry.def.name}` : `${entry.def.name} — locked`
+    );
+    entry.lock.textContent = unlocked ? '' : this.lockText(entry.def);
   }
 
   createPreview(def, canvas) {
