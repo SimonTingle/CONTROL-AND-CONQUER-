@@ -1,0 +1,27 @@
+# Static Vite/Three.js build, served by nginx. Suitable for CapRover and for a
+# plain Docker Swarm stack deploy of the same image.
+#
+# IMPORTANT: no HEALTHCHECK instruction here. CapRover does its own HTTP
+# readiness probe against the app's configured "Container HTTP Port" — an
+# additional Docker-level HEALTHCHECK has been observed to fight CapRover's
+# deploy-wait logic and cause an infinite Swarm task restart loop (service
+# recreated every few seconds, never reaches "healthy", persistent 502) even
+# though the container itself starts cleanly every time. If you need a health
+# endpoint for a separate non-CapRover Swarm stack, add HEALTHCHECK there, not
+# in this image.
+
+FROM node:20-alpine AS build
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY . .
+RUN npm run build
+
+FROM nginx:1.27-alpine
+COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/dist /usr/share/nginx/html
+
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
