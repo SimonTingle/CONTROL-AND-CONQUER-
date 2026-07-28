@@ -226,13 +226,16 @@ export function buildVehicleMesh(def) {
       trimMat
     );
     barrel.rotation.z = Math.PI / 2;
-    barrel.position.set(
-      dims.hullLength * 0.06 + dims.barrelLength / 2 + dims.turretRadius * 0.5,
-      turret.position.y,
-      0
-    );
+    // Parented to the turret, not the group, so traversing the turret carries
+    // the gun with it — the position is therefore turret-local. The cylinder's
+    // own axis is Y, so `turret.rotation.y` traverses it in place.
+    barrel.position.set(dims.barrelLength / 2 + dims.turretRadius * 0.5, 0, 0);
     barrel.castShadow = true;
-    group.add(barrel);
+    turret.add(barrel);
+
+    // Kept addressable so the controller can aim it; the wheels and lights use
+    // the same userData convention.
+    group.userData.turret = turret;
   }
 
   group.userData.lights = buildLights(group, dims, def.lights, shape);

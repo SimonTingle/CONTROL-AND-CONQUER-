@@ -78,6 +78,15 @@ export function createTerrainUniforms(heightmap) {
     uOverlayMaxSlope: { value: 0.35 },
     uOverlayColor: { value: new THREE.Color('#2fd6a0') },
 
+    // Construction pad. One pad is all Stage 1 can have, so plain uniforms
+    // rather than a mask texture — the terraform's pad registry keeps what a
+    // move to a mask would need.
+    uPadCenter: { value: new THREE.Vector2(0, 0) },
+    uPadRadius: { value: 0 }, // 0 = no pad
+    uPadBlend: { value: 18 },
+    uPadProgress: { value: 0 },
+    uPadColor: { value: new THREE.Color('#7a828a') },
+
     // Fog of war. The mask texture is assigned by World once it owns one.
     uFogMask: { value: null },
     uFogEnabled: { value: 1 },
@@ -199,6 +208,11 @@ export function createTerrainMaterial(heightmap, uniforms = createTerrainUniform
         // uMapSize is declared in VERTEX_COMMON for the vertex stage; the
         // fragment stage is a separate compilation unit and needs its own.
         uniform float uMapSize;
+        uniform vec2 uPadCenter;
+        uniform float uPadRadius;
+        uniform float uPadBlend;
+        uniform float uPadProgress;
+        uniform vec3 uPadColor;
         uniform sampler2D uFogMask;
         uniform float uFogEnabled;
         uniform float uFogDarken;
@@ -256,6 +270,20 @@ export function createTerrainMaterial(heightmap, uniforms = createTerrainUniform
             col = mix(col, uOverlayColor, buildable * (0.18 + 0.35 * (1.0 - grid)));
           }
 
+          // Construction pad: poured surface over the flattened disc. Sits
+          // before the fog block so an unexplored pad is fogged like any other
+          // ground — it is world geometry, not an overlay.
+          if (uPadRadius > 0.0) {
+            float padD = distance(vWorldPos.xz, uPadCenter);
+            float padMask = (1.0 - smoothstep(uPadRadius, uPadRadius + uPadBlend, padD)) * uPadProgress;
+            // Same 8-unit grid idiom as the buildability overlay, so the pad
+            // reads as the same construction language.
+            vec2 pg = abs(fract(vWorldPos.xz / 8.0) - 0.5);
+            float pgrid = 1.0 - smoothstep(0.44, 0.5, max(pg.x, pg.y));
+            vec3 padCol = uPadColor * (0.92 + 0.16 * detail);
+            col = mix(col, mix(padCol * 0.78, padCol, pgrid), padMask * 0.94);
+          }
+
           // Fog of war. Applied to the albedo rather than to the final lit
           // colour, so unexplored ground keeps its normals, shadows and tone
           // mapping and only loses its colour — ridges stay legible, which is
@@ -289,7 +317,7 @@ export function createTerrainMaterial(heightmap, uniforms = createTerrainUniform
   };
 
   // Force a distinct program from any other MeshStandardMaterial in the scene.
-  material.customProgramCacheKey = () => 'terrain-splat-v2';
+  material.customProgramCacheKey = () => 'terrain-splat-v3';
 
   return material;
 }

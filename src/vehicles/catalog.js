@@ -8,9 +8,22 @@ export const VEHICLE_CATALOG = [
     id: 'scout-buggy',
     name: 'Scout Buggy',
     description: 'Fast, light recon vehicle.',
+    role: 'unit',
     // Always available — it is the vehicle that does the unlocking.
     unlock: null,
     maxHealth: 100,
+    // Gun. The range/arc/slew numbers drive the scan sweep today and are the
+    // same ones target acquisition will read once there is anything to shoot.
+    turret: {
+      range: 60, // world units it could engage within
+      fireArc: Math.PI * 1.5, // radians of traverse, centred on vehicle-forward
+      sweepRate: 1.4, // radians/second of the idle scan phase
+      rotationRate: 2.5, // radians/second slew when tracking
+      // Armed is a real trade, not a formality: a third of the speed and a
+      // much lazier steer, so arming somewhere is a commitment.
+      armedSpeedFactor: 0.35,
+      armedSteerFactor: 0.4,
+    },
     // World units of fog it clears. Tuned against the island's actual land area:
     // at 22 u/s a straight run sweeps ~2r per unit travelled, so 55 puts Easy
     // (15%) a bit under a minute of driving away rather than fifteen seconds.
@@ -78,10 +91,24 @@ export const VEHICLE_CATALOG = [
     id: 'base-station',
     name: 'Base Station',
     description: 'Eight-wheeled mobile base. Slow, heavy, hard to turn.',
+    role: 'unit', // becomes a structure by deploying; the pad and its buildings are structures
     // Earned by exploring the island with the scout, not available from the
     // start — see the difficulty thresholds in ui/difficultyScreen.js.
     unlock: 'exploration',
     maxHealth: 400,
+    // Deployment flattens a construction pad. The radius is sized from what has
+    // to fit on it: this hull is 15.6 long, and 40 leaves room for it plus four
+    // to six building footprints with lanes between them.
+    deploy: {
+      padRadius: 40, // fully flat inner disc
+      padBlend: 18, // annulus easing back to untouched terrain
+      duration: 5, // seconds the flatten takes
+      // Greatest height difference across the pad, in world units, that the
+      // site may have. 25 refuses the roughly 16% of land where the earthwork
+      // would be dramatic, without ruling out ordinary rolling ground (whose
+      // spread runs ~15 on this terrain).
+      maxRelief: 25,
+    },
     sightRadius: 30, // it is a base, not a scout
     speed: 9,
     reverseSpeed: 4,

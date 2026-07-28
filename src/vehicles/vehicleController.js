@@ -33,6 +33,12 @@ class VehicleInstance {
     // Nothing damages a vehicle yet; the field exists so the HUD has a real
     // value to read and combat has somewhere to write.
     this.health = def.maxHealth;
+    // 'mobile' | 'armed' | 'deploying' | 'deployed'. Commands drive the
+    // transitions; 'deploying' -> 'deployed' is fired by the terraform when the
+    // pad finishes, so the vehicle never claims to be deployed before the
+    // ground under it actually is.
+    this.mode = 'mobile';
+    this.sweepPhase = 0;
     this.speed = 0; // magnitude, for HUD
     this.forwardSpeed = 0; // signed, negative in reverse
     this.throttle = 0;
@@ -58,8 +64,27 @@ class VehicleInstance {
     return this.turningRadius * 2;
   }
 
+  /**
+   * Mobility multipliers for the current mode. Getters consulted where speed is
+   * used, rather than mutating `def` — the catalog entry is shared by every
+   * instance and must stay the vehicle's spec, not its current condition.
+   */
+  get speedFactor() {
+    return this.mode === 'armed' ? this.def.turret?.armedSpeedFactor ?? 0.35 : 1;
+  }
+
+  get steerFactor() {
+    return this.mode === 'armed' ? this.def.turret?.armedSteerFactor ?? 0.4 : 1;
+  }
+
+  /** Deployed or deploying: the vehicle is committed to a spot and cannot drive. */
+  get immobile() {
+    return this.mode === 'deploying' || this.mode === 'deployed';
+  }
+
   /** Order a move. Silently refused if the point is underwater. */
   setTarget(x, z, heightmap) {
+    if (this.immobile) return false;
     if (heightmap.heightAt(x, z) <= heightmap.seaLevelY) return false;
     this.target = new THREE.Vector2(x, z);
     this.blocked = false;
@@ -84,6 +109,14 @@ class VehicleInstance {
    * grabbing the keys takes over rather than fighting an outstanding move.
    */
   setDriveInput(throttle, steer) {
+    // Refused at the input rather than in update(): with nothing held and no
+    // target, update() already falls through to coast(), so immobility needs no
+    // branch of its own.
+    if (this.immobile) {
+      this.throttle = 0;
+      this.steer = 0;
+      return;
+    }
     this.throttle = throttle;
     this.steer = steer;
     if (throttle !== 0 || steer !== 0) this.target = null;
@@ -136,7 +169,7 @@ class VehicleInstance {
   applySteering(dt, targetAngle) {
     const maxAngle = this.def.maxSteerAngle;
     const clamped = THREE.MathUtils.clamp(targetAngle, -maxAngle, maxAngle);
-    const step = this.def.steerRate * dt;
+    const step = this.def.steerRate * this.steerFactor * dt;
     this.steerAngle += THREE.MathUtils.clamp(clamped - this.steerAngle, -step, step);
 
     if (this.steerAngle !== 0 && this.forwardSpeed !== 0) {
@@ -174,7 +207,10 @@ class VehicleInstance {
       this.accelerating = true;
       this.blocked = !climbable;
       if (climbable) {
-        this.forwardSpeed = Math.min(this.forwardSpeed + def.acceleration * dt, def.speed * factor);
+        this.forwardSpeed = Math.min(
+          this.forwardSpeed + def.acceleration * dt,
+          def.speed * factor * this.speedFactor
+        );
       } else {
         // Too steep: the slope stops it dead rather than letting it crawl up.
         this.forwardSpeed = Math.min(this.forwardSpeed, 0);
@@ -186,7 +222,10 @@ class VehicleInstance {
       this.forwardSpeed =
         this.forwardSpeed > 0.1
           ? Math.max(this.forwardSpeed - def.braking * dt, 0)
-          : Math.max(this.forwardSpeed - def.acceleration * dt, -def.reverseSpeed * factor);
+          : Math.max(
+              this.forwardSpeed - def.acceleration * dt,
+              -def.reverseSpeed * factor * this.speedFactor
+            );
     } else {
       this.accelerating = false;
       this.applyRollingResistance(dt);
@@ -223,7 +262,10 @@ class VehicleInstance {
 
     // Ease off while still turning sharply, and while closing on the target.
     const alignment = Math.max(0, Math.cos(delta));
-    this.forwardSpeed = this.def.speed * alignment * Math.min(1, dist / 6) * factor;
+    // driveToTarget assigns speed outright rather than through the acceleration
+    // cap, so the armed factor has to be applied here too.
+    this.forwardSpeed =
+      this.def.speed * this.speedFactor * alignment * Math.min(1, dist / 6) * factor;
 
     // Steer toward the target through the same geometry the player drives
     // through, so a click order obeys the vehicle's turning circle too.
@@ -269,6 +311,29 @@ class VehicleInstance {
    * Lamps. Headlights follow the sun; tail lights read the drivetrain.
    * @param {boolean} headlightsOn
    */
+  /**
+   * Traverse the turret.
+   *
+   * Armed, it ping-pongs across the fire arc rather than spinning continuously:
+   * a sweep reads as *scanning* where a full rotation reads as broken, it never
+   * has to wrap an angle, and it exercises the same `fireArc` the targeting
+   * model will clamp against once there is something to acquire.
+   */
+  updateTurret(dt) {
+    const turret = this.group.userData.turret;
+    if (!turret) return;
+
+    if (this.mode === 'armed') {
+      this.sweepPhase += dt * this.def.turret.sweepRate;
+      turret.rotation.y = Math.sin(this.sweepPhase) * (this.def.turret.fireArc / 2);
+    } else if (turret.rotation.y !== 0) {
+      // Stow forward when disarmed, rather than freezing mid-sweep.
+      turret.rotation.y = THREE.MathUtils.damp(turret.rotation.y, 0, 6, dt);
+      if (Math.abs(turret.rotation.y) < 1e-3) turret.rotation.y = 0;
+      this.sweepPhase = 0;
+    }
+  }
+
   updateLights(headlightsOn) {
     const lights = this.group.userData.lights;
     if (!lights) return;
@@ -406,6 +471,8 @@ export class VehicleController {
   spawn(def, spawnPoint, facing = 0) {
     const instance = new VehicleInstance(def, spawnPoint, facing);
     this.instances.push(instance);
+    // So a raycast hit on any part of the mesh can walk up to its instance.
+    instance.group.userData.vehicleInstance = instance;
     this.scene.add(instance.group);
     // Through setActive, so a vehicle left with the throttle held does not
     // drive off on its own the moment the player spawns another one.
@@ -451,6 +518,7 @@ export class VehicleController {
   update(dt, heightmap, headlightsOn = false) {
     for (const instance of this.instances) {
       instance.update(dt, heightmap);
+      instance.updateTurret(dt);
       instance.updateLights(headlightsOn);
     }
   }

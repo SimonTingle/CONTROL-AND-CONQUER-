@@ -8,8 +8,11 @@ import { buildSchema } from './ui/controlSchema.js';
 import { VehiclePicker } from './ui/vehiclePicker.js';
 import { DifficultyScreen, DIFFICULTIES } from './ui/difficultyScreen.js';
 import { Hud } from './ui/hud.js';
+import { RadialMenu } from './ui/radialMenu.js';
 import { VehicleController } from './vehicles/vehicleController.js';
 import { VEHICLE_CATALOG } from './vehicles/catalog.js';
+import { commandsFor } from './vehicles/commands.js';
+import { Terraform } from './core/terraform.js';
 
 const canvas = document.getElementById('viewport');
 
@@ -69,6 +72,8 @@ function updateMarker(elapsed) {
 
 const vehicles = new VehicleController(world.scene);
 
+const terraform = new Terraform(world);
+
 const chase = new ChaseCamera(camera, heightmap);
 
 /** True when the camera is locked to a vehicle rather than free-flying. */
@@ -96,6 +101,9 @@ canvas.addEventListener('pointerdown', (e) => {
   dragButton = e.button;
   lastX = e.clientX;
   lastY = e.clientY;
+  // Any press on the world dismisses an open command menu. The menu's own
+  // buttons live outside the canvas, so their clicks never reach here.
+  radialMenu.close();
 });
 
 canvas.addEventListener('pointermove', (e) => {
@@ -129,6 +137,59 @@ canvas.addEventListener('pointerup', (e) => {
 
 // Right-drag pans, so the browser menu has to stay out of the way.
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// ---- double-click a vehicle: open its command menu ----
+
+const _pickRay = new THREE.Raycaster();
+const _pickNdc = new THREE.Vector2();
+
+/**
+ * Which vehicle is under this screen point, if any.
+ *
+ * A real raycast against the meshes rather than a radius test around the
+ * origin: the base station is 15.6 x 3.4, nowhere near round enough for a
+ * sphere to feel honest. The fleet is a handful of vehicles, so the cost is
+ * irrelevant.
+ */
+function pickVehicle(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  _pickNdc.set(
+    ((clientX - rect.left) / rect.width) * 2 - 1,
+    -((clientY - rect.top) / rect.height) * 2 + 1
+  );
+  _pickRay.setFromCamera(_pickNdc, camera);
+
+  const hits = _pickRay.intersectObjects(
+    vehicles.instances.map((i) => i.group),
+    true
+  );
+  if (!hits.length) return null;
+
+  let node = hits[0].object;
+  while (node && !node.userData.vehicleInstance) node = node.parent;
+  return node?.userData.vehicleInstance ?? null;
+}
+
+// Mobile browsers synthesise dblclick from a double-tap, so one listener covers
+// both pointer types.
+canvas.addEventListener('dblclick', (e) => {
+  // A double-click that ended a drag is really an orbit; the flag is set by the
+  // first pixel of movement, so this is a strict test.
+  if (dragged) return;
+
+  const instance = pickVehicle(e.clientX, e.clientY);
+  if (!instance) return;
+
+  // On touch, the first tap of the double-tap already issued a move order
+  // through pointerup. Double-tapping a vehicle means "command this one", not
+  // "drive it to the ground behind it" — so take that order back.
+  if (input.tapToMove) {
+    instance.arrive();
+    marker.visible = false;
+  }
+
+  radialMenu.openFor(instance, commandsFor(instance, commandContext));
+});
 
 // MapControls owns the wheel when it is enabled, so this only has to cover the
 // chase case — otherwise both would zoom at once.
@@ -192,6 +253,10 @@ const view = {
     world.regenerate(params);
     // The marker is anchored to terrain that no longer exists.
     marker.visible = false;
+    // So are any pads: regenerate swaps in a fresh heightfield array, which
+    // orphans the flattening the old one was carrying.
+    terraform.clear();
+    radialMenu.close();
   },
   setChase(enabled) {
     chase.enabled = enabled;
@@ -220,6 +285,15 @@ const game = {
 };
 
 const hud = new Hud();
+
+const radialMenu = new RadialMenu(camera, {
+  onCommand(cmd, instance) {
+    cmd.execute?.(instance, commandContext);
+  },
+});
+
+/** Everything a command might need, so commands.js imports no game systems. */
+const commandContext = { vehicles, world, heightmap, terraform, game };
 
 const vehiclePicker = new VehiclePicker(VEHICLE_CATALOG, {
   onSelect(def) {
@@ -312,6 +386,11 @@ function animate() {
     controls.update();
   }
 
+  // After the camera has settled, so the menu projects against this frame's
+  // view rather than lagging it by one.
+  terraform.update(dt);
+  radialMenu.update();
+
   updateMarker(clock.elapsedTime);
   vehiclePicker.update(dt);
   renderer.render(world.scene, camera);
@@ -390,5 +469,5 @@ window.__probe = (count = 100) => {
 
 Object.assign(window, {
   world, camera, renderer, controls, chase, THREE, vehicles, vehiclePicker, input, lighting, driveKeys,
-  game, hud,
+  game, hud, terraform, radialMenu, commandsFor, commandContext,
 });

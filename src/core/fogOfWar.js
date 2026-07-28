@@ -172,6 +172,38 @@ export class FogOfWar {
     this._syncSeaLevel();
   }
 
+  /**
+   * Terrain changed shape in one spot — re-derive the cached heights there.
+   *
+   * `refresh()` would also do this, but it wipes the revealed mask, which is
+   * unacceptable for an edit made mid-game. Re-sampling only the affected cells
+   * and then rescanning keeps everything the player has explored while healing
+   * the land/water classification the counts are built on.
+   */
+  patchTerrain(x, z, radius) {
+    const res = this.res;
+    const size = this.mapSize;
+    const toCell = (w) => ((w / size + 0.5) * res - 0.5);
+
+    const i0 = Math.max(0, Math.floor(toCell(x - radius)));
+    const i1 = Math.min(res - 1, Math.ceil(toCell(x + radius)));
+    const j0 = Math.max(0, Math.floor(toCell(z - radius)));
+    const j1 = Math.min(res - 1, Math.ceil(toCell(z + radius)));
+
+    for (let j = j0; j <= j1; j++) {
+      const wz = ((j + 0.5) / res - 0.5) * size;
+      const row = j * res;
+      for (let i = i0; i <= i1; i++) {
+        const wx = ((i + 0.5) / res - 0.5) * size;
+        this.cellH[row + i] = this.heightmap.sampleNormalized(wx, wz);
+      }
+    }
+
+    // Both counts come out of one pass, so they cannot disagree — the same
+    // reason _syncSeaLevel rescans rather than adjusting a single total.
+    this._rescan();
+  }
+
   /** Clear the mask, keeping the sampled terrain heights. */
   reset() {
     this.data.fill(0);
