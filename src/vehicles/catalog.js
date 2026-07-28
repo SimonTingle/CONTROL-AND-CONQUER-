@@ -13,7 +13,11 @@ export const VEHICLE_CATALOG = [
     acceleration: 16, // units/s² under power
     braking: 34, // units/s² on the brakes
     rollingResistance: 7, // units/s² coasting with no input
-    turnSpeed: 3.2, // radians / second at full steering authority
+    // Steering is geometric, not a flat yaw rate: the turning circle falls out
+    // of wheelbase and lock angle, so a long truck and a short buggy corner
+    // differently without either being hand-tuned.
+    maxSteerAngle: 0.62, // radians at full lock (~36°)
+    steerRate: 3.0, // radians/second the front wheels swing toward lock
     // Steepest grade (rise/run) it can climb. 0.8 ≈ 39°; anything steeper is
     // impassable and the vehicle abandons the order rather than grinding.
     maxClimbGrade: 0.8,

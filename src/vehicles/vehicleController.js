@@ -3,6 +3,7 @@ import { buildVehicleMesh } from './vehicleFactory.js';
 
 const ARRIVE_DISTANCE = 1.5;
 const BRAKE_SPEED = 0.1; // at or below this the vehicle counts as stopped
+const STEER_GAIN = 1.8; // how hard a click order leans on the steering
 const GRADE_PROBE = 2.5; // world units to look ahead when measuring the climb
 const MIN_CLIMB_FACTOR = 0.15; // a near-limit climb is a crawl, not a stop
 const _up = new THREE.Vector3(0, 1, 0);
@@ -27,9 +28,24 @@ class VehicleInstance {
     this.throttle = 0;
     this.steer = 0;
     this.accelerating = false;
+    this.steerAngle = 0; // current front-wheel angle, radians
     this.grade = 0;
     this.blocked = false;
     this.headlightsOn = false;
+  }
+
+  /**
+   * Radius of the tightest circle this vehicle can drive, from its steering
+   * geometry. A long wheelbase or a modest lock angle means a wide circle —
+   * this is what makes each vehicle handle distinctly.
+   */
+  get turningRadius() {
+    return this.group.userData.wheelbase / Math.tan(this.def.maxSteerAngle);
+  }
+
+  /** Kerb-to-kerb diameter, the number people actually quote. */
+  get turningCircle() {
+    return this.turningRadius * 2;
   }
 
   /** Order a move. Silently refused if the point is underwater. */
@@ -97,6 +113,31 @@ class VehicleInstance {
     this.settleOnGround(heightmap);
   }
 
+  /**
+   * Ease the front wheels toward a target angle, then yaw the body by what
+   * that steering geometry actually produces.
+   *
+   * This is the bicycle model: a vehicle with wheelbase L at steer angle δ
+   * travelling at speed v rotates at v·tan(δ)/L, tracing a circle of radius
+   * L/tan(δ). Two things fall out for free that a flat yaw rate has to fake —
+   * it cannot turn while stationary, and reversing swings the tail the other
+   * way, because both follow from v's magnitude and sign.
+   */
+  applySteering(dt, targetAngle) {
+    const maxAngle = this.def.maxSteerAngle;
+    const clamped = THREE.MathUtils.clamp(targetAngle, -maxAngle, maxAngle);
+    const step = this.def.steerRate * dt;
+    this.steerAngle += THREE.MathUtils.clamp(clamped - this.steerAngle, -step, step);
+
+    if (this.steerAngle !== 0 && this.forwardSpeed !== 0) {
+      const wheelbase = this.group.userData.wheelbase;
+      this.heading += (this.forwardSpeed / wheelbase) * Math.tan(this.steerAngle) * dt;
+    }
+
+    // Point the front wheels where they are actually steering.
+    for (const wheel of this.group.userData.steeredWheels) wheel.rotation.y = -this.steerAngle;
+  }
+
   /** Advance along the current heading and keep `speed` reporting magnitude. */
   advance(dt) {
     const pos = this.group.position;
@@ -109,13 +150,9 @@ class VehicleInstance {
     const def = this.def;
     const { factor, climbable } = this.readGrade(heightmap);
 
-    // Steering authority builds with speed — the vehicle cannot pivot on the
-    // spot — and flips in reverse so backing up steers like a real car.
-    if (this.steer !== 0) {
-      const authority = Math.min(1, Math.abs(this.forwardSpeed) / 4);
-      const direction = this.forwardSpeed < 0 ? -1 : 1;
-      this.heading += this.steer * def.turnSpeed * authority * direction * dt;
-    }
+    // Front wheels swing toward lock at a finite rate, so the steering has
+    // weight instead of snapping to full lock the instant a key goes down.
+    this.applySteering(dt, this.steer * def.maxSteerAngle);
 
     if (this.throttle > 0) {
       this.accelerating = true;
@@ -157,8 +194,6 @@ class VehicleInstance {
     const desiredHeading = Math.atan2(dz, dx);
     let delta = desiredHeading - this.heading;
     delta = Math.atan2(Math.sin(delta), Math.cos(delta)); // shortest turn
-    const maxTurn = this.def.turnSpeed * dt;
-    this.heading += THREE.MathUtils.clamp(delta, -maxTurn, maxTurn);
 
     const { factor, climbable } = this.readGrade(heightmap);
     if (!climbable) {
@@ -173,6 +208,10 @@ class VehicleInstance {
     // Ease off while still turning sharply, and while closing on the target.
     const alignment = Math.max(0, Math.cos(delta));
     this.forwardSpeed = this.def.speed * alignment * Math.min(1, dist / 6) * factor;
+
+    // Steer toward the target through the same geometry the player drives
+    // through, so a click order obeys the vehicle's turning circle too.
+    this.applySteering(dt, delta * STEER_GAIN);
     this.advance(dt);
   }
 
@@ -182,6 +221,9 @@ class VehicleInstance {
     if (Math.abs(this.forwardSpeed) > 0.001) {
       this.readGrade(heightmap);
       this.applyRollingResistance(dt);
+      // Hands off the wheel: the steering self-centres, and the vehicle keeps
+      // arcing while it does, the way a rolling car does.
+      this.applySteering(dt, 0);
       this.advance(dt);
     } else {
       this.forwardSpeed = 0;

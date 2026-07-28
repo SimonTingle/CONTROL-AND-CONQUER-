@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { buildVehicleMesh } from '../vehicles/vehicleFactory.js';
+import { buildVehicleMesh, turningCircleOf } from '../vehicles/vehicleFactory.js';
 
 const SPIN_SPEED = 0.5; // radians / second
 
@@ -47,6 +47,14 @@ export class VehiclePicker {
       label.className = 'vehicle-card-label';
       label.textContent = def.name;
       card.appendChild(label);
+
+      // Turning circle comes from the built mesh's real wheelbase, not a
+      // number typed into the catalog, so it can never drift from the model.
+      const stats = document.createElement('span');
+      stats.className = 'vehicle-card-stats';
+      stats.textContent =
+        `${def.speed} u/s · turning circle ${turningCircleOf(def).toFixed(1)} u`;
+      card.appendChild(stats);
 
       card.addEventListener('click', () => this.onSelect?.(def));
       this.grid.appendChild(card);

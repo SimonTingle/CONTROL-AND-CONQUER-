@@ -1,6 +1,24 @@
 import * as THREE from 'three';
 
 /**
+ * Where the axles sit for a given hull. Shared so anything that needs the
+ * wheelbase — the driving model, the UI's turning-circle figure — agrees with
+ * the mesh that actually gets built, without having to build one.
+ */
+export function axleGeometry(dims) {
+  return {
+    axleX: dims.hullLength / 2 - dims.wheelRadius * 1.1,
+    axleZ: dims.hullWidth / 2 + dims.wheelWidth * 0.15,
+  };
+}
+
+/** Kerb-to-kerb turning circle implied by a vehicle's steering geometry. */
+export function turningCircleOf(def) {
+  const wheelbase = axleGeometry(def.dims).axleX * 2;
+  return (wheelbase / Math.tan(def.maxSteerAngle)) * 2;
+}
+
+/**
  * Builds a vehicle from primitive geometry — box hull, cylinder wheels, a
  * turret + barrel — the same "no imported assets" philosophy as the terrain.
  * Every dimension and colour comes from `def`, so this one function serves
@@ -52,14 +70,18 @@ export function buildVehicleMesh(def) {
 
   // Wheels: four cylinders, axles along X so the cylinder's own axis (Y) has
   // to be rotated 90° onto Z to sit like a wheel.
+  // The axle tilt is baked into the geometry, which leaves each wheel's own
+  // rotation.y free for steering — setting both as Euler angles on the mesh
+  // would make the steer angle depend on rotation order and skew the wheel.
   const wheelGeo = new THREE.CylinderGeometry(dims.wheelRadius, dims.wheelRadius, dims.wheelWidth, 16);
-  const axleX = dims.hullLength / 2 - dims.wheelRadius * 1.1;
-  const axleZ = dims.hullWidth / 2 + dims.wheelWidth * 0.15;
+  wheelGeo.rotateX(Math.PI / 2);
+
+  const { axleX, axleZ } = axleGeometry(dims);
   const contacts = [];
+  const steeredWheels = [];
   for (const sx of [-1, 1]) {
     for (const sz of [-1, 1]) {
       const wheel = new THREE.Mesh(wheelGeo, wheelMat);
-      wheel.rotation.x = Math.PI / 2;
       // Wheel centre sits one radius up, so the tyre bottoms out at local y = 0
       // — the group origin IS the ground contact plane.
       wheel.position.set(sx * axleX, dims.wheelRadius, sz * axleZ);
@@ -67,6 +89,7 @@ export function buildVehicleMesh(def) {
       wheel.receiveShadow = true;
       group.add(wheel);
       contacts.push({ x: sx * axleX, z: sz * axleZ, mesh: wheel, baseY: dims.wheelRadius });
+      if (sx > 0) steeredWheels.push(wheel); // +X is the front axle
     }
   }
 
@@ -99,6 +122,7 @@ export function buildVehicleMesh(def) {
   // sit the vehicle on the ground plane they define, rather than guessing from
   // a single point under the chassis.
   group.userData.wheelContacts = contacts;
+  group.userData.steeredWheels = steeredWheels;
   group.userData.wheelbase = axleX * 2;
   group.userData.track = axleZ * 2;
   // How far a wheel may move in its arch to reach ground the rigid body plane
