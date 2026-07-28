@@ -112,3 +112,42 @@ export function findEdgeSpawnPoint(heightmap, camera, target = new THREE.Vector3
   // Degenerate fallback (e.g. a fully-flooded map): spawn at the centre.
   return { point: target.set(0, heightmap.heightAt(0, 0), 0), heading: 0 };
 }
+
+/**
+ * Finds a dry-land spawn point near an existing vehicle, so a newly unlocked
+ * vehicle arrives beside the one that unlocked it rather than at the map edge
+ * — and, incidentally, on ground the fog of war has already revealed, since
+ * `maxRadius` is expected to stay inside the discovering vehicle's sight
+ * radius.
+ *
+ * Searches a ring around `origin`: increasing radius steps from `minRadius`
+ * to `maxRadius`, a spread of angles at each radius. Falls back to
+ * `findEdgeSpawnPoint` if nothing in the ring is land — the origin vehicle
+ * pinned against a cliff or a sliver island is the only realistic case.
+ */
+export function findSpawnPointNear(
+  heightmap,
+  origin,
+  { minRadius, maxRadius, camera, target = new THREE.Vector3() }
+) {
+  const radiusStep = Math.max(2, (maxRadius - minRadius) / 6);
+  const angleCount = 12;
+
+  for (let r = minRadius; r <= maxRadius; r += radiusStep) {
+    for (let i = 0; i < angleCount; i++) {
+      // Offset the angle sweep per ring so successive radii don't all sample
+      // the same compass points and miss a valid gap between them.
+      const angle = (i / angleCount) * Math.PI * 2 + r * 0.618;
+      const x = origin.x + Math.cos(angle) * r;
+      const z = origin.z + Math.sin(angle) * r;
+      if (heightmap.heightAt(x, z) > heightmap.seaLevelY) {
+        return {
+          point: target.set(x, heightmap.heightAt(x, z), z),
+          heading: Math.atan2(-Math.sin(angle), -Math.cos(angle)),
+        };
+      }
+    }
+  }
+
+  return findEdgeSpawnPoint(heightmap, camera, target);
+}
