@@ -320,6 +320,33 @@ function buildLights(group, dims, cfg, shape = {}) {
   const reverseZ = lampZ * 0.42; // inboard of the tail lights
   const spots = [];
   const reverseSpots = [];
+  const tailSpots = [];
+
+  // Brake glow. One lamp on the centreline whatever the lens style: this is a
+  // soft, short pool rather than a beam, so a second light would double the
+  // per-frame lighting cost for something nobody could see.
+  {
+    const tailSpot = new THREE.SpotLight(
+      new THREE.Color(cfg.tailColor),
+      0, // switched by the controller
+      cfg.tailBeamDistance,
+      cfg.tailBeamAngle,
+      0.9, // very soft edge — a wash, not a cone
+      1.4 // falls off fast so it stays a pool right behind the vehicle
+    );
+    tailSpot.castShadow = false;
+    tailSpot.position.set(tailX, lampY, 0);
+
+    // Aimed back and steeply down, so the red lands on the ground close behind
+    // rather than reaching out like a driving beam.
+    const tailAim = new THREE.Object3D();
+    tailAim.position.set(tailX - cfg.tailBeamDistance * 0.35, lampY - cfg.tailBeamDistance * 0.5, 0);
+    group.add(tailAim);
+    tailSpot.target = tailAim;
+
+    group.add(tailSpot);
+    tailSpots.push(tailSpot);
+  }
 
   // Reversing lamps: one round lamp on the centreline for a bar rig, a pair
   // inboard of the tail lights otherwise.
@@ -416,5 +443,5 @@ function buildLights(group, dims, cfg, shape = {}) {
     spots.push(spot);
   }
 
-  return { headlampMaterial, tailMaterial, reverseMaterial, spots, reverseSpots, config: cfg };
+  return { headlampMaterial, tailMaterial, reverseMaterial, spots, reverseSpots, tailSpots, config: cfg };
 }

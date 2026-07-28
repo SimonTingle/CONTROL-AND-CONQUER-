@@ -38,6 +38,11 @@ export const VEHICLE_CATALOG = [
       beamIntensity: 900, // physical units — r169 lights are candela-like
       beamColor: '#fff2d6',
       tailColor: '#ff2b18',
+      // Faint red wash on the ground behind — a glow, not a beam, so it is
+      // much weaker and much shorter-range than anything else on the vehicle.
+      tailBeamIntensity: 130,
+      tailBeamDistance: 22,
+      tailBeamAngle: 0.85,
       reverseColor: '#f4f8ff',
       // Reversing lamps throw a shorter, wider pool than the headlights —
       // enough to see what you are backing into, not a driving beam.
@@ -112,6 +117,10 @@ export const VEHICLE_CATALOG = [
       beamIntensity: 1100,
       beamColor: '#f6fbff',
       tailColor: '#ff2b18',
+      // Wider and a touch stronger than the scout's: it is a wider vehicle.
+      tailBeamIntensity: 190,
+      tailBeamDistance: 30,
+      tailBeamAngle: 0.95,
       reverseColor: '#f4f8ff',
       reverseBeamIntensity: 420,
       reverseBeamDistance: 60,

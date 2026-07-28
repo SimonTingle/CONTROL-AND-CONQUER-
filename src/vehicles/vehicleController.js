@@ -283,6 +283,14 @@ class VehicleInstance {
     const running = headlightsOn ? 0.55 : 0;
     lights.tailMaterial.emissiveIntensity = this.braking ? 3.0 : running;
 
+    // The lamps also throw a faint red wash on the ground behind. Like the
+    // reversing beam it only lights up once the headlights are on: a red patch
+    // on sunlit grass reads as a rendering fault rather than a brake light.
+    const tailGlow = headlightsOn ? (this.braking ? 1 : 0.3) : 0;
+    for (const spot of lights.tailSpots) {
+      spot.intensity = lights.config.tailBeamIntensity * tailGlow;
+    }
+
     // Reversing lamps are wired to the gearbox, so the lenses glow whenever the
     // vehicle is actually rolling backwards — day or night, like a real car.
     // The beam itself only lights up after dark, or it would wash a bright
