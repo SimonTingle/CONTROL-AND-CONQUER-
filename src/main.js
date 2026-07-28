@@ -67,42 +67,6 @@ function updateMarker(elapsed) {
 
 const vehicles = new VehicleController(world.scene);
 
-const hit = new THREE.Vector3();
-let dragged = false;
-canvas.addEventListener('pointerdown', () => (dragged = false));
-canvas.addEventListener('pointermove', (e) => {
-  if (e.buttons !== 0) dragged = true;
-});
-canvas.addEventListener('pointerup', (e) => {
-  if (dragged || e.button !== 0) return;
-  const point = pickTerrain(e.clientX, e.clientY, canvas, camera, heightmap, hit);
-  if (!point) {
-    marker.visible = false;
-    return;
-  }
-
-  // The ball marks an accepted move order, so a refused one (water, or no
-  // vehicle spawned yet) leaves nothing behind to chase.
-  if (vehicles.commandActive(point.x, point.z, heightmap)) showMarker(point);
-  else marker.visible = false;
-});
-
-// WASD camera panning, additive to MapControls' drag-pan/orbit/zoom.
-const panKeys = { w: false, a: false, s: false, d: false };
-addEventListener('keydown', (e) => {
-  const k = e.key.toLowerCase();
-  if (k in panKeys && !isTextInputFocused()) panKeys[k] = true;
-});
-addEventListener('keyup', (e) => {
-  const k = e.key.toLowerCase();
-  if (k in panKeys) panKeys[k] = false;
-});
-
-function isTextInputFocused() {
-  const el = document.activeElement;
-  return el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA');
-}
-
 const chase = new ChaseCamera(camera, heightmap);
 
 /** True when the camera is locked to a vehicle rather than free-flying. */
@@ -110,19 +74,59 @@ function isChasing() {
   return chase.enabled && vehicles.active;
 }
 
-const ORBIT_SPEED = 1.6; // radians / second
-const DOLLY_SPEED = 40; // world units / second
-const MIN_CHASE_DISTANCE = 8;
-const MAX_CHASE_DISTANCE = 140;
+// Tap-to-move is a touch affordance: on desktop the vehicle is driven, so a
+// stray click should not send it somewhere. Mutable so it can be forced on for
+// testing the mobile path from a desktop browser.
+const input = {
+  tapToMove: matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0,
+};
 
-/** While chasing, the pan keys swing and dolly the camera around the vehicle. */
-function applyChaseKeys(dt) {
-  if (panKeys.a) chase.azimuthOffset += ORBIT_SPEED * dt;
-  if (panKeys.d) chase.azimuthOffset -= ORBIT_SPEED * dt;
-  if (panKeys.w) chase.distance -= DOLLY_SPEED * dt;
-  if (panKeys.s) chase.distance += DOLLY_SPEED * dt;
-  chase.distance = THREE.MathUtils.clamp(chase.distance, MIN_CHASE_DISTANCE, MAX_CHASE_DISTANCE);
-}
+// ---- mouse: move / pan / zoom the camera ----
+
+const hit = new THREE.Vector3();
+let dragged = false;
+let dragButton = -1;
+let lastX = 0;
+let lastY = 0;
+
+canvas.addEventListener('pointerdown', (e) => {
+  dragged = false;
+  dragButton = e.button;
+  lastX = e.clientX;
+  lastY = e.clientY;
+});
+
+canvas.addEventListener('pointermove', (e) => {
+  if (e.buttons === 0) return;
+  const dx = e.clientX - lastX;
+  const dy = e.clientY - lastY;
+  lastX = e.clientX;
+  lastY = e.clientY;
+  if (dx !== 0 || dy !== 0) dragged = true;
+
+  // MapControls handles the drag itself whenever the camera is free.
+  if (!isChasing()) return;
+  if (dragButton === 2) chase.pan(dx, dy);
+  else chase.orbit(dx, dy);
+});
+
+canvas.addEventListener('pointerup', (e) => {
+  dragButton = -1;
+  if (!input.tapToMove || dragged || e.button !== 0) return;
+
+  const point = pickTerrain(e.clientX, e.clientY, canvas, camera, heightmap, hit);
+  if (!point) {
+    marker.visible = false;
+    return;
+  }
+  // The ball marks an accepted move order, so a refused one (water, or no
+  // vehicle spawned yet) leaves nothing behind to chase.
+  if (vehicles.commandActive(point.x, point.z, heightmap)) showMarker(point);
+  else marker.visible = false;
+});
+
+// Right-drag pans, so the browser menu has to stay out of the way.
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
 // MapControls owns the wheel when it is enabled, so this only has to cover the
 // chase case — otherwise both would zoom at once.
@@ -131,42 +135,55 @@ canvas.addEventListener(
   (e) => {
     if (!isChasing()) return;
     e.preventDefault();
-    chase.distance = THREE.MathUtils.clamp(
-      chase.distance + Math.sign(e.deltaY) * 3,
-      MIN_CHASE_DISTANCE,
-      MAX_CHASE_DISTANCE
-    );
+    chase.zoom(Math.sign(e.deltaY) * 3);
   },
   { passive: false }
 );
 
-const PAN_SPEED = 140; // world units / second
-const _panForward = new THREE.Vector3();
-const _panRight = new THREE.Vector3();
-function applyKeyboardPan(dt) {
-  if (!panKeys.w && !panKeys.a && !panKeys.s && !panKeys.d) return;
+// ---- keyboard: drive the vehicle ----
 
-  camera.getWorldDirection(_panForward);
-  _panForward.y = 0;
-  _panForward.normalize();
-  _panRight.crossVectors(_panForward, camera.up).normalize();
+const driveKeys = { w: false, a: false, s: false, d: false };
+addEventListener('keydown', (e) => {
+  const k = e.key.toLowerCase();
+  if (k in driveKeys && !isTextInputFocused()) driveKeys[k] = true;
+});
+addEventListener('keyup', (e) => {
+  const k = e.key.toLowerCase();
+  if (k in driveKeys) driveKeys[k] = false;
+});
+// Keys held while the window loses focus would otherwise stick down.
+addEventListener('blur', () => {
+  for (const k in driveKeys) driveKeys[k] = false;
+});
 
-  const move = new THREE.Vector3();
-  if (panKeys.w) move.add(_panForward);
-  if (panKeys.s) move.addScaledVector(_panForward, -1);
-  if (panKeys.d) move.add(_panRight);
-  if (panKeys.a) move.addScaledVector(_panRight, -1);
-  if (move.lengthSq() === 0) return;
+function isTextInputFocused() {
+  const el = document.activeElement;
+  return el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA');
+}
 
-  move.normalize().multiplyScalar(PAN_SPEED * dt);
-  camera.position.add(move);
-  controls.target.add(move);
+function applyDriveInput() {
+  const throttle = (driveKeys.w ? 1 : 0) - (driveKeys.s ? 1 : 0);
+  const steer = (driveKeys.d ? 1 : 0) - (driveKeys.a ? 1 : 0);
+  vehicles.driveActive(throttle, steer);
+}
+
+/**
+ * Lamps follow the sun, so dusk, night and dawn all light up without the
+ * player touching anything. The manual override is for inspecting the beam.
+ */
+const lighting = { forceHeadlights: false };
+function headlightsWanted() {
+  if (lighting.forceHeadlights) return true;
+  const dusk = vehicles.active?.def.lights?.duskElevation ?? 8;
+  return world.atmosphere.params.elevation <= dusk;
 }
 
 // The UI needs a handle that can both regenerate terrain and reach the renderer.
 const view = {
   renderer,
   chase,
+  input,
+  lighting,
   regenerate(params) {
     world.regenerate(params);
     // The marker is anchored to terrain that no longer exists.
@@ -214,17 +231,16 @@ function animate() {
   const dt = Math.min(clock.getDelta(), 0.1);
 
   // Vehicles move first so the camera frames where they actually ended up.
+  applyDriveInput();
   world.update(dt, camera);
-  vehicles.update(dt, heightmap);
+  vehicles.update(dt, heightmap, headlightsWanted());
 
   if (isChasing()) {
     // MapControls would fight the chase rig for the camera transform.
     controls.enabled = false;
-    applyChaseKeys(dt);
     chase.update(dt, vehicles.active);
   } else {
     controls.enabled = true;
-    applyKeyboardPan(dt);
     controls.update();
   }
 
@@ -243,9 +259,10 @@ function animate() {
     if (vehicles.active) {
       const v = vehicles.active;
       const gradePct = (v.grade * 100).toFixed(0);
+      const badges = (v.braking ? ' · BRAKE' : '') + (v.headlightsOn ? ' · lights' : '');
       line3 = v.blocked
-        ? `\nvehicle: blocked — ${gradePct}% grade too steep`
-        : `\nvehicle: ${v.speed.toFixed(1)} u/s · ${gradePct}% grade`;
+        ? `\nvehicle: blocked — ${gradePct}% grade too steep${badges}`
+        : `\nvehicle: ${v.forwardSpeed.toFixed(1)} u/s · ${gradePct}% grade${badges}`;
     }
     menu.setStats(
       `${fps} fps · ${info.calls} draws · ${(info.triangles / 1000).toFixed(0)}k tris\n` +
@@ -292,4 +309,6 @@ window.__probe = (count = 100) => {
   return group;
 };
 
-Object.assign(window, { world, camera, renderer, controls, chase, THREE, vehicles, vehiclePicker });
+Object.assign(window, {
+  world, camera, renderer, controls, chase, THREE, vehicles, vehiclePicker, input, lighting, driveKeys,
+});

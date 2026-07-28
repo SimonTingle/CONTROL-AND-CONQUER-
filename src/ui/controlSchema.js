@@ -113,8 +113,8 @@ export function buildSchema(world, view) {
         toggle('Chase camera', () => view.chase.enabled, (v) => view.setChase(v)),
         slider('Chase distance', 8, 140, 1,
           () => view.chase.distance, (v) => (view.chase.distance = v)),
-        slider('Chase height', 2, 80, 1,
-          () => view.chase.height, (v) => (view.chase.height = v)),
+        slider('Chase angle', 0.06, 1.35, 0.01,
+          () => view.chase.pitch, (v) => (view.chase.pitch = v)),
         slider('Look ahead', 0, 40, 1,
           () => view.chase.lookAhead, (v) => (view.chase.lookAhead = v)),
         slider('Follow lag', 0.5, 12, 0.1,
@@ -124,6 +124,10 @@ export function buildSchema(world, view) {
     {
       title: 'Game / debug',
       controls: [
+        toggle('Headlights (force on)',
+          () => view.lighting.forceHeadlights, (v) => (view.lighting.forceHeadlights = v)),
+        toggle('Tap-to-move (mobile)',
+          () => view.input.tapToMove, (v) => (view.input.tapToMove = v)),
         toggle('Buildable-ground overlay',
           () => tu.uOverlay.value > 0.5, (v) => (tu.uOverlay.value = v ? 1 : 0)),
         slider('Max buildable slope', 0.05, 1, 0.01,

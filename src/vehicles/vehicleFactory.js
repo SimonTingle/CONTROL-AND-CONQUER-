@@ -92,6 +92,8 @@ export function buildVehicleMesh(def) {
   barrel.castShadow = true;
   group.add(barrel);
 
+  group.userData.lights = buildLights(group, dims, def.lights);
+
   // Vehicle "forward" is +X by construction; callers rotate the whole group.
   // The contact offsets let the controller sample terrain under each wheel and
   // sit the vehicle on the ground plane they define, rather than guessing from
@@ -103,4 +105,72 @@ export function buildVehicleMesh(def) {
   // can't touch — real ground is curved, a four-point plane fit is not.
   group.userData.suspensionTravel = dims.wheelRadius * 0.7;
   return group;
+}
+
+/**
+ * Headlamps and tail lights.
+ *
+ * The spotlights and their targets are both parented to the vehicle group, so
+ * the beams swing with the vehicle for free — no per-frame target bookkeeping.
+ * Shadows are deliberately off: beam shadow maps are the expensive part of a
+ * spotlight and buy almost nothing on open terrain.
+ *
+ * Everything is returned rather than hidden, so the controller can switch the
+ * lamps without knowing how the rig was assembled.
+ */
+function buildLights(group, dims, cfg) {
+  const bodyY = dims.wheelRadius + dims.hullHeight;
+  const lampY = bodyY - dims.hullHeight * cfg.headlampDrop;
+  const lampZ = dims.hullWidth * cfg.headlampInset;
+  const noseX = dims.hullLength / 2 + dims.hullLength * 0.1;
+  const tailX = -dims.hullLength / 2;
+
+  const headlampMaterial = new THREE.MeshStandardMaterial({
+    color: '#ffffff',
+    emissive: new THREE.Color(cfg.beamColor),
+    emissiveIntensity: 0,
+    roughness: 0.2,
+  });
+  const tailMaterial = new THREE.MeshStandardMaterial({
+    color: '#4a0d08',
+    emissive: new THREE.Color(cfg.tailColor),
+    emissiveIntensity: 0,
+    roughness: 0.35,
+  });
+
+  const lensGeo = new THREE.BoxGeometry(0.18, 0.34, 0.5);
+  const spots = [];
+
+  for (const side of [-1, 1]) {
+    const lens = new THREE.Mesh(lensGeo, headlampMaterial);
+    lens.position.set(noseX, lampY, side * lampZ);
+    group.add(lens);
+
+    const tail = new THREE.Mesh(lensGeo, tailMaterial);
+    tail.position.set(tailX, lampY, side * lampZ);
+    group.add(tail);
+
+    const spot = new THREE.SpotLight(
+      new THREE.Color(cfg.beamColor),
+      0, // switched on by the controller
+      cfg.beamDistance,
+      cfg.beamAngle,
+      0.55, // penumbra — soft-edged pool rather than a hard disc
+      1.1 // gentle falloff so the beam still reaches down-range
+    );
+    spot.castShadow = false;
+    spot.position.set(noseX, lampY, side * lampZ);
+
+    // Aim well ahead and slightly down, so the pool lands on the terrain
+    // rather than shooting off over the horizon.
+    const aim = new THREE.Object3D();
+    aim.position.set(noseX + cfg.beamDistance * 0.55, lampY - cfg.beamDistance * 0.16, side * lampZ);
+    group.add(aim);
+    spot.target = aim;
+
+    group.add(spot);
+    spots.push(spot);
+  }
+
+  return { headlampMaterial, tailMaterial, spots, config: cfg };
 }

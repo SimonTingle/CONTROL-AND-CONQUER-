@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { buildVehicleMesh } from './vehicleFactory.js';
 
 const ARRIVE_DISTANCE = 1.5;
+const BRAKE_SPEED = 0.1; // at or below this the vehicle counts as stopped
 const GRADE_PROBE = 2.5; // world units to look ahead when measuring the climb
 const MIN_CLIMB_FACTOR = 0.15; // a near-limit climb is a crawl, not a stop
 const _up = new THREE.Vector3(0, 1, 0);
@@ -21,9 +22,14 @@ class VehicleInstance {
     this.group.position.copy(spawnPoint);
     this.heading = facing;
     this.target = null;
-    this.speed = 0;
+    this.speed = 0; // magnitude, for HUD
+    this.forwardSpeed = 0; // signed, negative in reverse
+    this.throttle = 0;
+    this.steer = 0;
+    this.accelerating = false;
     this.grade = 0;
     this.blocked = false;
+    this.headlightsOn = false;
   }
 
   /** Order a move. Silently refused if the point is underwater. */
@@ -37,7 +43,9 @@ class VehicleInstance {
   /** Order finished — reached, or given up on. */
   arrive() {
     this.target = null;
+    this.forwardSpeed = 0;
     this.speed = 0;
+    this.accelerating = false;
   }
 
   /** True while this vehicle is actively driving toward an order. */
@@ -45,59 +53,172 @@ class VehicleInstance {
     return this.target !== null;
   }
 
-  update(dt, heightmap) {
+  /**
+   * Player input for this frame. Any real input cancels a click order, so
+   * grabbing the keys takes over rather than fighting an outstanding move.
+   */
+  setDriveInput(throttle, steer) {
+    this.throttle = throttle;
+    this.steer = steer;
+    if (throttle !== 0 || steer !== 0) this.target = null;
+  }
+
+  /**
+   * Reads the ground the vehicle is about to drive into.
+   *
+   * Shared by manual driving and click-to-move so terrain-dependent speed and
+   * the impassable-climb limit behave identically however the vehicle is driven.
+   *
+   * @returns {{grade: number, factor: number, climbable: boolean}} `factor`
+   *   scales top speed: uphill costs speed, downhill gives a little back.
+   */
+  readGrade(heightmap) {
     const pos = this.group.position;
+    const aheadX = pos.x + Math.cos(this.heading) * GRADE_PROBE;
+    const aheadZ = pos.z + Math.sin(this.heading) * GRADE_PROBE;
+    const grade =
+      (heightmap.heightAt(aheadX, aheadZ) - heightmap.heightAt(pos.x, pos.z)) / GRADE_PROBE;
+    this.grade = grade;
 
-    if (this.target) {
-      const dx = this.target.x - pos.x;
-      const dz = this.target.y - pos.z;
-      const dist = Math.hypot(dx, dz);
+    const climbable = grade <= this.def.maxClimbGrade;
+    const factor =
+      grade > 0
+        ? Math.max(MIN_CLIMB_FACTOR, 1 - (grade / this.def.maxClimbGrade) * 0.85)
+        : Math.min(1.25, 1 + -grade * 0.35);
 
-      if (dist < ARRIVE_DISTANCE) {
-        this.arrive();
-      } else {
-        const desiredHeading = Math.atan2(dz, dx);
-        let delta = desiredHeading - this.heading;
-        delta = Math.atan2(Math.sin(delta), Math.cos(delta)); // shortest turn
-        const maxTurn = this.def.turnSpeed * dt;
-        this.heading += THREE.MathUtils.clamp(delta, -maxTurn, maxTurn);
+    return { grade, factor, climbable };
+  }
 
-        // Sample the ground a short way ahead to get the grade the vehicle is
-        // about to drive into — rise over run, positive uphill.
-        const aheadX = pos.x + Math.cos(this.heading) * GRADE_PROBE;
-        const aheadZ = pos.z + Math.sin(this.heading) * GRADE_PROBE;
-        const grade =
-          (heightmap.heightAt(aheadX, aheadZ) - heightmap.heightAt(pos.x, pos.z)) / GRADE_PROBE;
-        this.grade = grade;
-
-        if (grade > this.def.maxClimbGrade) {
-          // Too steep to climb: abandon the order rather than grind against the
-          // slope forever. This is the terrain limit, not just a slowdown.
-          this.blocked = true;
-          this.target = null;
-        } else {
-          this.blocked = false;
-
-          // Uphill costs speed, approaching the climb limit costs nearly all of
-          // it; downhill gives back a little.
-          const terrainFactor =
-            grade > 0
-              ? Math.max(MIN_CLIMB_FACTOR, 1 - (grade / this.def.maxClimbGrade) * 0.85)
-              : Math.min(1.25, 1 + -grade * 0.35);
-
-          // Slow down while still turning sharply, and while approaching.
-          const alignment = Math.max(0, Math.cos(delta));
-          const speed = this.def.speed * alignment * Math.min(1, dist / 6) * terrainFactor;
-          this.speed = speed;
-          pos.x += Math.cos(this.heading) * speed * dt;
-          pos.z += Math.sin(this.heading) * speed * dt;
-        }
-      }
-    } else {
-      this.speed = 0;
-    }
+  update(dt, heightmap) {
+    if (this.throttle !== 0 || this.steer !== 0) this.driveManual(dt, heightmap);
+    else if (this.target) this.driveToTarget(dt, heightmap);
+    else this.coast(dt, heightmap);
 
     this.settleOnGround(heightmap);
+  }
+
+  /** Advance along the current heading and keep `speed` reporting magnitude. */
+  advance(dt) {
+    const pos = this.group.position;
+    pos.x += Math.cos(this.heading) * this.forwardSpeed * dt;
+    pos.z += Math.sin(this.heading) * this.forwardSpeed * dt;
+    this.speed = Math.abs(this.forwardSpeed);
+  }
+
+  driveManual(dt, heightmap) {
+    const def = this.def;
+    const { factor, climbable } = this.readGrade(heightmap);
+
+    // Steering authority builds with speed — the vehicle cannot pivot on the
+    // spot — and flips in reverse so backing up steers like a real car.
+    if (this.steer !== 0) {
+      const authority = Math.min(1, Math.abs(this.forwardSpeed) / 4);
+      const direction = this.forwardSpeed < 0 ? -1 : 1;
+      this.heading += this.steer * def.turnSpeed * authority * direction * dt;
+    }
+
+    if (this.throttle > 0) {
+      this.accelerating = true;
+      this.blocked = !climbable;
+      if (climbable) {
+        this.forwardSpeed = Math.min(this.forwardSpeed + def.acceleration * dt, def.speed * factor);
+      } else {
+        // Too steep: the slope stops it dead rather than letting it crawl up.
+        this.forwardSpeed = Math.min(this.forwardSpeed, 0);
+      }
+    } else if (this.throttle < 0) {
+      this.accelerating = false;
+      this.blocked = false;
+      // Brake first, then pull away in reverse once actually stopped.
+      this.forwardSpeed =
+        this.forwardSpeed > 0.1
+          ? Math.max(this.forwardSpeed - def.braking * dt, 0)
+          : Math.max(this.forwardSpeed - def.acceleration * dt, -def.reverseSpeed * factor);
+    } else {
+      this.accelerating = false;
+      this.applyRollingResistance(dt);
+    }
+
+    this.advance(dt);
+  }
+
+  /** Click-to-move (mobile): steer toward the order and drive it out. */
+  driveToTarget(dt, heightmap) {
+    const pos = this.group.position;
+    const dx = this.target.x - pos.x;
+    const dz = this.target.y - pos.z;
+    const dist = Math.hypot(dx, dz);
+
+    if (dist < ARRIVE_DISTANCE) {
+      this.arrive();
+      return;
+    }
+
+    const desiredHeading = Math.atan2(dz, dx);
+    let delta = desiredHeading - this.heading;
+    delta = Math.atan2(Math.sin(delta), Math.cos(delta)); // shortest turn
+    const maxTurn = this.def.turnSpeed * dt;
+    this.heading += THREE.MathUtils.clamp(delta, -maxTurn, maxTurn);
+
+    const { factor, climbable } = this.readGrade(heightmap);
+    if (!climbable) {
+      // Abandon the order rather than grind against the slope forever.
+      this.blocked = true;
+      this.arrive();
+      return;
+    }
+    this.blocked = false;
+    this.accelerating = true;
+
+    // Ease off while still turning sharply, and while closing on the target.
+    const alignment = Math.max(0, Math.cos(delta));
+    this.forwardSpeed = this.def.speed * alignment * Math.min(1, dist / 6) * factor;
+    this.advance(dt);
+  }
+
+  /** No input, no order — roll to a stop. */
+  coast(dt, heightmap) {
+    this.accelerating = false;
+    if (Math.abs(this.forwardSpeed) > 0.001) {
+      this.readGrade(heightmap);
+      this.applyRollingResistance(dt);
+      this.advance(dt);
+    } else {
+      this.forwardSpeed = 0;
+      this.speed = 0;
+    }
+  }
+
+  applyRollingResistance(dt) {
+    const drop = this.def.rollingResistance * dt;
+    this.forwardSpeed =
+      this.forwardSpeed > 0
+        ? Math.max(this.forwardSpeed - drop, 0)
+        : Math.min(this.forwardSpeed + drop, 0);
+  }
+
+  /** Brake lights whenever it is not being driven forward under power. */
+  get braking() {
+    return !this.accelerating || this.forwardSpeed <= BRAKE_SPEED;
+  }
+
+  /**
+   * Lamps. Headlights follow the sun; tail lights read the drivetrain.
+   * @param {boolean} headlightsOn
+   */
+  updateLights(headlightsOn) {
+    const lights = this.group.userData.lights;
+    if (!lights) return;
+
+    this.headlightsOn = headlightsOn;
+    lights.headlampMaterial.emissiveIntensity = headlightsOn ? 2.2 : 0;
+    for (const spot of lights.spots) {
+      spot.intensity = headlightsOn ? lights.config.beamIntensity : 0;
+    }
+
+    // Dim running lights once the lamps are on, full red under braking.
+    const running = headlightsOn ? 0.55 : 0;
+    lights.tailMaterial.emissiveIntensity = this.braking ? 3.0 : running;
   }
 
   /**
@@ -210,7 +331,19 @@ export class VehicleController {
     return this.active?.setTarget(x, z, heightmap) ?? false;
   }
 
-  update(dt, heightmap) {
-    for (const instance of this.instances) instance.update(dt, heightmap);
+  /** Route keyboard driving to the vehicle the player is currently in. */
+  driveActive(throttle, steer) {
+    this.active?.setDriveInput(throttle, steer);
+  }
+
+  /**
+   * @param {boolean} headlightsOn driven by time of day, decided by the caller
+   *   so the fleet does not have to know about the sky.
+   */
+  update(dt, heightmap, headlightsOn = false) {
+    for (const instance of this.instances) {
+      instance.update(dt, heightmap);
+      instance.updateLights(headlightsOn);
+    }
   }
 }
