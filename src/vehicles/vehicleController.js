@@ -202,6 +202,11 @@ class VehicleInstance {
     return !this.accelerating || this.forwardSpeed <= BRAKE_SPEED;
   }
 
+  /** Reversing lamps follow the gearbox, not the driver's hands. */
+  get reversing() {
+    return this.forwardSpeed < -BRAKE_SPEED;
+  }
+
   /**
    * Lamps. Headlights follow the sun; tail lights read the drivetrain.
    * @param {boolean} headlightsOn
@@ -219,6 +224,16 @@ class VehicleInstance {
     // Dim running lights once the lamps are on, full red under braking.
     const running = headlightsOn ? 0.55 : 0;
     lights.tailMaterial.emissiveIntensity = this.braking ? 3.0 : running;
+
+    // Reversing lamps are wired to the gearbox, so the lenses glow whenever the
+    // vehicle is actually rolling backwards — day or night, like a real car.
+    // The beam itself only lights up after dark, or it would wash a bright
+    // patch onto sunlit ground for no visible benefit.
+    const reversing = this.reversing;
+    lights.reverseMaterial.emissiveIntensity = reversing ? 2.6 : 0;
+    for (const spot of lights.reverseSpots) {
+      spot.intensity = reversing && headlightsOn ? lights.config.reverseBeamIntensity : 0;
+    }
   }
 
   /**

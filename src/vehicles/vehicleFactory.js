@@ -108,7 +108,7 @@ export function buildVehicleMesh(def) {
 }
 
 /**
- * Headlamps and tail lights.
+ * Headlamps, tail lights and reversing lamps.
  *
  * The spotlights and their targets are both parented to the vehicle group, so
  * the beams swing with the vehicle for free — no per-frame target bookkeeping.
@@ -137,9 +137,18 @@ function buildLights(group, dims, cfg) {
     emissiveIntensity: 0,
     roughness: 0.35,
   });
+  const reverseMaterial = new THREE.MeshStandardMaterial({
+    color: '#20242b',
+    emissive: new THREE.Color(cfg.reverseColor),
+    emissiveIntensity: 0,
+    roughness: 0.25,
+  });
 
   const lensGeo = new THREE.BoxGeometry(0.18, 0.34, 0.5);
+  const reverseLensGeo = new THREE.BoxGeometry(0.16, 0.24, 0.32);
+  const reverseZ = lampZ * 0.42; // inboard of the tail lights
   const spots = [];
+  const reverseSpots = [];
 
   for (const side of [-1, 1]) {
     const lens = new THREE.Mesh(lensGeo, headlampMaterial);
@@ -149,6 +158,34 @@ function buildLights(group, dims, cfg) {
     const tail = new THREE.Mesh(lensGeo, tailMaterial);
     tail.position.set(tailX, lampY, side * lampZ);
     group.add(tail);
+
+    const reverseLens = new THREE.Mesh(reverseLensGeo, reverseMaterial);
+    reverseLens.position.set(tailX, lampY, side * reverseZ);
+    group.add(reverseLens);
+
+    // Reversing beam: aimed backwards (-X) and down, mirroring the headlights.
+    const reverseSpot = new THREE.SpotLight(
+      new THREE.Color(cfg.reverseColor),
+      0,
+      cfg.reverseBeamDistance,
+      cfg.reverseBeamAngle,
+      0.6,
+      1.1
+    );
+    reverseSpot.castShadow = false;
+    reverseSpot.position.set(tailX, lampY, side * reverseZ);
+
+    const reverseAim = new THREE.Object3D();
+    reverseAim.position.set(
+      tailX - cfg.reverseBeamDistance * 0.5,
+      lampY - cfg.reverseBeamDistance * 0.22,
+      side * reverseZ
+    );
+    group.add(reverseAim);
+    reverseSpot.target = reverseAim;
+
+    group.add(reverseSpot);
+    reverseSpots.push(reverseSpot);
 
     const spot = new THREE.SpotLight(
       new THREE.Color(cfg.beamColor),
@@ -172,5 +209,5 @@ function buildLights(group, dims, cfg) {
     spots.push(spot);
   }
 
-  return { headlampMaterial, tailMaterial, spots, config: cfg };
+  return { headlampMaterial, tailMaterial, reverseMaterial, spots, reverseSpots, config: cfg };
 }

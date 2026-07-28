@@ -27,6 +27,12 @@ export const VEHICLE_CATALOG = [
       beamIntensity: 900, // physical units — r169 lights are candela-like
       beamColor: '#fff2d6',
       tailColor: '#ff2b18',
+      reverseColor: '#f4f8ff',
+      // Reversing lamps throw a shorter, wider pool than the headlights —
+      // enough to see what you are backing into, not a driving beam.
+      reverseBeamIntensity: 320,
+      reverseBeamDistance: 70,
+      reverseBeamAngle: 0.62,
       // Sun elevation (degrees) at or below which the lamps come on, so they
       // cover dusk, night and dawn.
       duskElevation: 8,

@@ -259,7 +259,10 @@ function animate() {
     if (vehicles.active) {
       const v = vehicles.active;
       const gradePct = (v.grade * 100).toFixed(0);
-      const badges = (v.braking ? ' · BRAKE' : '') + (v.headlightsOn ? ' · lights' : '');
+      const badges =
+        (v.braking ? ' · BRAKE' : '') +
+        (v.reversing ? ' · REV' : '') +
+        (v.headlightsOn ? ' · lights' : '');
       line3 = v.blocked
         ? `\nvehicle: blocked — ${gradePct}% grade too steep${badges}`
         : `\nvehicle: ${v.forwardSpeed.toFixed(1)} u/s · ${gradePct}% grade${badges}`;
