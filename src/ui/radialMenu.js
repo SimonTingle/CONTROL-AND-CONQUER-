@@ -105,11 +105,11 @@ export class RadialMenu {
     if (!this.isOpen) return;
 
     const instance = this.instance;
-    // Driving away is an implicit "never mind".
+    // Driving away is an implicit "never mind". Structures report zero.
     if (instance.speed > CLOSE_SPEED) return this.close();
 
     _anchor.copy(instance.group.position);
-    _anchor.y += instance.def.dims.hullHeight + instance.def.dims.wheelRadius * 2;
+    _anchor.y += instance.menuAnchorHeight;
     _anchor.project(this.camera);
 
     // z > 1 means behind the camera, where projected x/y mirror nonsensically.

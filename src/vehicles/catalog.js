@@ -178,4 +178,85 @@ export const VEHICLE_CATALOG = [
     },
     previewDistance: 26,
   },
+
+  {
+    id: 'crystal-harvester',
+    name: 'Crystal Harvester',
+    description: 'Autonomous six-wheel hauler. Fills at a bloom field, unloads at the facility.',
+    role: 'unit',
+    // Produced by the facility, never conjured from the drawer — a card that
+    // handed one over free would contradict the economy it belongs to. It also
+    // keeps the picker's per-card WebGL context count down.
+    spawnable: false,
+    producedBy: 'harvester-facility',
+    cost: 600, // credits; the facility ships the first one free
+    unlock: null,
+    maxHealth: 220,
+
+    capacity: 240, // stock units carried
+    fillRate: 40, // units/second drawn from a field
+    unloadRate: 80, // units/second delivered to a facility
+
+    sightRadius: 38,
+    speed: 14,
+    reverseSpeed: 6,
+    acceleration: 7,
+    braking: 18,
+    rollingResistance: 4,
+    maxSteerAngle: 0.45,
+    steerRate: 1.8,
+    // Between the buggy's 0.8 and the base's 0.5: it has to reach fields on
+    // rolling ground without being able to go everywhere the scout can.
+    maxClimbGrade: 0.62,
+
+    axles: 3,
+    axleFractions: [1.0, -0.35, -1.0],
+    steerRatios: [1.0, 0.3, 0],
+    shape: {
+      nose: false,
+      turret: false,
+      tank: true,
+      tankLength: 0.5,
+      tankX: -0.18,
+      cabinLength: 0.22,
+      cabinX: 0.34,
+    },
+    // Discrete cells rather than a smooth bar, for the same reason the HUD's
+    // health bar is dotted: a partial load stays countable at a glance. Being
+    // emissive, a laden harvester driving home at night glows with its cargo.
+    loadIndicator: { segments: 6, color: '#7ce8ff' },
+    lights: {
+      style: 'bar',
+      headlampInset: 0.3,
+      headlampDrop: 0.26,
+      beamAngle: 0.48,
+      beamDistance: 130,
+      beamIntensity: 950,
+      beamColor: '#f6fbff',
+      tailColor: '#ff2b18',
+      reverseColor: '#f4f8ff',
+      reverseBeamIntensity: 380,
+      reverseBeamDistance: 55,
+      reverseBeamAngle: 0.68,
+      tailBeamIntensity: 120,
+      tailBeamDistance: 24,
+      tailBeamAngle: 0.8,
+      duskElevation: 8,
+    },
+    dims: {
+      hullLength: 11.4,
+      hullWidth: 3.0,
+      hullHeight: 1.4,
+      cabinHeight: 1.3,
+      wheelRadius: 0.95,
+      wheelWidth: 0.65,
+      suspensionTravel: 1.3,
+      turretRadius: 0,
+      turretHeight: 0,
+      barrelRadius: 0,
+      barrelLength: 0,
+    },
+    colors: { hull: '#4a4335', cabin: '#2a271f', wheel: '#161616', trim: '#c8a24a' },
+    previewDistance: 20,
+  },
 ];

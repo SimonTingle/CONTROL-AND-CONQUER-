@@ -4,6 +4,7 @@ import { TerrainMesh } from '../terrain/terrainMesh.js';
 import { Water } from '../terrain/water.js';
 import { Atmosphere } from '../sky/atmosphere.js';
 import { FogOfWar } from './fogOfWar.js';
+import { Blooms } from '../terrain/blooms.js';
 
 /**
  * Assembles the world and owns the one rule that everything else depends on:
@@ -34,6 +35,11 @@ export class World {
     this.fog = new FogOfWar(this.heightmap);
     this.terrain.uniforms.uFogMask.value = this.fog.texture;
     this.water.uniforms.uFogMask.value = this.fog.texture;
+
+    // Resource scatter. Needs the fog so a field cannot glow through unexplored
+    // ground — the same leak the ocean's foam had.
+    this.blooms = new Blooms(this.heightmap, this.fog, { seed: this.heightmap.params.seed });
+    this.scene.add(this.blooms.mesh);
   }
 
   /**
@@ -46,6 +52,7 @@ export class World {
     this.terrain.refresh();
     this.water.updateLevel();
     this.fog.refresh();
+    this.blooms.refresh();
     this.lastGenerateMs = performance.now() - t0;
     return this.lastGenerateMs;
   }
@@ -53,5 +60,8 @@ export class World {
   update(dt, camera) {
     this.terrain.update(camera);
     this.water.update(dt);
+    // Sun elevation passed in rather than reached for, mirroring how the fleet
+    // takes `headlightsOn` from its caller instead of knowing about the sky.
+    this.blooms.update(dt, this.atmosphere.params.elevation);
   }
 }

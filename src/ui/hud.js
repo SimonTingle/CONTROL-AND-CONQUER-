@@ -14,58 +14,92 @@ export class Hud {
   }
 
   build() {
-    this.name = el('div', 'hud-name');
+    // Three independent blocks, each with its own visibility rule. Deliberately
+    // no early returns anywhere in update(): the previous shape hid everything
+    // when nothing was selected and skipped everything after health for
+    // non-scouts, which made "add a block and watch it silently vanish" the
+    // default outcome.
+    this.economy = el('div', 'hud-economy');
+    this.creditsValue = el('div', 'hud-credits');
+    this.economy.append(this.creditsValue);
 
+    this.selection = el('div', 'hud-selection');
+    this.name = el('div', 'hud-name');
     this.healthBar = el('div', 'hud-health-fill');
-    const track = el('div', 'hud-health');
-    track.appendChild(this.healthBar);
+    const health = el('div', 'hud-health');
+    health.appendChild(this.healthBar);
     this.healthLabel = el('div', 'hud-line');
+    this.selection.append(this.name, health, this.healthLabel);
+
+    this.load = el('div', 'hud-load');
+    this.loadBar = el('div', 'hud-load-fill');
+    const loadTrack = el('div', 'hud-load-track');
+    loadTrack.appendChild(this.loadBar);
+    this.loadLabel = el('div', 'hud-line');
+    this.load.append(loadTrack, this.loadLabel);
 
     this.discovery = el('div', 'hud-discovery');
     this.discoveryValue = el('div', 'hud-discovery-value');
     this.unlockLine = el('div', 'hud-line');
     this.discovery.append(this.discoveryValue, this.unlockLine);
 
-    this.root.replaceChildren(this.name, track, this.healthLabel, this.discovery);
+    this.root.replaceChildren(this.economy, this.selection, this.load, this.discovery);
   }
 
   /**
-   * @param {object|null} vehicle the selected vehicle instance
-   * @param {number} explored 0..1 of the island's land revealed
-   * @param {object} difficulty the chosen difficulty entry
-   * @param {boolean} unlocked whether the base station is already unlocked
+   * One options object rather than a growing positional list.
+   *
+   * @param {object} o
+   * @param {object|null} o.vehicle the selected vehicle or structure
+   * @param {number} o.explored 0..1 of the island's land revealed
+   * @param {object} o.difficulty the chosen difficulty entry
+   * @param {boolean} o.unlocked whether the base station is already unlocked
+   * @param {number} o.credits current balance
+   * @param {boolean} o.economyActive whether there is an economy to report yet
+   * @param {number} o.load cargo aboard the selected vehicle
    */
-  update(vehicle, explored, difficulty, unlocked) {
-    if (!vehicle) {
-      this.root.classList.add('hidden');
-      return;
-    }
-    this.root.classList.remove('hidden');
+  update({ vehicle, explored, difficulty, unlocked, credits = 0, economyActive = false, load = 0 }) {
+    const capacity = vehicle?.def?.capacity ?? 0;
+    // Discovery is the scout's job, so it only earns screen space while the
+    // scout is the one selected.
+    const showDiscovery = !!vehicle && vehicle.def.unlock === null;
 
-    this.name.textContent = vehicle.def.name;
-
-    const max = vehicle.def.maxHealth;
-    const pct = Math.max(0, Math.min(1, vehicle.health / max));
-    this.healthBar.style.width = `${pct * 100}%`;
-    this.healthLabel.textContent = `${Math.round(vehicle.health)} / ${max}`;
-
-    // Discovery is the scout's job, so it is only worth screen space while the
-    // scout is the one selected — and only until the unlock actually happens.
-    const showDiscovery = vehicle.def.unlock === null;
+    this.economy.classList.toggle('hidden', !economyActive);
+    this.selection.classList.toggle('hidden', !vehicle);
+    this.load.classList.toggle('hidden', !capacity);
     this.discovery.classList.toggle('hidden', !showDiscovery);
-    if (!showDiscovery) return;
+    // The panel itself only disappears when literally nothing has content.
+    this.root.classList.toggle('hidden', !economyActive && !vehicle);
 
-    this.discoveryValue.textContent = `${(explored * 100).toFixed(1)}% island charted`;
+    if (economyActive) {
+      this.creditsValue.textContent = `${Math.floor(credits)} cr`;
+    }
 
-    if (unlocked) {
-      this.unlockLine.textContent = 'Base Station unlocked';
-      this.unlockLine.classList.add('hud-line-done');
-    } else {
-      const remaining = Math.max(0, difficulty.unlockAt - explored);
-      this.unlockLine.textContent =
-        `${(remaining * 100).toFixed(1)}% to unlock Base Station ` +
-        `(${difficulty.name}: ${Math.round(difficulty.unlockAt * 100)}%)`;
-      this.unlockLine.classList.remove('hud-line-done');
+    if (vehicle) {
+      this.name.textContent = vehicle.def.name;
+      const max = vehicle.def.maxHealth;
+      const pct = Math.max(0, Math.min(1, vehicle.health / max));
+      this.healthBar.style.width = `${pct * 100}%`;
+      this.healthLabel.textContent = `${Math.round(vehicle.health)} / ${max}`;
+    }
+
+    if (capacity) {
+      this.loadBar.style.width = `${Math.min(1, load / capacity) * 100}%`;
+      this.loadLabel.textContent = `cargo ${Math.round(load)} / ${capacity}`;
+    }
+
+    if (showDiscovery) {
+      this.discoveryValue.textContent = `${(explored * 100).toFixed(1)}% island charted`;
+      if (unlocked) {
+        this.unlockLine.textContent = 'Base Station unlocked';
+        this.unlockLine.classList.add('hud-line-done');
+      } else {
+        const remaining = Math.max(0, difficulty.unlockAt - explored);
+        this.unlockLine.textContent =
+          `${(remaining * 100).toFixed(1)}% to unlock Base Station ` +
+          `(${difficulty.name}: ${Math.round(difficulty.unlockAt * 100)}%)`;
+        this.unlockLine.classList.remove('hud-line-done');
+      }
     }
   }
 }

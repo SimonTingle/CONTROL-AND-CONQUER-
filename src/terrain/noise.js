@@ -11,7 +11,8 @@ const GRAD = [
 const F2 = 0.5 * (Math.sqrt(3) - 1);
 const G2 = (3 - Math.sqrt(3)) / 6;
 
-function mulberry32(seed) {
+/** Small fast seeded PRNG. Exported so scatter systems reproduce per world seed. */
+export function mulberry32(seed) {
   let a = seed >>> 0;
   return function () {
     a |= 0;

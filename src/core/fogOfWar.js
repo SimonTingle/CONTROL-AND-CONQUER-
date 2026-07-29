@@ -158,6 +158,24 @@ export class FogOfWar {
     this.dirty = false;
   }
 
+  /**
+   * Mask value 0..255 at a world point, for things that need to know whether
+   * somewhere has been seen. Read-only: it does not disturb the monotone
+   * reveal invariant the counting depends on.
+   */
+  seenAt(x, z) {
+    const res = this.res;
+    const i = Math.round((x / this.mapSize + 0.5) * res - 0.5);
+    const j = Math.round((z / this.mapSize + 0.5) * res - 0.5);
+    if (i < 0 || j < 0 || i >= res || j >= res) return 0;
+    return this.data[j * res + i];
+  }
+
+  /** The mask value at which a cell counts as explored. */
+  get revealThreshold() {
+    return REVEAL_THRESHOLD;
+  }
+
   /** Revealed land as a fraction of all land, 0..1. */
   get exploredFraction() {
     this._syncSeaLevel();

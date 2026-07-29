@@ -157,6 +157,9 @@ export class Terraform {
       // Order matters: the fog's cached heights have to be right before
       // anything reads the explored fraction off them.
       this.world.fog.patchTerrain(pad.x, pad.z, outer);
+      // Same "the world changed shape here" moment: anything growing under the
+      // new concrete is gone.
+      this.world.blooms.clearUnder(pad.x, pad.z, pad.radius);
       job.onComplete?.(pad);
     }
   }

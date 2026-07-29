@@ -417,6 +417,44 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
 
 .hud-discovery.hidden { display: none; }
 
+.hud-economy.hidden,
+.hud-selection.hidden,
+.hud-load.hidden { display: none; }
+
+/* Credits sit above the selection, since they survive having nothing selected. */
+.hud-economy {
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.hud-credits {
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: #f0c65a;
+  text-shadow: 0 0 10px rgba(240, 198, 90, 0.35);
+}
+
+.hud-load { margin-top: 6px; }
+
+.hud-load-track {
+  height: 8px;
+  margin-bottom: 3px;
+  border: 1px solid var(--panel-border);
+  border-radius: 3px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.hud-load-fill {
+  height: 100%;
+  background: repeating-linear-gradient(90deg, #7ce8ff 0 6px, transparent 6px 9px);
+  /* Longer than the half-second stats tick that feeds it, so the bar lerps
+     between samples instead of stepping. */
+  transition: width 0.35s ease;
+}
+
 .hud-discovery-value {
   font-size: 13px;
   font-variant-numeric: tabular-nums;

@@ -38,7 +38,9 @@ export class VehiclePicker {
   buildPreviews() {
     this.grid.replaceChildren();
 
-    for (const def of this.catalog) {
+    // Produced units are not spawnable from the drawer — and each card costs a
+    // WebGL context, which browsers cap at around sixteen.
+    for (const def of this.catalog.filter((d) => d.spawnable !== false)) {
       const card = document.createElement('button');
       card.className = 'vehicle-card';
       card.type = 'button';

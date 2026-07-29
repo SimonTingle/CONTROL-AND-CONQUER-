@@ -21,6 +21,8 @@ export function commandsFor(instance, ctx) {
   if (!byId) return [];
   return (byId[instance.mode] ?? []).map((cmd) => ({
     ...cmd,
+    // A hint may be a function when it needs a live number, like a price.
+    hint: typeof cmd.hint === 'function' ? cmd.hint(instance, ctx) : cmd.hint,
     enabledResult: cmd.enabled ? cmd.enabled(instance, ctx) : true,
   }));
 }
@@ -83,7 +85,43 @@ const COMMANDS = {
       {
         id: 'build-harvester-facility',
         label: 'Harvester Facility',
-        enabled: () => 'Coming soon',
+        hint: 'Ships one harvester',
+        enabled(instance, ctx) {
+          const pad = ctx.terraform.padAt(instance.group.position.x, instance.group.position.z);
+          if (!pad || !pad.complete) return 'Needs a finished pad';
+          const def = ctx.structures.defOf('harvester-facility');
+          if (ctx.structures.instanceOf('harvester-facility')) return 'Already built';
+          if (!ctx.structures.freeSlot(pad, def.footprint)) return 'No free slot on the pad';
+          return true;
+        },
+        execute(instance, ctx) {
+          const pad = ctx.terraform.padAt(instance.group.position.x, instance.group.position.z);
+          ctx.structures.place(ctx.structures.defOf('harvester-facility'), pad);
+        },
+      },
+    ],
+  },
+
+  'harvester-facility': {
+    building: [],
+    idle: [
+      {
+        id: 'build-harvester',
+        label: 'Build Harvester',
+        hint: (instance, ctx) => `${ctx.vehicles.defOf(instance.def.produces).cost} cr`,
+        enabled(instance, ctx) {
+          const def = ctx.vehicles.defOf(instance.def.produces);
+          if (ctx.game.credits < def.cost) {
+            return `Needs ${def.cost} cr (have ${Math.floor(ctx.game.credits)})`;
+          }
+          return true;
+        },
+        execute(instance, ctx) {
+          const def = ctx.vehicles.defOf(instance.def.produces);
+          // spend() is the gate, not the enabled() check — that ran when the
+          // menu opened and the balance can have moved since.
+          if (ctx.game.spend(def.cost)) ctx.produceUnit(def, instance);
+        },
       },
     ],
   },

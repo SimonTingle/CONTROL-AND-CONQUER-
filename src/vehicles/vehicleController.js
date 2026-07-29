@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { buildVehicleMesh } from './vehicleFactory.js';
+import { VEHICLE_CATALOG } from './catalog.js';
 
 const ARRIVE_DISTANCE = 1.5;
 const BRAKE_SPEED = 0.1; // at or below this the vehicle counts as stopped
@@ -77,6 +78,11 @@ class VehicleInstance {
     return this.mode === 'armed' ? this.def.turret?.armedSteerFactor ?? 0.4 : 1;
   }
 
+  /** Screen-space anchor for the radial menu, so it need not know about wheels. */
+  get menuAnchorHeight() {
+    return this.def.dims.hullHeight + this.def.dims.wheelRadius * 2;
+  }
+
   /** Deployed or deploying: the vehicle is committed to a spot and cannot drive. */
   get immobile() {
     return this.mode === 'deploying' || this.mode === 'deployed';
@@ -91,8 +97,18 @@ class VehicleInstance {
     return true;
   }
 
-  /** Order finished — reached, or given up on. */
-  arrive() {
+  /**
+   * Order finished — reached, or given up on.
+   *
+   * The reason is for the HUD badge and for logging. It is deliberately *not*
+   * something an autonomous driver should steer by: like `blocked`, nothing
+   * clears it on the coasting path, so it goes stale. A driver that needs to
+   * know whether it arrived should measure its own distance to its own goal.
+   *
+   * @param {'reached'|'blocked'|'cancelled'} [reason]
+   */
+  arrive(reason = 'reached') {
+    this.lastArrival = reason;
     this.target = null;
     this.forwardSpeed = 0;
     this.speed = 0;
@@ -131,10 +147,19 @@ class VehicleInstance {
    * @returns {{grade: number, factor: number, climbable: boolean}} `factor`
    *   scales top speed: uphill costs speed, downhill gives a little back.
    */
-  readGrade(heightmap) {
+  /**
+   * @param {import('../terrain/heightmap.js').Heightmap} heightmap
+   * @param {number} [heading] probe direction; defaults to the vehicle's own.
+   *   `driveToTarget` passes the heading it is turning toward, not the current
+   *   one — otherwise a vehicle parked facing a locally steep patch reads as
+   *   blocked for literally any destination. It can never clear that on its
+   *   own: forwardSpeed stays at zero while blocked, and the bicycle-model
+   *   steering can only turn a vehicle that is already moving.
+   */
+  readGrade(heightmap, heading = this.heading) {
     const pos = this.group.position;
-    const aheadX = pos.x + Math.cos(this.heading) * GRADE_PROBE;
-    const aheadZ = pos.z + Math.sin(this.heading) * GRADE_PROBE;
+    const aheadX = pos.x + Math.cos(heading) * GRADE_PROBE;
+    const aheadZ = pos.z + Math.sin(heading) * GRADE_PROBE;
     const grade =
       (heightmap.heightAt(aheadX, aheadZ) - heightmap.heightAt(pos.x, pos.z)) / GRADE_PROBE;
     this.grade = grade;
@@ -250,18 +275,23 @@ class VehicleInstance {
     let delta = desiredHeading - this.heading;
     delta = Math.atan2(Math.sin(delta), Math.cos(delta)); // shortest turn
 
-    const { factor, climbable } = this.readGrade(heightmap);
+    const { factor, climbable } = this.readGrade(heightmap, desiredHeading);
     if (!climbable) {
       // Abandon the order rather than grind against the slope forever.
       this.blocked = true;
-      this.arrive();
+      this.arrive('blocked');
       return;
     }
     this.blocked = false;
     this.accelerating = true;
 
     // Ease off while still turning sharply, and while closing on the target.
-    const alignment = Math.max(0, Math.cos(delta));
+    // Floored rather than clamped to zero: the bicycle model can only turn a
+    // vehicle that is moving (heading changes with forwardSpeed), so a vehicle
+    // starting out pointed away from its target — a harvester rolling off a
+    // dock, say — would otherwise sit at exactly zero speed forever, unable to
+    // ever turn toward where it needs to go. A slow crawl lets it arc round.
+    const alignment = Math.max(0.12, Math.cos(delta));
     // driveToTarget assigns speed outright rather than through the acceleration
     // cap, so the armed factor has to be applied here too.
     this.forwardSpeed =
@@ -468,15 +498,27 @@ export class VehicleController {
     this.active = null;
   }
 
-  spawn(def, spawnPoint, facing = 0) {
+  /**
+   * @param {object} [opts]
+   * @param {boolean} [opts.activate] false to spawn without taking the keys —
+   *   a factory shipping a unit must not yank the camera off whatever the
+   *   player was watching.
+   */
+  spawn(def, spawnPoint, facing = 0, { activate = true } = {}) {
     const instance = new VehicleInstance(def, spawnPoint, facing);
     this.instances.push(instance);
     // So a raycast hit on any part of the mesh can walk up to its instance.
-    instance.group.userData.vehicleInstance = instance;
+    instance.group.userData.selectable = instance;
     this.scene.add(instance.group);
+    if (!activate) return instance;
     // Through setActive, so a vehicle left with the throttle held does not
     // drive off on its own the moment the player spawns another one.
     return this.setActive(instance);
+  }
+
+  /** Catalog lookup by id, so commands can price a unit without importing the catalog. */
+  defOf(id) {
+    return VEHICLE_CATALOG.find((d) => d.id === id) ?? null;
   }
 
   /** The spawned instance of a catalog entry, if there is one. */

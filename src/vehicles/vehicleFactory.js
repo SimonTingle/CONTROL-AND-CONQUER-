@@ -178,6 +178,33 @@ export function buildVehicleMesh(def) {
     cap.position.set(tank.position.x, tank.position.y + tankRadius, 0);
     cap.castShadow = true;
     group.add(cap);
+
+    group.userData.tank = tank;
+
+    // Cargo gauge along the top of the tank, for vehicles that carry something.
+    if (def.loadIndicator) {
+      const segs = def.loadIndicator.segments;
+      const pitch = (tankLength * 0.82) / segs;
+      const startX = tank.position.x - (tankLength * 0.82) / 2 + pitch / 2;
+      const cells = [];
+
+      for (let k = 0; k < segs; k++) {
+        const material = new THREE.MeshStandardMaterial({
+          color: '#1b2a30',
+          emissive: new THREE.Color(def.loadIndicator.color),
+          emissiveIntensity: 0, // driven by the load
+          roughness: 0.3,
+        });
+        const cell = new THREE.Mesh(
+          new THREE.BoxGeometry(pitch * 0.7, 0.16, tankRadius * 0.85),
+          material
+        );
+        cell.position.set(startX + k * pitch, tank.position.y + tankRadius * 0.92, 0);
+        group.add(cell);
+        cells.push(material);
+      }
+      group.userData.loadCells = cells;
+    }
   }
 
   // Wheels: four cylinders, axles along X so the cylinder's own axis (Y) has

@@ -12,7 +12,9 @@ import { RadialMenu } from './ui/radialMenu.js';
 import { VehicleController } from './vehicles/vehicleController.js';
 import { VEHICLE_CATALOG } from './vehicles/catalog.js';
 import { commandsFor } from './vehicles/commands.js';
+import { HarvesterAI } from './vehicles/harvesterAI.js';
 import { Terraform } from './core/terraform.js';
+import { StructureController } from './structures/structures.js';
 
 const canvas = document.getElementById('viewport');
 
@@ -73,6 +75,7 @@ function updateMarker(elapsed) {
 const vehicles = new VehicleController(world.scene);
 
 const terraform = new Terraform(world);
+const structures = new StructureController(world.scene);
 
 const chase = new ChaseCamera(camera, heightmap);
 
@@ -151,7 +154,7 @@ const _pickNdc = new THREE.Vector2();
  * sphere to feel honest. The fleet is a handful of vehicles, so the cost is
  * irrelevant.
  */
-function pickVehicle(clientX, clientY) {
+function pickSelectable(clientX, clientY) {
   const rect = canvas.getBoundingClientRect();
   _pickNdc.set(
     ((clientX - rect.left) / rect.width) * 2 - 1,
@@ -160,14 +163,14 @@ function pickVehicle(clientX, clientY) {
   _pickRay.setFromCamera(_pickNdc, camera);
 
   const hits = _pickRay.intersectObjects(
-    vehicles.instances.map((i) => i.group),
+    [...vehicles.instances, ...structures.instances].map((i) => i.group),
     true
   );
   if (!hits.length) return null;
 
   let node = hits[0].object;
-  while (node && !node.userData.vehicleInstance) node = node.parent;
-  return node?.userData.vehicleInstance ?? null;
+  while (node && !node.userData.selectable) node = node.parent;
+  return node?.userData.selectable ?? null;
 }
 
 // Mobile browsers synthesise dblclick from a double-tap, so one listener covers
@@ -177,14 +180,15 @@ canvas.addEventListener('dblclick', (e) => {
   // first pixel of movement, so this is a strict test.
   if (dragged) return;
 
-  const instance = pickVehicle(e.clientX, e.clientY);
+  const instance = pickSelectable(e.clientX, e.clientY);
   if (!instance) return;
 
   // On touch, the first tap of the double-tap already issued a move order
   // through pointerup. Double-tapping a vehicle means "command this one", not
-  // "drive it to the ground behind it" — so take that order back.
+  // "drive it to the ground behind it" — so take that order back. A building
+  // has no order to cancel.
   if (input.tapToMove) {
-    instance.arrive();
+    instance.arrive?.('cancelled');
     marker.visible = false;
   }
 
@@ -256,6 +260,10 @@ const view = {
     // So are any pads: regenerate swaps in a fresh heightfield array, which
     // orphans the flattening the old one was carrying.
     terraform.clear();
+    // Buildings stand on the old heightfield, and harvesters hold references to
+    // fields that no longer exist.
+    structures.clear();
+    harvesterAI.reset();
     radialMenu.close();
   },
   setChase(enabled) {
@@ -282,6 +290,17 @@ const game = {
   difficulty: DIFFICULTIES[1],
   unlocked: false,
   difficultyScreen: null,
+  credits: 0,
+  earn(n) {
+    this.credits += n;
+    return this.credits;
+  },
+  /** @returns {boolean} false when short, so the caller can explain why. */
+  spend(n) {
+    if (this.credits < n) return false;
+    this.credits -= n;
+    return true;
+  },
 };
 
 const hud = new Hud();
@@ -292,8 +311,30 @@ const radialMenu = new RadialMenu(camera, {
   },
 });
 
+/**
+ * Roll a unit out of a factory, parked at its dock facing away from the
+ * building. Deliberately does *not* take the keys: the player is usually
+ * watching the factory when this fires, and yanking the camera onto a new
+ * vehicle mid-build would be jarring.
+ */
+function produceUnit(def, facility) {
+  const dock = facility.dock;
+  const point = new THREE.Vector3(dock.x, heightmap.heightAt(dock.x, dock.z) + 0.05, dock.z);
+  return vehicles.spawn(def, point, facility.angle, { activate: false });
+}
+
+// A facility ships one harvester the moment it finishes. Without that bootstrap
+// the first harvester could never be afforded — nothing earns credits until one
+// exists.
+structures.onComplete = (instance) => {
+  if (!instance.def.freeUnitOnComplete) return;
+  produceUnit(vehicles.defOf(instance.def.produces), instance);
+};
+
+const harvesterAI = new HarvesterAI({ vehicles, world, heightmap, structures, game });
+
 /** Everything a command might need, so commands.js imports no game systems. */
-const commandContext = { vehicles, world, heightmap, terraform, game };
+const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit };
 
 const vehiclePicker = new VehiclePicker(VEHICLE_CATALOG, {
   onSelect(def) {
@@ -361,19 +402,36 @@ let statsTimer = 0;
 let frames = 0;
 let fps = 0;
 
-function animate() {
-  requestAnimationFrame(animate);
-  const dt = Math.min(clock.getDelta(), 0.1);
-
+/**
+ * One simulation step.
+ *
+ * Split out of `animate` so the world can be advanced deterministically without
+ * a real frame — see `window.__step`. A full harvest cycle is tens of seconds
+ * and the browser throttles requestAnimationFrame whenever the page is not
+ * being looked at, which makes wall-clock testing of anything slow unreliable.
+ *
+ * @param {number} dt seconds to advance
+ * @param {object} [opts]
+ * @param {boolean} [opts.render] false to skip drawing and the stats readout
+ */
+function tick(dt, { render = true } = {}) {
   // Vehicles move first so the camera frames where they actually ended up.
   applyDriveInput();
   world.update(dt, camera);
+  // Between the input and the fleet: the AI must see this frame's keys before
+  // deciding (so it never issues an order the player just cancelled) and set
+  // its targets before the fleet consumes them.
+  harvesterAI.update(dt);
   vehicles.update(dt, heightmap, headlightsWanted());
+  structures.update(dt, heightmap);
 
   // Reveal after the vehicles have moved — world.update() runs before them, so
   // committing there would upload a frame stale.
   for (const v of vehicles.instances) {
     world.fog.reveal(v.group.position.x, v.group.position.z, v.def.sightRadius, v);
+  }
+  for (const s of structures.instances) {
+    world.fog.reveal(s.x, s.z, s.def.sightRadius, s);
   }
   world.fog.commit();
 
@@ -391,6 +449,8 @@ function animate() {
   terraform.update(dt);
   radialMenu.update();
 
+  if (!render) return;
+
   updateMarker(clock.elapsedTime);
   vehiclePicker.update(dt);
   renderer.render(world.scene, camera);
@@ -407,7 +467,17 @@ function animate() {
     // plenty for a percentage a player reads.
     const explored = world.fog.exploredFraction;
     updateProgression(explored);
-    hud.update(vehicles.active, explored, game.difficulty, game.unlocked);
+    hud.update({
+      vehicle: vehicles.active,
+      explored,
+      difficulty: game.difficulty,
+      unlocked: game.unlocked,
+      credits: game.credits,
+      // Nothing to report before there is an economy — a permanent "0 cr"
+      // during the scouting game is just noise.
+      economyActive: game.credits > 0 || structures.instances.length > 0,
+      load: harvesterAI.stateOf(vehicles.active)?.load ?? 0,
+    });
 
     const info = renderer.info.render;
     let line3 = '';
@@ -430,7 +500,23 @@ function animate() {
   }
 }
 
+function animate() {
+  requestAnimationFrame(animate);
+  tick(Math.min(clock.getDelta(), 0.1));
+}
+
 animate();
+
+/**
+ * Dev helper: advance the simulation by `seconds` at a fixed step, without
+ * rendering. Lets a slow system (a harvest run, a regrowth cycle) be exercised
+ * and asserted from the console in a fraction of the wall-clock time.
+ */
+window.__step = (seconds, dt = 1 / 60) => {
+  const steps = Math.max(1, Math.round(seconds / dt));
+  for (let i = 0; i < steps; i++) tick(dt, { render: false });
+  return { steps, simulated: +(steps * dt).toFixed(2) };
+};
 
 // Wait for the first frame before revealing, so the terrain never flashes in.
 requestAnimationFrame(() => {
@@ -470,4 +556,5 @@ window.__probe = (count = 100) => {
 Object.assign(window, {
   world, camera, renderer, controls, chase, THREE, vehicles, vehiclePicker, input, lighting, driveKeys,
   game, hud, terraform, radialMenu, commandsFor, commandContext,
+  structures, harvesterAI, produceUnit,
 });
