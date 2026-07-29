@@ -407,12 +407,59 @@ const radialMenu = new RadialMenu(camera, {
 });
 
 /**
+ * Check if a route from facility to spawn point is drivable (climb grade acceptable).
+ * Samples 5 points along the path to validate.
+ */
+function isSpawnLocationViable(facilityX, facilityZ, spawnX, spawnZ, maxClimbGrade) {
+  if (heightmap.heightAt(spawnX, spawnZ) <= heightmap.seaLevelY + 1) return false;
+
+  const samples = 5;
+  let worst = 0;
+  let prev = heightmap.heightAt(facilityX, facilityZ);
+  for (let i = 1; i <= samples; i++) {
+    const t = i / samples;
+    const px = facilityX + (spawnX - facilityX) * t;
+    const pz = facilityZ + (spawnZ - facilityZ) * t;
+    const h = heightmap.heightAt(px, pz);
+    const run = Math.hypot(spawnX - facilityX, spawnZ - facilityZ) / samples;
+    worst = Math.max(worst, Math.abs(h - prev) / Math.max(run, 1e-3));
+    prev = h;
+  }
+  return worst < maxClimbGrade * 0.8;
+}
+
+/**
  * Roll a unit out of a factory, parked at its dock facing away from the
- * building. Deliberately does *not* take the keys: the player is usually
- * watching the factory when this fires, and yanking the camera onto a new
- * vehicle mid-build would be jarring.
+ * building. On mountains, searches for a drivable exit angle to avoid spawning
+ * the vehicle in terrain it cannot escape from.
  */
 function produceUnit(def, facility) {
+  const angles = [0, 0.9, -0.9, 1.6, -1.6, 2.4];
+  const maxClimbGrade = def.maxClimbGrade ?? 0.62;
+  let dockOffset = facility.def.dockOffset;
+  let attempt = 0;
+  const maxAttempts = 5;
+
+  while (attempt < maxAttempts) {
+    for (const angleOffset of angles) {
+      const angle = facility.angle + angleOffset;
+      const dock = {
+        x: facility.x + Math.cos(angle) * dockOffset,
+        z: facility.z + Math.sin(angle) * dockOffset,
+      };
+
+      if (isSpawnLocationViable(facility.x, facility.z, dock.x, dock.z, maxClimbGrade)) {
+        const point = new THREE.Vector3(dock.x, heightmap.heightAt(dock.x, dock.z) + 0.05, dock.z);
+        return vehicles.spawn(def, point, facility.angle, { activate: false });
+      }
+    }
+
+    // No viable angle at this distance; try farther out
+    dockOffset += 8;
+    attempt++;
+  }
+
+  // Fallback: spawn at original dock position even if not ideal
   const dock = facility.dock;
   const point = new THREE.Vector3(dock.x, heightmap.heightAt(dock.x, dock.z) + 0.05, dock.z);
   return vehicles.spawn(def, point, facility.angle, { activate: false });
@@ -517,7 +564,7 @@ function tick(dt, { render = true } = {}) {
   // deciding (so it never issues an order the player just cancelled) and set
   // its targets before the fleet consumes them.
   harvesterAI.update(dt);
-  vehicles.update(dt, heightmap, headlightsWanted());
+  vehicles.update(dt, heightmap, headlightsWanted(), camera);
   structures.update(dt, heightmap);
 
   // Reveal after the vehicles have moved — world.update() runs before them, so

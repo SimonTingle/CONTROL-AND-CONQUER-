@@ -15,6 +15,13 @@ const _pitchQuat = new THREE.Quaternion();
 const _rollQuat = new THREE.Quaternion();
 const _contact = new THREE.Vector3();
 
+const LOD_TIERS = {
+  FULL: 0,  // 0-40 units: full detail, all lights
+  MID: 1,   // 40-100 units: headlamps only
+  LOW: 2,   // 100+ units: no lights
+};
+const LOD_DISTANCES = [40, 100];
+
 // Per-wheel travel scratch, reused each frame and grown for the widest rig seen.
 // Shared across instances safely because it never outlives a single call.
 let _needed = new Float64Array(8);
@@ -49,6 +56,7 @@ class VehicleInstance {
     this.grade = 0;
     this.blocked = false;
     this.headlightsOn = false;
+    this.lodTier = LOD_TIERS.FULL; // distance-based level of detail
   }
 
   /**
@@ -364,6 +372,36 @@ class VehicleInstance {
     }
   }
 
+  updateLOD(camera) {
+    const dist = this.group.position.distanceTo(camera.position);
+    let newTier = LOD_TIERS.FULL;
+    if (dist > LOD_DISTANCES[1]) newTier = LOD_TIERS.LOW;
+    else if (dist > LOD_DISTANCES[0]) newTier = LOD_TIERS.MID;
+
+    if (newTier === this.lodTier) return;
+    this.lodTier = newTier;
+
+    const lights = this.group.userData.lights;
+    if (!lights) return;
+
+    if (newTier === LOD_TIERS.FULL) {
+      // All lights active; updateLights will control intensity
+      for (const spot of lights.spots) spot.visible = true;
+      for (const spot of lights.tailSpots) spot.visible = true;
+      for (const spot of lights.reverseSpots) spot.visible = true;
+    } else if (newTier === LOD_TIERS.MID) {
+      // Only headlamps if on; hide tail and reverse
+      for (const spot of lights.spots) spot.visible = true;
+      for (const spot of lights.tailSpots) spot.visible = false;
+      for (const spot of lights.reverseSpots) spot.visible = false;
+    } else {
+      // Hide all lights for LOD_LOW
+      for (const spot of lights.spots) spot.visible = false;
+      for (const spot of lights.tailSpots) spot.visible = false;
+      for (const spot of lights.reverseSpots) spot.visible = false;
+    }
+  }
+
   updateLights(headlightsOn) {
     const lights = this.group.userData.lights;
     if (!lights) return;
@@ -556,11 +594,13 @@ export class VehicleController {
   /**
    * @param {boolean} headlightsOn driven by time of day, decided by the caller
    *   so the fleet does not have to know about the sky.
+   * @param {THREE.Camera} [camera] for LOD distance calculations
    */
-  update(dt, heightmap, headlightsOn = false) {
+  update(dt, heightmap, headlightsOn = false, camera = null) {
     for (const instance of this.instances) {
       instance.update(dt, heightmap);
       instance.updateTurret(dt);
+      if (camera) instance.updateLOD(camera);
       instance.updateLights(headlightsOn);
     }
   }
