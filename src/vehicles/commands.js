@@ -125,4 +125,26 @@ const COMMANDS = {
       },
     ],
   },
+
+  'crystal-harvester': {
+    mobile: [
+      {
+        id: 'target-harvest',
+        label: 'Target Harvest',
+        hint: 'Click a specific bloom',
+        execute(instance, ctx) {
+          ctx.harvestSelectMode = { harvester: instance };
+        },
+      },
+      {
+        id: 'return-to-base',
+        label: 'Return to Base',
+        hint: 'Park at facility',
+        execute(instance, ctx) {
+          instance.shouldPark = true;
+          instance.harvestAI?.setTargetToBase();
+        },
+      },
+    ],
+  },
 };
