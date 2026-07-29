@@ -495,6 +495,7 @@ const harvesterAI = new HarvesterAI({ vehicles, world, heightmap, structures, ga
 const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit };
 
 const vehiclePicker = new VehiclePicker(VEHICLE_CATALOG, {
+  vehicles,
   onSelect(def) {
     vehiclePicker.setOpen(false);
     // Selecting a vehicle that is already out there takes the keys back rather
