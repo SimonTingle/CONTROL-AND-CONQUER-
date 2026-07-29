@@ -109,7 +109,31 @@ let lastY = 0;
 const DOUBLE_TAP_MS = 350;
 const DOUBLE_TAP_PX = 24;
 let lastTap = null; // { x, y, time } of the most recent unconsumed touch tap
-let suppressNextTapMove = false; // set when pointerdown recognises a double-tap
+let suppressNextTapMove = false; // set when pointerdown recognises a double-tap or long-press
+
+// A press-and-hold on a vehicle or building also opens its menu — the mouse
+// equivalent of a long-press, and the touch one too, sharing one timer and one
+// threshold (`dragged`) rather than a second movement tolerance.
+const LONG_PRESS_MS = 500;
+let longPressTimer = null;
+
+function clearLongPress() {
+  if (longPressTimer === null) return;
+  clearTimeout(longPressTimer);
+  longPressTimer = null;
+}
+
+function startLongPress(clientX, clientY) {
+  longPressTimer = setTimeout(() => {
+    longPressTimer = null;
+    if (dragged) return; // moved since the press started — a drag, not a hold
+    // Pick first: a long press on empty ground should fall through to the
+    // ordinary tap/click on release, not swallow it.
+    if (!pickSelectable(clientX, clientY)) return;
+    suppressNextTapMove = true;
+    openMenuAt(clientX, clientY);
+  }, LONG_PRESS_MS);
+}
 
 canvas.addEventListener('pointerdown', (e) => {
   dragged = false;
@@ -119,25 +143,32 @@ canvas.addEventListener('pointerdown', (e) => {
   // Any press on the world dismisses an open command menu. The menu's own
   // buttons live outside the canvas, so their clicks never reach here.
   radialMenu.close();
+  clearLongPress();
 
-  if (e.pointerType !== 'touch') return;
+  if (e.pointerType === 'touch') {
+    const prev = lastTap;
+    const now = performance.now();
+    const isDoubleTap =
+      prev &&
+      now - prev.time <= DOUBLE_TAP_MS &&
+      Math.hypot(e.clientX - prev.x, e.clientY - prev.y) <= DOUBLE_TAP_PX;
 
-  const prev = lastTap;
-  const now = performance.now();
-  const isDoubleTap =
-    prev &&
-    now - prev.time <= DOUBLE_TAP_MS &&
-    Math.hypot(e.clientX - prev.x, e.clientY - prev.y) <= DOUBLE_TAP_PX;
-
-  if (isDoubleTap) {
-    // Recognised before pointerup runs, so the second tap's move order can be
-    // skipped outright rather than issued and then cancelled after the fact.
-    suppressNextTapMove = true;
-    lastTap = null;
-    openMenuAt(e.clientX, e.clientY);
-  } else {
+    if (isDoubleTap) {
+      // Recognised before pointerup runs, so the second tap's move order can
+      // be skipped outright rather than issued and then cancelled after the
+      // fact. No long-press timer either — this press is already spoken for.
+      suppressNextTapMove = true;
+      lastTap = null;
+      openMenuAt(e.clientX, e.clientY);
+      return;
+    }
     lastTap = { x: e.clientX, y: e.clientY, time: now };
   }
+
+  // Primary button/touch only — a held right-drag pans the chase camera and
+  // must not also pop the menu.
+  if (e.button !== 0) return;
+  startLongPress(e.clientX, e.clientY);
 });
 
 canvas.addEventListener('pointermove', (e) => {
@@ -148,8 +179,9 @@ canvas.addEventListener('pointermove', (e) => {
   lastY = e.clientY;
   if (dx !== 0 || dy !== 0) {
     dragged = true;
-    // A drag can never be half of a double-tap.
+    // A drag can never be half of a double-tap, nor a long-press hold.
     lastTap = null;
+    clearLongPress();
   }
 
   // MapControls handles the drag itself whenever the camera is free.
@@ -158,8 +190,20 @@ canvas.addEventListener('pointermove', (e) => {
   else chase.orbit(dx, dy);
 });
 
+// A gesture the OS took over (e.g. a system back-swipe) fires this instead of
+// pointerup — without clearing state here a stale long-press timer could
+// still fire, or a genuine tap get misread as the first half of a double-tap.
+canvas.addEventListener('pointercancel', () => {
+  dragButton = -1;
+  dragged = false;
+  lastTap = null;
+  suppressNextTapMove = false;
+  clearLongPress();
+});
+
 canvas.addEventListener('pointerup', (e) => {
   dragButton = -1;
+  clearLongPress();
   if (suppressNextTapMove) {
     // This tap was already spent opening the radial menu in pointerdown.
     suppressNextTapMove = false;
