@@ -57,6 +57,7 @@ class VehicleInstance {
     this.blocked = false;
     this.headlightsOn = false;
     this.lodTier = LOD_TIERS.FULL; // distance-based level of detail
+    this.createdAt = Date.now(); // timestamp for menu ordering
   }
 
   /**
