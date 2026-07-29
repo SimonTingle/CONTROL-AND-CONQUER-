@@ -384,22 +384,10 @@ class VehicleInstance {
     const lights = this.group.userData.lights;
     if (!lights) return;
 
-    if (newTier === LOD_TIERS.FULL) {
-      // All lights active; updateLights will control intensity
-      for (const spot of lights.spots) spot.visible = true;
-      for (const spot of lights.tailSpots) spot.visible = true;
-      for (const spot of lights.reverseSpots) spot.visible = true;
-    } else if (newTier === LOD_TIERS.MID) {
-      // Only headlamps if on; hide tail and reverse
-      for (const spot of lights.spots) spot.visible = true;
-      for (const spot of lights.tailSpots) spot.visible = false;
-      for (const spot of lights.reverseSpots) spot.visible = false;
-    } else {
-      // Hide all lights for LOD_LOW
-      for (const spot of lights.spots) spot.visible = false;
-      for (const spot of lights.tailSpots) spot.visible = false;
-      for (const spot of lights.reverseSpots) spot.visible = false;
-    }
+    // Lights visible at all zoom levels; updateLights controls intensity
+    for (const spot of lights.spots) spot.visible = true;
+    for (const spot of lights.tailSpots) spot.visible = true;
+    for (const spot of lights.reverseSpots) spot.visible = true;
   }
 
   updateLights(headlightsOn) {
