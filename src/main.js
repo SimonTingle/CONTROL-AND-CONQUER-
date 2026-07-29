@@ -99,6 +99,18 @@ let dragButton = -1;
 let lastX = 0;
 let lastY = 0;
 
+// touch-action: none on the canvas (needed so a finger-drag orbits the camera
+// instead of the browser trying to scroll/pinch-zoom the page) has a side
+// effect: on touch devices the double-tap-to-zoom gesture that most browsers'
+// synthetic `dblclick` rides on is disabled along with it, so no `dblclick`
+// event ever reaches the listener below. A manual detector fills the gap for
+// touch only — a real mouse's dblclick is unaffected by touch-action and
+// keeps working through the native listener.
+const DOUBLE_TAP_MS = 350;
+const DOUBLE_TAP_PX = 24;
+let lastTap = null; // { x, y, time } of the most recent unconsumed touch tap
+let suppressNextTapMove = false; // set when pointerdown recognises a double-tap
+
 canvas.addEventListener('pointerdown', (e) => {
   dragged = false;
   dragButton = e.button;
@@ -107,6 +119,25 @@ canvas.addEventListener('pointerdown', (e) => {
   // Any press on the world dismisses an open command menu. The menu's own
   // buttons live outside the canvas, so their clicks never reach here.
   radialMenu.close();
+
+  if (e.pointerType !== 'touch') return;
+
+  const prev = lastTap;
+  const now = performance.now();
+  const isDoubleTap =
+    prev &&
+    now - prev.time <= DOUBLE_TAP_MS &&
+    Math.hypot(e.clientX - prev.x, e.clientY - prev.y) <= DOUBLE_TAP_PX;
+
+  if (isDoubleTap) {
+    // Recognised before pointerup runs, so the second tap's move order can be
+    // skipped outright rather than issued and then cancelled after the fact.
+    suppressNextTapMove = true;
+    lastTap = null;
+    openMenuAt(e.clientX, e.clientY);
+  } else {
+    lastTap = { x: e.clientX, y: e.clientY, time: now };
+  }
 });
 
 canvas.addEventListener('pointermove', (e) => {
@@ -115,7 +146,11 @@ canvas.addEventListener('pointermove', (e) => {
   const dy = e.clientY - lastY;
   lastX = e.clientX;
   lastY = e.clientY;
-  if (dx !== 0 || dy !== 0) dragged = true;
+  if (dx !== 0 || dy !== 0) {
+    dragged = true;
+    // A drag can never be half of a double-tap.
+    lastTap = null;
+  }
 
   // MapControls handles the drag itself whenever the camera is free.
   if (!isChasing()) return;
@@ -125,6 +160,11 @@ canvas.addEventListener('pointermove', (e) => {
 
 canvas.addEventListener('pointerup', (e) => {
   dragButton = -1;
+  if (suppressNextTapMove) {
+    // This tap was already spent opening the radial menu in pointerdown.
+    suppressNextTapMove = false;
+    return;
+  }
   if (!input.tapToMove || dragged || e.button !== 0) return;
 
   const point = pickTerrain(e.clientX, e.clientY, canvas, camera, heightmap, hit);
@@ -173,26 +213,37 @@ function pickSelectable(clientX, clientY) {
   return node?.userData.selectable ?? null;
 }
 
-// Mobile browsers synthesise dblclick from a double-tap, so one listener covers
-// both pointer types.
-canvas.addEventListener('dblclick', (e) => {
-  // A double-click that ended a drag is really an orbit; the flag is set by the
-  // first pixel of movement, so this is a strict test.
-  if (dragged) return;
-
-  const instance = pickSelectable(e.clientX, e.clientY);
+/**
+ * Open the radial menu for whatever's at this screen point, if anything.
+ * Shared by the native `dblclick` listener (real mouse/trackpad, or the rare
+ * touch browser that does still synthesise dblclick) and the manual touch
+ * double-tap detector in `pointerdown` above.
+ */
+function openMenuAt(clientX, clientY) {
+  const instance = pickSelectable(clientX, clientY);
   if (!instance) return;
 
-  // On touch, the first tap of the double-tap already issued a move order
-  // through pointerup. Double-tapping a vehicle means "command this one", not
-  // "drive it to the ground behind it" — so take that order back. A building
-  // has no order to cancel.
+  // On touch, the first tap of a double-tap can already have issued a move
+  // order through pointerup before this ever runs (the native dblclick path
+  // only, since the manual detector suppresses it up front). Double-tapping a
+  // vehicle means "command this one", not "drive it to the ground behind it"
+  // — so take that order back. A building has no order to cancel.
   if (input.tapToMove) {
     instance.arrive?.('cancelled');
     marker.visible = false;
   }
 
   radialMenu.openFor(instance, commandsFor(instance, commandContext));
+}
+
+// Kept for real mice/trackpads, and as a fallback on any touch browser that
+// still does synthesise it despite touch-action: none — harmless if it fires
+// a second time, since openMenuAt is idempotent per tap.
+canvas.addEventListener('dblclick', (e) => {
+  // A double-click that ended a drag is really an orbit; the flag is set by the
+  // first pixel of movement, so this is a strict test.
+  if (dragged) return;
+  openMenuAt(e.clientX, e.clientY);
 });
 
 // MapControls owns the wheel when it is enabled, so this only has to cover the
