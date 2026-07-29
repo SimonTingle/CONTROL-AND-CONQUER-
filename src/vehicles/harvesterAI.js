@@ -20,6 +20,7 @@ const FILLING = 'filling';
 const TO_BASE = 'to-base';
 const WAITING_FOR_DOCK = 'waiting-for-dock';
 const UNLOADING = 'unloading';
+const PARKED = 'parked';
 const PAUSED = 'paused';
 
 // Comfortably larger than a harvester's own turning radius (~19u). Smaller than
@@ -137,6 +138,8 @@ export class HarvesterAI {
         return this._waitingForDock(inst, s);
       case UNLOADING:
         return this._unload(inst, s, dt);
+      case PARKED:
+        return this._parked(inst, s);
       default:
         s.state = IDLE;
     }
@@ -153,10 +156,14 @@ export class HarvesterAI {
       return;
     }
 
-    const field = this.world.blooms.nearestTo(inst.group.position.x, inst.group.position.z, {
-      minStock: 1,
-      reject: (f) => (s.bans.get(f.id) ?? 0) > now,
-    });
+    // Use player-selected target field if available
+    let field = inst.targetField;
+    if (!field || field.dead || field.stock < 1) {
+      field = this.world.blooms.nearestTo(inst.group.position.x, inst.group.position.z, {
+        minStock: 1,
+        reject: (f) => (s.bans.get(f.id) ?? 0) > now,
+      });
+    }
 
     if (!field) {
       // Everything reachable is banned or empty. Forget the bans rather than
@@ -227,7 +234,16 @@ export class HarvesterAI {
       if (facility.dockedHarvester === inst) {
         facility.dockedHarvester = null;
       }
-      s.state = IDLE;
+      // Go to parking bay if shouldPark is set, else idle
+      if (inst.shouldPark) {
+        s.state = PARKED;
+        // Initialize parking position tracking
+        if (!facility.parkedHarvesters) facility.parkedHarvesters = [];
+        s.parkingBayIndex = facility.parkedHarvesters.length % MAX_QUEUE_POSITIONS;
+        facility.parkedHarvesters.push(inst);
+      } else {
+        s.state = IDLE;
+      }
       s.dest = null;
       s.detours = 0;
     }
@@ -274,6 +290,32 @@ export class HarvesterAI {
 
     if (d > 1) {
       this._order(inst, s, { x: queueX, z: queueZ });
+    }
+  }
+
+  _parked(inst, s) {
+    const facility = this._facility();
+    if (!facility) {
+      s.state = IDLE;
+      inst.shouldPark = false;
+      return;
+    }
+
+    // Calculate parking bay position
+    const bayIndex = s.parkingBayIndex ?? 0;
+    const angle = bayIndex * (Math.PI * 2 / MAX_QUEUE_POSITIONS);
+    const parkX = facility.x + Math.cos(angle) * 28; // parking bay ring at 28 units
+    const parkZ = facility.z + Math.sin(angle) * 28;
+
+    const pos = inst.group.position;
+    const d = Math.hypot(parkX - pos.x, parkZ - pos.z);
+
+    // Move to parking bay if not already there
+    if (d > 1.5) {
+      this._order(inst, s, { x: parkX, z: parkZ });
+    } else {
+      // At parking bay, idle here
+      inst.arrive('parked');
     }
   }
 

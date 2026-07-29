@@ -209,6 +209,22 @@ canvas.addEventListener('pointerup', (e) => {
     suppressNextTapMove = false;
     return;
   }
+
+  // Handle harvest selection mode
+  if (commandContext.harvestSelectMode) {
+    const point = pickTerrain(e.clientX, e.clientY, canvas, camera, heightmap, hit);
+    if (point) {
+      // Find nearest bloom to clicked point
+      const field = world.blooms.nearestTo(point.x, point.z, { minStock: 0 });
+      if (field) {
+        commandContext.harvestSelectMode.harvester.targetField = field;
+        marker.visible = false;
+      }
+    }
+    commandContext.harvestSelectMode = null;
+    return;
+  }
+
   if (!input.tapToMove || dragged || e.button !== 0) return;
 
   const point = pickTerrain(e.clientX, e.clientY, canvas, camera, heightmap, hit);
