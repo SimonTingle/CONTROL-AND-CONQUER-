@@ -493,18 +493,27 @@ const vehiclePicker = new VehiclePicker(VEHICLE_CATALOG, {
           // vehicle after that arrives beside whichever one is already out
           // there, which — since maxRadius sits well inside a sight radius —
           // also means it lands on ground the fog of war already knows about.
-          const reference = vehicles.active ?? vehicles.instances[0];
-          const { point, heading } = reference
-            ? findSpawnPointNear(heightmap, reference.group.position, {
-                minRadius: (reference.def.dims.hullLength + def.dims.hullLength) / 2 + 4,
+          // For base station, prefer spawning at scout's original location
+          let spawnOrigin = vehicles.active ?? vehicles.instances[0];
+          if (def.id === 'base-station' && game.scoutSpawnPoint) {
+            spawnOrigin = { group: { position: { x: game.scoutSpawnPoint.x, z: game.scoutSpawnPoint.z } }, def: { sightRadius: 80 } };
+          }
+          const { point, heading } = spawnOrigin
+            ? findSpawnPointNear(heightmap, spawnOrigin.group.position, {
+                minRadius: (spawnOrigin.def.dims?.hullLength ?? 5.2 + def.dims.hullLength) / 2 + 4,
                 // Comfortably inside the reference vehicle's sight radius, so
                 // the spot lands on ground its fog reveal has already covered.
-                maxRadius: reference.def.sightRadius * 0.8,
+                maxRadius: spawnOrigin.def.sightRadius * 0.8,
                 camera,
               })
             : findEdgeSpawnPoint(heightmap, camera);
           point.y += 0.05; // avoid z-fighting with the ground on the spawn frame
-          return vehicles.spawn(def, point, heading);
+          const instance = vehicles.spawn(def, point, heading);
+          // Store scout's spawn point for base station to reuse later
+          if (def.id === 'scout-buggy' && !game.scoutSpawnPoint) {
+            game.scoutSpawnPoint = { x: point.x, z: point.z };
+          }
+          return instance;
         })();
     // Snap in behind the new vehicle rather than flying across the map to it.
     if (chase.enabled) chase.reset(instance);

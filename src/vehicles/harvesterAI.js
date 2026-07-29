@@ -18,6 +18,7 @@ const IDLE = 'idle';
 const TO_FIELD = 'to-field';
 const FILLING = 'filling';
 const TO_BASE = 'to-base';
+const WAITING_FOR_DOCK = 'waiting-for-dock';
 const UNLOADING = 'unloading';
 const PAUSED = 'paused';
 
@@ -38,6 +39,8 @@ const TRANSFER_SPEED = 0.5; // must be near enough stopped to load or unload
 
 /** Widening, alternating. A straight retry cannot work: the heading is unchanged. */
 const DETOUR_ANGLES = [0.9, -0.9, 1.6, -1.6, 2.4];
+const QUEUE_RING = 35; // distance from facility center to queue parking spots
+const MAX_QUEUE_POSITIONS = 4; // max harvesters that can queue at a facility
 
 export class HarvesterAI {
   constructor({ vehicles, world, heightmap, structures, game }) {
@@ -128,8 +131,10 @@ export class HarvesterAI {
         return this._fill(inst, s, dt);
       case TO_BASE:
         return this._travel(inst, s, dt, DOCK_DISTANCE, () => {
-          s.state = UNLOADING;
+          this._atDock(inst, s);
         });
+      case WAITING_FOR_DOCK:
+        return this._waitingForDock(inst, s);
       case UNLOADING:
         return this._unload(inst, s, dt);
       default:
@@ -218,9 +223,57 @@ export class HarvesterAI {
 
     if (s.load <= 1e-6) {
       s.load = 0;
+      // Release dock bay for next harvester
+      if (facility.dockedHarvester === inst) {
+        facility.dockedHarvester = null;
+      }
       s.state = IDLE;
       s.dest = null;
       s.detours = 0;
+    }
+  }
+
+  _atDock(inst, s) {
+    const facility = this._facility();
+    if (!facility) {
+      s.state = IDLE;
+      return;
+    }
+
+    // Check if dock is occupied
+    if (!facility.dockedHarvester) {
+      facility.dockedHarvester = inst;
+      s.state = UNLOADING;
+    } else {
+      s.state = WAITING_FOR_DOCK;
+      s.queuePosition = 0;
+    }
+  }
+
+  _waitingForDock(inst, s) {
+    const facility = this._facility();
+    if (!facility) {
+      s.state = IDLE;
+      return;
+    }
+
+    // Check if dock is now free
+    if (!facility.dockedHarvester) {
+      facility.dockedHarvester = inst;
+      s.state = UNLOADING;
+      return;
+    }
+
+    // Park in queue position around facility
+    const angle = (s.queuePosition ?? 0) * (Math.PI * 2 / MAX_QUEUE_POSITIONS);
+    const queueX = facility.x + Math.cos(angle) * QUEUE_RING;
+    const queueZ = facility.z + Math.sin(angle) * QUEUE_RING;
+
+    const pos = inst.group.position;
+    const d = Math.hypot(queueX - pos.x, queueZ - pos.z);
+
+    if (d > 1) {
+      this._order(inst, s, { x: queueX, z: queueZ });
     }
   }
 

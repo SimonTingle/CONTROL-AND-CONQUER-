@@ -148,6 +148,9 @@ class StructureInstance {
       z: z + Math.sin(angle) * def.dockOffset,
     };
 
+    // Track which harvester is currently docking
+    this.dockedHarvester = null;
+
     // Buried until it rises, so nothing casts a shadow from under the pad.
     for (const m of this.group.userData.shadowCasters) m.castShadow = false;
   }
