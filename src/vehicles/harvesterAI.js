@@ -114,7 +114,10 @@ export class HarvesterAI {
     // Runs after applyDriveInput, so this is *this frame's* input: never issue
     // an order the player has already cancelled. An open command menu counts as
     // the player's hand on this vehicle too — it holds still while they decide.
-    const driven = inst.throttle !== 0 || inst.steer !== 0 || inst.menuOpen;
+    // A repair in progress is also "someone else has the wheel" — the repair
+    // controller is issuing its own setTarget() orders to the bay, and this
+    // dispatch must stay out of the way rather than fight it for `target`.
+    const driven = inst.throttle !== 0 || inst.steer !== 0 || inst.menuOpen || !!inst.repair;
     if (driven) {
       if (s.state !== PAUSED) {
         s.resumeState = s.state;
@@ -123,8 +126,8 @@ export class HarvesterAI {
       s.pauseTimer = RESUME_DELAY;
       // Dropping dispatch is not enough to stop it: the order lives on the
       // instance, and the physics step drives toward `target` whatever this
-      // state machine thinks. Manual input already nulls the target itself, so
-      // only the menu case has to.
+      // state machine thinks. Manual input already nulls the target itself,
+      // and repair drives it on purpose, so only the menu case has to.
       if (inst.menuOpen) {
         inst.target = null;
         inst.forwardSpeed = 0;
