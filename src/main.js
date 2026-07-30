@@ -13,6 +13,7 @@ import { VehicleController } from './vehicles/vehicleController.js';
 import { VEHICLE_CATALOG } from './vehicles/catalog.js';
 import { commandsFor } from './vehicles/commands.js';
 import { HarvesterAI } from './vehicles/harvesterAI.js';
+import { RepairController } from './vehicles/repairController.js';
 import { Terraform } from './core/terraform.js';
 import { StructureController } from './structures/structures.js';
 
@@ -121,6 +122,53 @@ function updateHarvestMarker(elapsed) {
   harvestMarker.position.y =
     harvestMarker.userData.groundY + MARKER_HOVER + Math.sin(elapsed * 2.4) * 0.6;
   harvestMarker.rotation.y = elapsed * 0.8;
+}
+
+// Building placement preview: a flat disc that follows the cursor while
+// commandContext.buildPlacementMode is active, sized to the pending building's
+// own footprint and colour-coded so an illegal drop reads before it's clicked.
+const PLACEMENT_VALID_COLOR = new THREE.Color(0x39ff6a);
+const PLACEMENT_INVALID_COLOR = new THREE.Color(0xff3b3b);
+const placementPreview = new THREE.Mesh(
+  new THREE.CircleGeometry(1, 32),
+  new THREE.MeshBasicMaterial({ color: 0x39ff6a, transparent: true, opacity: 0.35, side: THREE.DoubleSide })
+);
+placementPreview.rotation.x = -Math.PI / 2;
+placementPreview.visible = false;
+world.scene.add(placementPreview);
+
+function cancelPlacementMode() {
+  commandContext.buildPlacementMode = null;
+  placementPreview.visible = false;
+}
+
+/** Re-picks every frame rather than caching from a stale hover — same idiom
+ * as harvest-select's own click-time pick, just run continuously here since
+ * the preview has to track the cursor, not just react to a click. */
+function updatePlacementPreview(clientX, clientY) {
+  const mode = commandContext.buildPlacementMode;
+  if (!mode) {
+    placementPreview.visible = false;
+    return;
+  }
+
+  const point = pickTerrain(clientX, clientY, canvas, camera, heightmap, hit);
+  if (!point) {
+    placementPreview.visible = false;
+    return;
+  }
+
+  if (placementPreview.userData.footprint !== mode.def.footprint) {
+    placementPreview.geometry.dispose();
+    placementPreview.geometry = new THREE.CircleGeometry(mode.def.footprint, 32);
+    placementPreview.userData.footprint = mode.def.footprint;
+  }
+
+  placementPreview.position.set(point.x, point.y + 0.3, point.z);
+  placementPreview.visible = true;
+
+  const valid = structures.canPlaceAt(mode.pad, mode.def, point.x, point.z);
+  placementPreview.material.color.copy(valid ? PLACEMENT_VALID_COLOR : PLACEMENT_INVALID_COLOR);
 }
 
 const vehicles = new VehicleController(world.scene);
@@ -263,6 +311,19 @@ canvas.addEventListener('pointerup', (e) => {
     return;
   }
 
+  // Handle building placement mode
+  if (commandContext.buildPlacementMode) {
+    const { def, pad } = commandContext.buildPlacementMode;
+    const point = pickTerrain(e.clientX, e.clientY, canvas, camera, heightmap, hit);
+    if (point && structures.canPlaceAt(pad, def, point.x, point.z)) {
+      structures.place(def, pad, { x: point.x, z: point.z });
+      cancelPlacementMode();
+    }
+    // An invalid click is not a cancel — mirrors "click far from any bloom has
+    // no effect" from harvest targeting. Stays in placement mode either way.
+    return;
+  }
+
   // Handle harvest selection mode
   if (commandContext.harvestSelectMode) {
     const point = pickTerrain(e.clientX, e.clientY, canvas, camera, heightmap, hit);
@@ -386,6 +447,7 @@ addEventListener('keydown', (e) => {
   // Keys are bound to the window, so the difficulty overlay has to swallow them
   // explicitly or the player drives a vehicle that does not exist yet.
   if (k in driveKeys && !isTextInputFocused() && !game.difficultyScreen?.open) driveKeys[k] = true;
+  if (e.key === 'Escape' && commandContext.buildPlacementMode) cancelPlacementMode();
 });
 addEventListener('keyup', (e) => {
   const k = e.key.toLowerCase();
@@ -429,6 +491,8 @@ const view = {
     // The markers are anchored to terrain that no longer exists.
     marker.visible = false;
     hideHarvestMarker();
+    // A pending placement targets a pad that's about to be orphaned too.
+    cancelPlacementMode();
     // So are any pads: regenerate swaps in a fresh heightfield array, which
     // orphans the flattening the old one was carrying.
     terraform.clear();
@@ -436,6 +500,7 @@ const view = {
     // fields that no longer exist.
     structures.clear();
     harvesterAI.reset();
+    repairController.reset();
     radialMenu.close();
   },
   setChase(enabled) {
@@ -463,8 +528,13 @@ const game = {
   unlocked: false,
   difficultyScreen: null,
   credits: 0,
+  // Latched the same way `unlocked` is: relocating spends nothing, so without
+  // a latch a base built just past 50k could spend back below it and lose the
+  // option it already earned.
+  reachedRelocateThreshold: false,
   earn(n) {
     this.credits += n;
+    if (this.credits >= 50000) this.reachedRelocateThreshold = true;
     return this.credits;
   },
   /** @returns {boolean} false when short, so the caller can explain why. */
@@ -551,6 +621,7 @@ structures.onComplete = (instance) => {
 };
 
 const harvesterAI = new HarvesterAI({ vehicles, world, heightmap, structures, game });
+const repairController = new RepairController({ vehicles, heightmap, game });
 
 /** Everything a command might need, so commands.js imports no game systems. */
 const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit };
@@ -651,6 +722,9 @@ function tick(dt, { render = true } = {}) {
   // deciding (so it never issues an order the player just cancelled) and set
   // its targets before the fleet consumes them.
   harvesterAI.update(dt);
+  // After harvesterAI: a repairing harvester is already paused by the check
+  // above, so this is the only thing setting its target this frame.
+  repairController.update(dt);
   vehicles.update(dt, heightmap, headlightsWanted(), camera);
   structures.update(dt, heightmap);
 
@@ -682,7 +756,11 @@ function tick(dt, { render = true } = {}) {
 
   updateMarker(clock.elapsedTime);
   updateHarvestMarker(clock.elapsedTime);
-  canvas.classList.toggle('crosshair-mode', !!commandContext.harvestSelectMode);
+  updatePlacementPreview(lastX, lastY);
+  canvas.classList.toggle(
+    'crosshair-mode',
+    !!commandContext.harvestSelectMode || !!commandContext.buildPlacementMode
+  );
   vehiclePicker.update(dt);
   renderer.render(world.scene, camera);
 
@@ -787,5 +865,5 @@ window.__probe = (count = 100) => {
 Object.assign(window, {
   world, camera, renderer, controls, chase, THREE, vehicles, vehiclePicker, input, lighting, driveKeys,
   game, hud, terraform, radialMenu, commandsFor, commandContext,
-  structures, harvesterAI, produceUnit,
+  structures, harvesterAI, repairController, produceUnit,
 });

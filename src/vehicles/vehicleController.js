@@ -7,6 +7,11 @@ const BRAKE_SPEED = 0.1; // at or below this the vehicle counts as stopped
 const STEER_GAIN = 1.8; // how hard a click order leans on the steering
 const GRADE_PROBE = 2.5; // world units to look ahead when measuring the climb
 const MIN_CLIMB_FACTOR = 0.15; // a near-limit climb is a crawl, not a stop
+// Grinding against terrain too steep to climb wears the vehicle down — the
+// game's only damage source today, just enough to give the repair bay a real
+// reason to run. Floored well above zero: nothing here destroys a vehicle.
+const BLOCKED_DAMAGE_RATE = 3; // health/second while blocked
+const BLOCKED_DAMAGE_FLOOR = 0.15; // fraction of maxHealth
 const _up = new THREE.Vector3(0, 1, 0);
 const _forward = new THREE.Vector3(1, 0, 0); // body-local forward axis
 const _lateral = new THREE.Vector3(0, 0, 1); // body-local lateral axis
@@ -195,6 +200,18 @@ class VehicleInstance {
   }
 
   /**
+   * Called only from the frame `blocked` is actively (re)determined — never
+   * from a blanket per-frame check. `blocked` has no path back to false once
+   * a vehicle gives up trying (coasting doesn't touch it), so gating damage
+   * on the flag alone would grind a motionless, no-longer-trying vehicle down
+   * forever instead of just the moment it's genuinely pushing against terrain.
+   */
+  _applyBlockedDamage(dt) {
+    const floor = this.def.maxHealth * BLOCKED_DAMAGE_FLOOR;
+    this.health = Math.max(floor, this.health - BLOCKED_DAMAGE_RATE * dt);
+  }
+
+  /**
    * Ease the front wheels toward a target angle, then yaw the body by what
    * that steering geometry actually produces.
    *
@@ -244,6 +261,7 @@ class VehicleInstance {
     if (this.throttle > 0) {
       this.accelerating = true;
       this.blocked = !climbable;
+      if (this.blocked) this._applyBlockedDamage(dt);
       if (climbable) {
         this.forwardSpeed = Math.min(
           this.forwardSpeed + def.acceleration * dt,
@@ -292,6 +310,7 @@ class VehicleInstance {
     if (!climbable) {
       // Abandon the order rather than grind against the slope forever.
       this.blocked = true;
+      this._applyBlockedDamage(dt);
       this.arrive('blocked');
       return;
     }
