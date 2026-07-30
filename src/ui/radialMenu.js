@@ -43,6 +43,9 @@ export class RadialMenu {
   openFor(instance, commands) {
     this.instance = instance;
     this.items = commands;
+    // Autonomous drivers watch this to hold position while the player decides —
+    // without it the harvester's AI drives it away and update() shuts the menu.
+    instance.menuOpen = true;
 
     const ring = el('div', 'rm-ring');
     const title = el('div', 'rm-title');
@@ -89,11 +92,16 @@ export class RadialMenu {
 
     this.root.replaceChildren(...nodes);
     this.root.classList.remove('hidden');
-    this.update();
+    // Position only. Going through update() here would run the drove-away check
+    // against the speed the vehicle still has *this* instant — closing the menu
+    // on the same call stack that opened it, before any tick has had a chance to
+    // honour menuOpen and bring an autonomous vehicle to a stop.
+    this._reposition();
   }
 
   close() {
     if (!this.isOpen) return;
+    this.instance.menuOpen = false;
     this.instance = null;
     this.items = [];
     this.root.classList.add('hidden');
@@ -103,10 +111,14 @@ export class RadialMenu {
   /** Re-anchor to the vehicle, and retire the menu if it no longer applies. */
   update() {
     if (!this.isOpen) return;
-
-    const instance = this.instance;
     // Driving away is an implicit "never mind". Structures report zero.
-    if (instance.speed > CLOSE_SPEED) return this.close();
+    if (this.instance.speed > CLOSE_SPEED) return this.close();
+    this._reposition();
+  }
+
+  /** Project the anchor to screen space and move the menu there. */
+  _reposition() {
+    const instance = this.instance;
 
     _anchor.copy(instance.group.position);
     _anchor.y += instance.menuAnchorHeight;

@@ -140,9 +140,10 @@ const COMMANDS = {
         id: 'return-to-base',
         label: 'Return to Base',
         hint: 'Park at facility',
-        execute(instance, ctx) {
+        execute(instance) {
+          // The driver reads this when it next finishes unloading; there is no
+          // handle to the AI from here, and it does not need one.
           instance.shouldPark = true;
-          instance.harvestAI?.setTargetToBase();
         },
       },
     ],

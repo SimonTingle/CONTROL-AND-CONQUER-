@@ -60,6 +60,26 @@ export class HarvesterAI {
   /** Terrain regenerated: every field reference and destination is meaningless. */
   reset() {
     this.states.clear();
+    // Player-set targets live on the instance, not in `states`, so clearing the
+    // map alone would leave a harvester holding a field from the old world —
+    // still not `dead`, so it would pass validation and route to coordinates
+    // that now mean nothing.
+    for (const inst of this.vehicles.instances) inst.targetField = null;
+  }
+
+  /**
+   * The player's chosen field, taken exactly once.
+   *
+   * One-shot on purpose: a target that stayed set would override the driver's
+   * own choice of field for the rest of the game, turning "go to this one" into
+   * "only ever use this one". Cleared whether or not it turned out to be usable,
+   * so a stale pick cannot be retried forever.
+   */
+  _consumeTargetField(inst) {
+    const field = inst.targetField;
+    if (!field) return null;
+    inst.targetField = null;
+    return !field.dead && field.stock > 0 ? field : null;
   }
 
   update(dt) {
@@ -92,14 +112,25 @@ export class HarvesterAI {
 
   _drive(inst, s, dt) {
     // Runs after applyDriveInput, so this is *this frame's* input: never issue
-    // an order the player has already cancelled.
-    const driven = inst.throttle !== 0 || inst.steer !== 0;
+    // an order the player has already cancelled. An open command menu counts as
+    // the player's hand on this vehicle too — it holds still while they decide.
+    const driven = inst.throttle !== 0 || inst.steer !== 0 || inst.menuOpen;
     if (driven) {
       if (s.state !== PAUSED) {
         s.resumeState = s.state;
         s.state = PAUSED;
       }
       s.pauseTimer = RESUME_DELAY;
+      // Dropping dispatch is not enough to stop it: the order lives on the
+      // instance, and the physics step drives toward `target` whatever this
+      // state machine thinks. Manual input already nulls the target itself, so
+      // only the menu case has to.
+      if (inst.menuOpen) {
+        inst.target = null;
+        inst.forwardSpeed = 0;
+        inst.speed = 0;
+        inst.accelerating = false;
+      }
       return;
     }
 
@@ -122,6 +153,10 @@ export class HarvesterAI {
       case IDLE:
         return this._idle(inst, s);
       case TO_FIELD:
+        // Already on the way somewhere when the player picks a field: divert now
+        // rather than finishing this run first. Waiting would look like the pick
+        // was ignored, which is the whole complaint the one-shot target fixes.
+        this._retargetInFlight(inst, s);
         // Same overshoot risk as the dock: a field's own radius (14) can sit
         // inside the harvester's turning radius, so floor it at the dock
         // distance rather than trusting the field's physical size.
@@ -156,9 +191,9 @@ export class HarvesterAI {
       return;
     }
 
-    // Use player-selected target field if available
-    let field = inst.targetField;
-    if (!field || field.dead || field.stock < 1) {
+    // A field the player picked wins over the driver's own judgement, once.
+    let field = this._consumeTargetField(inst);
+    if (!field) {
       field = this.world.blooms.nearestTo(inst.group.position.x, inst.group.position.z, {
         minStock: 1,
         reject: (f) => (s.bans.get(f.id) ?? 0) > now,
@@ -181,6 +216,23 @@ export class HarvesterAI {
       s.bans.set(field.id, now + BAN_SECONDS);
       s.retryTimer = RETRY_PAUSE;
     }
+  }
+
+  /**
+   * Divert a harvester already driving to a field onto a newly picked one.
+   *
+   * `s.field` moves only if the order is actually accepted, so the state machine's
+   * idea of where it is going can never disagree with where the vehicle is
+   * steering — a refused order leaves the original run untouched.
+   */
+  _retargetInFlight(inst, s) {
+    const field = this._consumeTargetField(inst);
+    if (!field || field === s.field) return;
+    if (!this._order(inst, s, { x: field.x, z: field.z })) return;
+    s.field = field;
+    s.waypoint = null;
+    s.detours = 0;
+    s.stallTimer = 0;
   }
 
   _reachedField(inst, s) {
@@ -294,10 +346,23 @@ export class HarvesterAI {
   }
 
   _parked(inst, s) {
+    // Picking a field is how a parked harvester gets called back to work —
+    // otherwise parking is a one-way door and "Target Harvest" looks broken on
+    // exactly the harvesters a player is most likely to be giving orders to.
+    // Left for _idle to consume, so there is one place that chooses a field.
+    if (inst.targetField) {
+      inst.shouldPark = false;
+      this._leaveParking(inst, s);
+      s.state = IDLE;
+      s.dest = null;
+      return;
+    }
+
     const facility = this._facility();
     if (!facility) {
       s.state = IDLE;
       inst.shouldPark = false;
+      this._leaveParking(inst, s);
       return;
     }
 
@@ -316,6 +381,17 @@ export class HarvesterAI {
     } else {
       // At parking bay, idle here
       inst.arrive('parked');
+    }
+  }
+
+  /** Give up a parking bay, so the next harvester to park can claim it. */
+  _leaveParking(inst, s) {
+    s.parkingBayIndex = undefined;
+    for (const f of this.structures.instances) {
+      const parked = f.parkedHarvesters;
+      if (!parked) continue;
+      const i = parked.indexOf(inst);
+      if (i !== -1) parked.splice(i, 1);
     }
   }
 
