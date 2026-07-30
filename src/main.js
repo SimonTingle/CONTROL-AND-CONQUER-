@@ -124,18 +124,80 @@ function updateHarvestMarker(elapsed) {
   harvestMarker.rotation.y = elapsed * 0.8;
 }
 
-// Building placement preview: a flat disc that follows the cursor while
-// commandContext.buildPlacementMode is active, sized to the pending building's
-// own footprint and colour-coded so an illegal drop reads before it's clicked.
-const PLACEMENT_VALID_COLOR = new THREE.Color(0x39ff6a);
+// Building placement preview: a neon square outline, sized to the pending
+// building's own real footprint (not a generic circle), that snaps to a fixed
+// grid while commandContext.buildPlacementMode is active. Cyan reads as a
+// legal drop, red as illegal — the same signal a click will actually get.
+const GRID_CELL_SIZE = 4; // world units per snap step
+const PLACEMENT_VALID_COLOR = new THREE.Color(0x22e5ff);
 const PLACEMENT_INVALID_COLOR = new THREE.Color(0xff3b3b);
-const placementPreview = new THREE.Mesh(
-  new THREE.CircleGeometry(1, 32),
-  new THREE.MeshBasicMaterial({ color: 0x39ff6a, transparent: true, opacity: 0.35, side: THREE.DoubleSide })
-);
-placementPreview.rotation.x = -Math.PI / 2;
-placementPreview.visible = false;
-world.scene.add(placementPreview);
+const OUTLINE_THICKNESS = 0.6;
+const OUTLINE_HEIGHT = 0.7;
+
+/** Snap a world point to the nearest grid intersection. */
+function snapToGrid(x, z) {
+  return {
+    x: Math.round(x / GRID_CELL_SIZE) * GRID_CELL_SIZE,
+    z: Math.round(z / GRID_CELL_SIZE) * GRID_CELL_SIZE,
+  };
+}
+
+/**
+ * The building's real footprint, in world units — its actual plan dimensions,
+ * not `def.footprint` (which is a clearance radius for overlap checking, and
+ * on its own reads far too big or small as an outline: a repair bay's
+ * footprint value alone would draw larger than the whole area it can legally
+ * stand in).
+ */
+function footprintSize(def) {
+  if (def.dims.width != null && def.dims.depth != null) return { w: def.dims.width, d: def.dims.depth };
+  if (def.dims.padRadius != null) return { w: def.dims.padRadius * 2, d: def.dims.padRadius * 2 };
+  return { w: def.footprint * 2, d: def.footprint * 2 };
+}
+
+/** A four-bar picture-frame outline — cheap, and every bar shares one
+ * material so a single colour swap recolors the whole frame at once. */
+function buildFootprintOutline() {
+  const group = new THREE.Group();
+  const material = new THREE.MeshBasicMaterial({ color: PLACEMENT_VALID_COLOR });
+  const bars = [
+    new THREE.Mesh(new THREE.BoxGeometry(1, OUTLINE_HEIGHT, OUTLINE_THICKNESS), material),
+    new THREE.Mesh(new THREE.BoxGeometry(1, OUTLINE_HEIGHT, OUTLINE_THICKNESS), material),
+    new THREE.Mesh(new THREE.BoxGeometry(OUTLINE_THICKNESS, OUTLINE_HEIGHT, 1), material),
+    new THREE.Mesh(new THREE.BoxGeometry(OUTLINE_THICKNESS, OUTLINE_HEIGHT, 1), material),
+  ];
+  for (const bar of bars) group.add(bar);
+  group.userData.bars = bars;
+  group.userData.material = material;
+  group.visible = false;
+  world.scene.add(group);
+  return group;
+}
+
+const placementPreview = buildFootprintOutline();
+
+/** Resize the four bars to frame a `w` x `d` rectangle, in place. */
+function resizeFootprintOutline(group, w, d) {
+  const [top, bottom, left, right] = group.userData.bars;
+  const halfW = w / 2;
+  const halfD = d / 2;
+
+  top.geometry.dispose();
+  top.geometry = new THREE.BoxGeometry(w + OUTLINE_THICKNESS, OUTLINE_HEIGHT, OUTLINE_THICKNESS);
+  top.position.set(0, 0, -halfD);
+
+  bottom.geometry.dispose();
+  bottom.geometry = new THREE.BoxGeometry(w + OUTLINE_THICKNESS, OUTLINE_HEIGHT, OUTLINE_THICKNESS);
+  bottom.position.set(0, 0, halfD);
+
+  left.geometry.dispose();
+  left.geometry = new THREE.BoxGeometry(OUTLINE_THICKNESS, OUTLINE_HEIGHT, d + OUTLINE_THICKNESS);
+  left.position.set(-halfW, 0, 0);
+
+  right.geometry.dispose();
+  right.geometry = new THREE.BoxGeometry(OUTLINE_THICKNESS, OUTLINE_HEIGHT, d + OUTLINE_THICKNESS);
+  right.position.set(halfW, 0, 0);
+}
 
 function cancelPlacementMode() {
   commandContext.buildPlacementMode = null;
@@ -158,17 +220,20 @@ function updatePlacementPreview(clientX, clientY) {
     return;
   }
 
-  if (placementPreview.userData.footprint !== mode.def.footprint) {
-    placementPreview.geometry.dispose();
-    placementPreview.geometry = new THREE.CircleGeometry(mode.def.footprint, 32);
-    placementPreview.userData.footprint = mode.def.footprint;
+  const snapped = snapToGrid(point.x, point.z);
+  const groundY = heightmap.heightAt(snapped.x, snapped.z);
+
+  if (placementPreview.userData.defId !== mode.def.id) {
+    const size = footprintSize(mode.def);
+    resizeFootprintOutline(placementPreview, size.w, size.d);
+    placementPreview.userData.defId = mode.def.id;
   }
 
-  placementPreview.position.set(point.x, point.y + 0.3, point.z);
+  placementPreview.position.set(snapped.x, groundY + OUTLINE_HEIGHT / 2 + 0.1, snapped.z);
   placementPreview.visible = true;
 
-  const valid = structures.canPlaceAt(mode.pad, mode.def, point.x, point.z);
-  placementPreview.material.color.copy(valid ? PLACEMENT_VALID_COLOR : PLACEMENT_INVALID_COLOR);
+  const valid = structures.canPlaceAt(mode.pad, mode.def, snapped.x, snapped.z);
+  placementPreview.userData.material.color.copy(valid ? PLACEMENT_VALID_COLOR : PLACEMENT_INVALID_COLOR);
 }
 
 const vehicles = new VehicleController(world.scene);
@@ -315,9 +380,14 @@ canvas.addEventListener('pointerup', (e) => {
   if (commandContext.buildPlacementMode) {
     const { def, pad } = commandContext.buildPlacementMode;
     const point = pickTerrain(e.clientX, e.clientY, canvas, camera, heightmap, hit);
-    if (point && structures.canPlaceAt(pad, def, point.x, point.z)) {
-      structures.place(def, pad, { x: point.x, z: point.z });
-      cancelPlacementMode();
+    if (point) {
+      // Same snap the preview outline used, so the click lands exactly where
+      // the player was shown it would.
+      const snapped = snapToGrid(point.x, point.z);
+      if (structures.canPlaceAt(pad, def, snapped.x, snapped.z)) {
+        structures.place(def, pad, snapped);
+        cancelPlacementMode();
+      }
     }
     // An invalid click is not a cancel — mirrors "click far from any bloom has
     // no effect" from harvest targeting. Stays in placement mode either way.
@@ -866,4 +936,5 @@ Object.assign(window, {
   world, camera, renderer, controls, chase, THREE, vehicles, vehiclePicker, input, lighting, driveKeys,
   game, hud, terraform, radialMenu, commandsFor, commandContext,
   structures, harvesterAI, repairController, produceUnit,
+  updatePlacementPreview, placementPreview, snapToGrid, footprintSize, resizeFootprintOutline,
 });
