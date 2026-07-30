@@ -57,10 +57,10 @@ export class RadialMenu {
       const button = el('button', 'rm-item');
       button.type = 'button';
 
-      // Fan the entries around the top of the ring, so a single command sits
-      // directly above the vehicle rather than off at 3 o'clock.
-      const spread = Math.min(commands.length, 6);
-      const angle = -Math.PI / 2 + (i - (spread - 1) / 2) * (Math.PI / 3.2);
+      // Spread commands evenly around the full circle. Two commands sit left-right
+      // (0° and 180°); six spread 60° apart.
+      const spread = commands.length;
+      const angle = (i / spread) * Math.PI * 2;
       button.style.left = `${Math.cos(angle) * RING_RADIUS}px`;
       button.style.top = `${Math.sin(angle) * RING_RADIUS}px`;
 
@@ -92,6 +92,29 @@ export class RadialMenu {
 
     this.root.replaceChildren(...nodes);
     this.root.classList.remove('hidden');
+
+    // On mobile, hints only show when the user holds a finger on the button.
+    // On desktop, :hover in CSS handles it.
+    const isMobile = navigator.maxTouchPoints > 0;
+    if (isMobile) {
+      for (const button of this.root.querySelectorAll('.rm-item:not(.disabled)')) {
+        let hintTimer = null;
+        button.addEventListener('pointerdown', () => {
+          hintTimer = setTimeout(() => {
+            button.classList.add('hint-active');
+          }, 200);
+        });
+        button.addEventListener('pointerup', () => {
+          if (hintTimer) clearTimeout(hintTimer);
+          button.classList.remove('hint-active');
+        });
+        button.addEventListener('pointercancel', () => {
+          if (hintTimer) clearTimeout(hintTimer);
+          button.classList.remove('hint-active');
+        });
+      }
+    }
+
     // Position only. Going through update() here would run the drove-away check
     // against the speed the vehicle still has *this* instant — closing the menu
     // on the same call stack that opened it, before any tick has had a chance to
