@@ -72,6 +72,57 @@ function updateMarker(elapsed) {
   marker.rotation.y = elapsed * 0.8;
 }
 
+// Harvest-target marker: the same idea in the crystals' own colour, so "go here"
+// and "harvest this" read as different orders at a glance. A second mesh rather
+// than a reuse of `marker` because that one retires on the *active* vehicle's
+// order finishing — and the harvester being targeted is usually not the vehicle
+// the player is driving, so a shared marker would vanish almost at once.
+const harvestMarker = new THREE.Mesh(
+  new THREE.SphereGeometry(1.6, 24, 16),
+  new THREE.MeshStandardMaterial({
+    color: 0x2ad9ff,
+    emissive: 0x06323d,
+    metalness: 1.0,
+    roughness: 0.18,
+  })
+);
+harvestMarker.castShadow = true;
+harvestMarker.visible = false;
+harvestMarker.userData.groundY = 0;
+world.scene.add(harvestMarker);
+
+/** Which harvester/field pair the harvest marker is currently vouching for. */
+let harvestMarkerFor = null;
+
+function showHarvestMarker(harvester, field) {
+  const groundY = heightmap.heightAt(field.x, field.z);
+  harvestMarker.userData.groundY = groundY;
+  harvestMarker.position.set(field.x, groundY + MARKER_HOVER, field.z);
+  harvestMarker.visible = true;
+  harvestMarkerFor = { harvester, field };
+}
+
+function hideHarvestMarker() {
+  harvestMarker.visible = false;
+  harvestMarkerFor = null;
+}
+
+/** Retire the marker once the order it stands for is no longer outstanding. */
+function updateHarvestMarker(elapsed) {
+  if (!harvestMarkerFor) return;
+
+  // The driver clears targetField the moment it acts on it, so this covers
+  // "picked up", "superseded by a newer pick" and "wiped by a regenerate" alike.
+  if (harvestMarkerFor.harvester.targetField !== harvestMarkerFor.field) {
+    hideHarvestMarker();
+    return;
+  }
+
+  harvestMarker.position.y =
+    harvestMarker.userData.groundY + MARKER_HOVER + Math.sin(elapsed * 2.4) * 0.6;
+  harvestMarker.rotation.y = elapsed * 0.8;
+}
+
 const vehicles = new VehicleController(world.scene);
 
 const terraform = new Terraform(world);
@@ -123,15 +174,17 @@ function clearLongPress() {
   longPressTimer = null;
 }
 
-function startLongPress(clientX, clientY) {
+function startLongPress() {
   longPressTimer = setTimeout(() => {
     longPressTimer = null;
     if (dragged) return; // moved since the press started — a drag, not a hold
-    // Pick first: a long press on empty ground should fall through to the
-    // ordinary tap/click on release, not swallow it.
-    if (!pickSelectable(clientX, clientY)) return;
+    // Picks at the *live* pointer position, not where the press started half a
+    // second ago. An autonomous harvester can drive clear of the original ray
+    // inside the hold window, and a pick against stale coordinates then misses
+    // a vehicle the cursor is still sitting on.
+    if (!pickSelectable(lastX, lastY)) return;
     suppressNextTapMove = true;
-    openMenuAt(clientX, clientY);
+    openMenuAt(lastX, lastY);
   }, LONG_PRESS_MS);
 }
 
@@ -168,7 +221,7 @@ canvas.addEventListener('pointerdown', (e) => {
   // Primary button/touch only — a held right-drag pans the chase camera and
   // must not also pop the menu.
   if (e.button !== 0) return;
-  startLongPress(e.clientX, e.clientY);
+  startLongPress();
 });
 
 canvas.addEventListener('pointermove', (e) => {
@@ -214,11 +267,18 @@ canvas.addEventListener('pointerup', (e) => {
   if (commandContext.harvestSelectMode) {
     const point = pickTerrain(e.clientX, e.clientY, canvas, camera, heightmap, hit);
     if (point) {
-      // Find nearest bloom to clicked point
-      const field = world.blooms.nearestTo(point.x, point.z, { minStock: 0 });
+      // requireOnField so a click on bare ground finds nothing, rather than
+      // quietly sending the harvester to whichever field is nearest the miss.
+      const field = world.blooms.nearestTo(point.x, point.z, {
+        minStock: 0,
+        requireOnField: true,
+      });
       if (field) {
-        commandContext.harvestSelectMode.harvester.targetField = field;
-        marker.visible = false;
+        const { harvester } = commandContext.harvestSelectMode;
+        harvester.targetField = field;
+        // Anchored to the field's centre, not the click: it has to be obvious
+        // *which* field was taken, even when the click landed out at the edge.
+        showHarvestMarker(harvester, field);
       }
     }
     commandContext.harvestSelectMode = null;
@@ -366,8 +426,9 @@ const view = {
   lighting,
   regenerate(params) {
     world.regenerate(params);
-    // The marker is anchored to terrain that no longer exists.
+    // The markers are anchored to terrain that no longer exists.
     marker.visible = false;
+    hideHarvestMarker();
     // So are any pads: regenerate swaps in a fresh heightfield array, which
     // orphans the flattening the old one was carrying.
     terraform.clear();
@@ -620,6 +681,8 @@ function tick(dt, { render = true } = {}) {
   if (!render) return;
 
   updateMarker(clock.elapsedTime);
+  updateHarvestMarker(clock.elapsedTime);
+  canvas.classList.toggle('crosshair-mode', !!commandContext.harvestSelectMode);
   vehiclePicker.update(dt);
   renderer.render(world.scene, camera);
 

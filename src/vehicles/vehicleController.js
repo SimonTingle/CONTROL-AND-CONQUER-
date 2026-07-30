@@ -58,6 +58,10 @@ class VehicleInstance {
     this.headlightsOn = false;
     this.lodTier = LOD_TIERS.FULL; // distance-based level of detail
     this.createdAt = Date.now(); // timestamp for menu ordering
+    // Set by RadialMenu while this vehicle's command menu is up. An autonomous
+    // driver holds position while it is true, so the menu does not slide away
+    // from under the player's cursor mid-decision.
+    this.menuOpen = false;
   }
 
   /**

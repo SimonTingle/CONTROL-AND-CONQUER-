@@ -28,6 +28,9 @@ html, body {
   touch-action: none;
 }
 
+/* Armed to pick a bloom: the pointer says so, since the next click is special. */
+#viewport.crosshair-mode { cursor: crosshair; }
+
 /* ---- hamburger ---- */
 
 #menu-toggle {
