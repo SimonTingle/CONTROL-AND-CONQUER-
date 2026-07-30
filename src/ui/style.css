@@ -572,11 +572,22 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
 }
 
 .rm-sub {
+  display: none;
   font-size: 9px;
   font-weight: 400;
   letter-spacing: 0.02em;
   color: var(--text-dim);
   text-shadow: none;
+}
+
+/* Desktop: show hints on hover */
+.rm-item:hover:not(.disabled) .rm-sub {
+  display: block;
+}
+
+/* Mobile: show hints when user holds finger on button */
+.rm-item.hint-active .rm-sub {
+  display: block;
 }
 
 /* ---- difficulty select ---- */
