@@ -805,7 +805,11 @@ const vehiclePicker = new VehiclePicker(VEHICLE_CATALOG, {
               })
             : findEdgeSpawnPoint(heightmap, camera);
           point.y += 0.05; // avoid z-fighting with the ground on the spawn frame
-          const instance = vehicles.spawn(def, point, heading);
+          // findSpawnPointNear/findEdgeSpawnPoint face a vehicle back toward
+          // its reference point — for the base station that consistently
+          // leaves it facing out to sea instead of toward land, so flip it.
+          const spawnHeading = def.id === 'base-station' ? heading + Math.PI : heading;
+          const instance = vehicles.spawn(def, point, spawnHeading);
           // Store scout's spawn point for base station to reuse later
           if (def.id === 'scout-buggy' && !game.scoutSpawnPoint) {
             game.scoutSpawnPoint = { x: point.x, z: point.z };
