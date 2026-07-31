@@ -7,10 +7,10 @@ const BRAKE_SPEED = 0.1; // at or below this the vehicle counts as stopped
 const STEER_GAIN = 1.8; // how hard a click order leans on the steering
 const GRADE_PROBE = 2.5; // world units to look ahead when measuring the climb
 const MIN_CLIMB_FACTOR = 0.15; // a near-limit climb is a crawl, not a stop
-// Grinding against terrain too steep to climb wears the vehicle down — the
-// game's only damage source today, just enough to give the repair bay a real
-// reason to run. Floored well above zero: nothing here destroys a vehicle.
-const BLOCKED_DAMAGE_RATE = 3; // health/second while blocked
+// Grinding against terrain too steep to climb wears the vehicle down — just
+// enough to give the repair bay a real reason to run. Floored well above
+// zero: nothing here destroys a vehicle.
+const BLOCKED_DAMAGE_RATE = 0.6; // health/second while blocked
 const BLOCKED_DAMAGE_FLOOR = 0.15; // fraction of maxHealth
 const _up = new THREE.Vector3(0, 1, 0);
 const _forward = new THREE.Vector3(1, 0, 0); // body-local forward axis
