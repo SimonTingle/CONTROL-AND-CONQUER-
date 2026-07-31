@@ -27,18 +27,26 @@ const WAYPOINT_RADIUS = 8;
 const DETOUR_ANGLES = [0.6, -0.6, 1.2, -1.2, 1.9, -1.9]; // radians off the direct bearing
 const STALL_SPEED = 0.4;
 const STALL_TIMEOUT = 1.5; // seconds near-stopped before trying the next detour
+// Any non-player vehicle at or below this fraction of health queues for
+// repair on its own, without the player having to notice and click Repair.
+const AUTO_REPAIR_HEALTH_FRACTION = 0.3;
+const READY_LINGER = 2; // seconds the ring stays green before the dock frees
 
 export class RepairController {
-  constructor({ vehicles, heightmap, game }) {
+  constructor({ vehicles, structures, heightmap, game }) {
     this.vehicles = vehicles;
+    this.structures = structures;
     this.heightmap = heightmap;
     this.game = game;
   }
 
   update(dt) {
     for (const inst of this.vehicles.instances) {
+      if (!inst.repair) {
+        this._maybeAutoQueue(inst);
+        if (!inst.repair) continue;
+      }
       const r = inst.repair;
-      if (!r) continue;
 
       switch (r.state) {
         case 'to-bay':
@@ -47,11 +55,45 @@ export class RepairController {
         case 'queued':
           this._queued(inst, r, dt);
           break;
+        case 'entering':
+          this._entering(inst, r, dt);
+          break;
         case 'repairing':
           this._repairing(inst, r, dt);
           break;
+        case 'ready':
+          this._ready(inst, r, dt);
+          break;
       }
     }
+  }
+
+  /**
+   * Critically damaged, unattended vehicles queue for repair on their own —
+   * "unattended" meaning not the vehicle the player is currently driving,
+   * which stays under manual control even if it's hurt.
+   */
+  _maybeAutoQueue(inst) {
+    if (inst === this.vehicles.active) return;
+    if (inst.health > inst.def.maxHealth * AUTO_REPAIR_HEALTH_FRACTION) return;
+    const bay = this._nearestBay(inst);
+    if (bay) inst.repair = { bay, state: 'to-bay' };
+  }
+
+  /** Nearest finished repair bay, or null — mirrors commands.js's own lookup. */
+  _nearestBay(inst) {
+    const pos = inst.group.position;
+    let best = null;
+    let bestD = Infinity;
+    for (const s of this.structures?.instances ?? []) {
+      if (s.def.id !== 'repair-bay' || s.mode !== 'idle') continue;
+      const d = Math.hypot(s.x - pos.x, s.z - pos.z);
+      if (d < bestD) {
+        bestD = d;
+        best = s;
+      }
+    }
+    return best;
   }
 
   /** Terrain regenerated: every bay reference is meaningless. */
@@ -68,7 +110,7 @@ export class RepairController {
     if (!this._driveTo(inst, r, bay.dock.x, bay.dock.z, dt)) return;
 
     if (!bay.dockedVehicle) {
-      this._enterBay(inst, r, bay);
+      this._claimDock(inst, r, bay);
     } else {
       r.state = 'queued';
       r.queuePosition = this._claimQueuePosition(bay);
@@ -79,7 +121,7 @@ export class RepairController {
     const bay = r.bay;
     if (!bay.dockedVehicle) {
       this._releaseQueuePosition(bay, r);
-      this._enterBay(inst, r, bay);
+      this._claimDock(inst, r, bay);
       return;
     }
 
@@ -92,14 +134,34 @@ export class RepairController {
     this._driveTo(inst, r, qx, qz, dt);
   }
 
-  _enterBay(inst, r, bay) {
+  /** Slot claimed — but parking happens on the pad itself, not the approach
+   * point, so there's one more short leg (`'entering'`) before repair starts. */
+  _claimDock(inst, r, bay) {
     bay.dockedVehicle = inst;
-    r.state = 'repairing';
-    r.elapsed = 0;
-    r.cost = null; // computed on the first repairing tick, not at command-click time
+    r.state = 'entering';
     r.waypoint = null;
     r.detours = 0;
     r.stallTimer = 0;
+    this._setRingState(bay, 'working');
+  }
+
+  _entering(inst, r, dt) {
+    const bay = r.bay;
+    if (!this._driveTo(inst, r, bay.x, bay.z, dt)) return;
+    // _driveTo's arrival radius is deliberately generous (a wide-turning
+    // vehicle can't reliably converge on a tight one — see ARRIVE_RADIUS's
+    // own comment), so "arrived" alone can still be several units off centre.
+    // Snap the last stretch instead of trusting driven precision for it: this
+    // is meant to read as parked dead-centre on the pad, not "close enough."
+    inst.group.position.x = bay.x;
+    inst.group.position.z = bay.z;
+    this._startRepairing(inst, r);
+  }
+
+  _startRepairing(inst, r) {
+    r.state = 'repairing';
+    r.elapsed = 0;
+    r.cost = null; // computed on the first repairing tick, not at command-click time
   }
 
   _repairing(inst, r, dt) {
@@ -107,10 +169,12 @@ export class RepairController {
 
     if (r.cost === null) {
       // Cost and duration are struck now, against health as it actually is —
-      // more blocked-damage could have accrued while queueing.
+      // more blocked-damage could have accrued while queueing. Duration also
+      // reflects the bay's own upgrade tier — tier 0 is the full base rate.
       const missing = inst.def.maxHealth - inst.health;
+      const speedMultiplier = bay.def.upgradeTiers?.[bay.upgradeLevel - 1]?.repairSpeedMultiplier ?? 1;
       r.cost = Math.ceil(missing * bay.def.repair.creditsPerHealth);
-      r.duration = Math.max(0.1, missing * bay.def.repair.secondsPerHealth);
+      r.duration = Math.max(0.1, missing * bay.def.repair.secondsPerHealth * speedMultiplier);
       r.startHealth = inst.health;
 
       if (!this.game.spend(r.cost)) {
@@ -129,14 +193,32 @@ export class RepairController {
 
     if (progress01 >= 1) {
       inst.health = inst.def.maxHealth;
-      this._leaveBay(inst, bay);
+      r.state = 'ready';
+      r.readyTimer = 0;
+      this._setRingState(bay, 'ready');
     }
+  }
+
+  /** Finished, still parked — held briefly so "ready" (green) actually reads
+   * before the dock frees up, rather than flashing for zero frames. */
+  _ready(inst, r, dt) {
+    r.readyTimer += dt;
+    if (r.readyTimer >= READY_LINGER) this._leaveBay(inst, r.bay);
   }
 
   _leaveBay(inst, bay) {
     if (bay.dockedVehicle === inst) bay.dockedVehicle = null;
     this._setLed(bay, 0);
+    this._setRingState(bay, 'idle');
     inst.repair = null;
+  }
+
+  _setRingState(bay, state) {
+    const mat = bay.group.userData.ringMaterial;
+    if (!mat) return;
+    const colors = bay.def.colors;
+    const hex = state === 'working' ? colors.ringWorking : state === 'ready' ? colors.ringReady : colors.accent;
+    mat.emissive.set(hex);
   }
 
   /**
