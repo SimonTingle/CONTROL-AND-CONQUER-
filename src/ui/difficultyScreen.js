@@ -33,8 +33,14 @@ export class DifficultyScreen {
   constructor(onChoose) {
     this.onChoose = onChoose;
     this.root = document.getElementById('difficulty');
-    this.open = true;
+    this.open = false;
     this.build();
+  }
+
+  /** Revealed once the portal screen routes here — starts hidden behind it. */
+  show() {
+    this.open = true;
+    this.root.classList.remove('hidden');
   }
 
   build() {

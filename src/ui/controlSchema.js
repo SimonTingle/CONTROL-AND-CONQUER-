@@ -9,7 +9,7 @@
  * therefore needs a (debounced) CPU regeneration. Everything else is a uniform
  * write and applies on the next frame.
  */
-export function buildSchema(world, view) {
+export function buildSchema(world, view, game) {
   const atmo = world.atmosphere;
   const terrain = world.heightmap.params;
   const tu = world.terrain.uniforms;
@@ -22,6 +22,15 @@ export function buildSchema(world, view) {
   const color = (label, get, set) => ({ type: 'color', label, get, set });
 
   return [
+    {
+      title: 'Save / Load',
+      controls: [
+        // Placeholder persistence (localStorage, a tiny snapshot) until the
+        // real save/load backend lands — see the roadmap's Phase 3.
+        { type: 'button', label: 'Save game', action: () => game.saveGame() },
+        { type: 'button', label: 'Load game', action: () => game.loadGame() },
+      ],
+    },
     {
       title: 'Atmosphere',
       open: true,

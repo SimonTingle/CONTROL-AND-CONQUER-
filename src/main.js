@@ -7,6 +7,8 @@ import { Menu } from './ui/menu.js';
 import { buildSchema } from './ui/controlSchema.js';
 import { VehiclePicker } from './ui/vehiclePicker.js';
 import { DifficultyScreen, DIFFICULTIES } from './ui/difficultyScreen.js';
+import { PortalScreen } from './ui/portalScreen.js';
+import { AiDifficultyScreen } from './ui/aiDifficultyScreen.js';
 import { Hud } from './ui/hud.js';
 import { RadialMenu } from './ui/radialMenu.js';
 import { VehicleController } from './vehicles/vehicleController.js';
@@ -591,9 +593,12 @@ canvas.addEventListener(
 const driveKeys = { w: false, a: false, s: false, d: false };
 addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
-  // Keys are bound to the window, so the difficulty overlay has to swallow them
-  // explicitly or the player drives a vehicle that does not exist yet.
-  if (k in driveKeys && !isTextInputFocused() && !game.difficultyScreen?.open) driveKeys[k] = true;
+  // Keys are bound to the window, so every full-screen overlay before play
+  // starts has to swallow them explicitly or the player drives a vehicle that
+  // does not exist yet.
+  const overlayOpen =
+    game.portalScreen?.open || game.difficultyScreen?.open || game.aiDifficultyScreen?.open;
+  if (k in driveKeys && !isTextInputFocused() && !overlayOpen) driveKeys[k] = true;
   if (e.key === 'Escape' && commandContext.buildPlacementMode) cancelPlacementMode();
 });
 addEventListener('keyup', (e) => {
@@ -663,17 +668,19 @@ const view = {
   },
 };
 
-const menu = new Menu(buildSchema(world, view));
-
 /**
  * Progression state. The unlock is *latched*: raising the sea level shrinks the
  * island and can push the explored percentage back down, so a threshold
  * crossing is not monotone and must not be able to take the vehicle away again.
  */
 const game = {
+  mode: null, // 'sandbox' | 'multiplayer-ai', set once the portal routes past it
   difficulty: DIFFICULTIES[1],
   unlocked: false,
+  portalScreen: null,
   difficultyScreen: null,
+  aiDifficultyScreen: null,
+  aiMatch: null, // { teamCount, buildDelaySeconds } once Multiplayer AI is chosen — unused until the AI-opponent system exists
   credits: 0,
   // Latched the same way `unlocked` is: relocating spends nothing, so without
   // a latch a base built just past 50k could spend back below it and lose the
@@ -690,7 +697,33 @@ const game = {
     this.credits -= n;
     return true;
   },
+  // Placeholder persistence: a tiny progress snapshot in localStorage, not the
+  // full world state. Real save/load (terrain, vehicles, structures, fog) is
+  // its own backend-backed design — see the roadmap's Phase 3.
+  saveGame() {
+    const snapshot = {
+      mode: this.mode,
+      difficultyId: this.difficulty?.id,
+      credits: this.credits,
+      savedAt: Date.now(),
+    };
+    localStorage.setItem('ptg-save', JSON.stringify(snapshot));
+    alert('Progress saved (placeholder — full save/load is coming in a future update).');
+    return snapshot;
+  },
+  loadGame() {
+    const raw = localStorage.getItem('ptg-save');
+    if (!raw) {
+      alert('No saved game found.');
+      return null;
+    }
+    const snapshot = JSON.parse(raw);
+    alert(`Found a save from ${new Date(snapshot.savedAt).toLocaleString()} (placeholder — restoring it isn't implemented yet).`);
+    return snapshot;
+  },
 };
+
+const menu = new Menu(buildSchema(world, view, game));
 
 const hud = new Hud();
 
@@ -835,12 +868,30 @@ function updateProgression(explored) {
   }
 }
 
-game.difficultyScreen = new DifficultyScreen((difficulty) => {
+/** Shared by every mode's difficulty pick — only the difficulty source and
+ * any per-mode extras (like the AI match config) differ. */
+function beginMatch(difficulty) {
   game.difficulty = difficulty;
   // Re-render the lock hint now that the target percentage is known.
   for (const def of VEHICLE_CATALOG) vehiclePicker.applyLockState(def.id);
   // Nothing is spawned yet, so open the drawer on the one vehicle available.
   vehiclePicker.setOpen(true);
+}
+
+game.difficultyScreen = new DifficultyScreen((difficulty) => {
+  game.mode = 'sandbox';
+  beginMatch(difficulty);
+});
+
+game.aiDifficultyScreen = new AiDifficultyScreen(({ difficulty, teamCount, buildDelaySeconds }) => {
+  game.mode = 'multiplayer-ai';
+  game.aiMatch = { teamCount, buildDelaySeconds };
+  beginMatch(difficulty);
+});
+
+game.portalScreen = new PortalScreen((modeId) => {
+  if (modeId === 'sandbox') game.difficultyScreen.show();
+  else if (modeId === 'multiplayer-ai') game.aiDifficultyScreen.show();
 });
 
 addEventListener('resize', () => {
