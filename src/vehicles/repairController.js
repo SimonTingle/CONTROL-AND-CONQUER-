@@ -15,6 +15,8 @@
  * vehicle leaves the bay, one way or another.
  */
 
+import { hasVehicleBehind } from './trafficController.js';
+
 const MAX_QUEUE_POSITIONS = 4;
 const QUEUE_RING_MARGIN = 10; // world units of clearance past the bay's own pad
 // A wide-turning vehicle (a crystal-harvester's turning circle is tens of
@@ -31,7 +33,13 @@ const REVERSE_DURATION = 1.5; // seconds backing off before the next detour atte
 // Any non-player vehicle at or below this fraction of health queues for
 // repair on its own, without the player having to notice and click Repair.
 const AUTO_REPAIR_HEALTH_FRACTION = 0.3;
+const AUTO_REPAIR_RETRY_COOLDOWN = 5; // seconds between affordability re-checks
 const READY_LINGER = 2; // seconds the ring stays green before the dock frees
+// A backstop, not a normal-operation ceiling — a full repair at tier 0 can
+// legitimately take several minutes, and a queued vehicle waits out whatever
+// is ahead of it. This only exists to reclaim a queue that's stuck for a
+// reason the self-heal sweep didn't catch.
+const QUEUE_TIMEOUT = 600;
 
 export class RepairController {
   constructor({ vehicles, structures, heightmap, game }) {
@@ -42,9 +50,10 @@ export class RepairController {
   }
 
   update(dt) {
+    this._sweepBays();
     for (const inst of this.vehicles.instances) {
       if (!inst.repair) {
-        this._maybeAutoQueue(inst);
+        this._maybeAutoQueue(inst, dt);
         if (!inst.repair) continue;
       }
       const r = inst.repair;
@@ -73,12 +82,34 @@ export class RepairController {
    * Critically damaged, unattended vehicles queue for repair on their own —
    * "unattended" meaning not the vehicle the player is currently driving,
    * which stays under manual control even if it's hurt.
+   *
+   * Only actually queues if the repair is affordable right now — otherwise it
+   * keeps working and rechecks every AUTO_REPAIR_RETRY_COOLDOWN seconds,
+   * rather than claiming a bay, immediately failing game.spend() in
+   * _repairing, bailing back out via _leaveBay, and re-triggering this exact
+   * check next tick — a claim/fail/release cycle every single frame that
+   * flips the bay's ring gold/idle each frame and never lets the player see
+   * or interrupt it.
    */
-  _maybeAutoQueue(inst) {
+  _maybeAutoQueue(inst, dt) {
     if (inst === this.vehicles.active) return;
-    if (inst.health > inst.def.maxHealth * AUTO_REPAIR_HEALTH_FRACTION) return;
+    if (inst.health > inst.def.maxHealth * AUTO_REPAIR_HEALTH_FRACTION) {
+      inst._autoRepairCooldown = 0; // healthy again — re-check instantly if it dips later
+      return;
+    }
+    if (inst._autoRepairCooldown > 0) {
+      inst._autoRepairCooldown -= dt;
+      return;
+    }
+
     const bay = this._nearestBay(inst);
-    if (bay) inst.repair = { bay, state: 'to-bay' };
+    const missing = bay ? inst.def.maxHealth - inst.health : 0;
+    const cost = bay ? Math.ceil(missing * bay.def.repair.creditsPerHealth) : Infinity;
+    if (!bay || this.game.credits < cost) {
+      inst._autoRepairCooldown = AUTO_REPAIR_RETRY_COOLDOWN;
+      return;
+    }
+    inst.repair = { bay, state: 'to-bay' };
   }
 
   /** Nearest finished repair bay, or null — mirrors commands.js's own lookup. */
@@ -100,6 +131,34 @@ export class RepairController {
   /** Terrain regenerated: every bay reference is meaningless. */
   reset() {
     for (const inst of this.vehicles.instances) inst.repair = null;
+    // Vehicle-side state is gone, but the bays themselves survive unless
+    // structures.clear() also ran — leaving a dock/queue reservation behind
+    // would orphan it exactly like the bugs this sweep exists to catch.
+    for (const s of this.structures?.instances ?? []) {
+      if (s.def.id !== 'repair-bay') continue;
+      s.dockedVehicle = null;
+      s._repairQueue = undefined;
+      this._setLed(s, 0);
+      this._setRingState(s, 'idle');
+    }
+  }
+
+  /**
+   * Validates every bay's dock reservation each tick: if `dockedVehicle`
+   * points at a vehicle whose own repair state no longer agrees it's docked
+   * there — pause, park, a give-up that didn't route through `_leaveBay`,
+   * anything — release it. This is what recovers a game that's already
+   * broken, not just what prevents it breaking again.
+   */
+  _sweepBays() {
+    for (const s of this.structures?.instances ?? []) {
+      if (s.def.id !== 'repair-bay' || !s.dockedVehicle) continue;
+      if (s.dockedVehicle.repair?.bay !== s) {
+        s.dockedVehicle = null;
+        this._setLed(s, 0);
+        this._setRingState(s, 'idle');
+      }
+    }
   }
 
   _toBay(inst, r, dt) {
@@ -122,7 +181,18 @@ export class RepairController {
     const bay = r.bay;
     if (!bay.dockedVehicle) {
       this._releaseQueuePosition(bay, r);
+      r.queuedFor = 0;
       this._claimDock(inst, r, bay);
+      return;
+    }
+
+    // A backstop against a dock that's stuck for a reason the sweep didn't
+    // catch — see QUEUE_TIMEOUT's own comment. Not the normal way to leave
+    // the queue; `!bay.dockedVehicle` above is.
+    r.queuedFor = (r.queuedFor ?? 0) + dt;
+    if (r.queuedFor > QUEUE_TIMEOUT) {
+      this._releaseQueuePosition(bay, r);
+      inst.repair = null;
       return;
     }
 
@@ -229,13 +299,21 @@ export class RepairController {
    */
   _claimQueuePosition(bay) {
     const taken = bay._repairQueue ?? (bay._repairQueue = new Set());
-    for (let i = 0; i < MAX_QUEUE_POSITIONS; i++) {
+    // Search well past MAX_QUEUE_POSITIONS rather than returning a fixed
+    // fallback like 0 once the ring's own slots are full — a repeat index
+    // would double-allocate a slot another vehicle still holds, so releasing
+    // one frees the other's too and a third claimer collides with it. Beyond
+    // MAX_QUEUE_POSITIONS the ring angle wraps and visually overlaps an
+    // earlier vehicle, which only matters once 5+ are queued at once — the
+    // bookkeeping staying unique matters far more than the ring staying
+    // evenly spaced in that edge case.
+    for (let i = 0; i < 64; i++) {
       if (!taken.has(i)) {
         taken.add(i);
         return i;
       }
     }
-    return 0; // queue is full — a brief overlap that resolves as it drains
+    return -1; // 64 concurrent queuers at one bay — not a realistic fleet size
   }
 
   _releaseQueuePosition(bay, r) {
@@ -307,8 +385,16 @@ export class RepairController {
       // back rather than leaving `inst.repair` stuck forever with no way for
       // the player to retry (the Repair command stays disabled while it's
       // set), and release any queue slot it was holding on to.
+      //
+      // Routed through _leaveBay rather than clearing `inst.repair` directly:
+      // this can happen during 'entering', after _claimDock already reserved
+      // the dock — clearing repair without also releasing `bay.dockedVehicle`
+      // orphans it forever, since nothing else can ever set it back to null,
+      // and _queued's only exit is that field going falsy. _leaveBay's own
+      // `dockedVehicle === inst` check makes it a safe no-op for the
+      // 'to-bay'/'queued' legs, where the dock was never claimed.
       if (r.queuePosition != null) this._releaseQueuePosition(r.bay, r);
-      inst.repair = null;
+      this._leaveBay(inst, r.bay);
       return false;
     }
 
@@ -317,11 +403,23 @@ export class RepairController {
     // tick's `!inst.hasOrder` branch try a fresh angle. Back off first: a
     // vehicle already touching whatever stalled it often can't clear by
     // turning alone.
-    r.stallTimer = inst.speed < STALL_SPEED ? (r.stallTimer ?? 0) + dt : 0;
+    //
+    // Yielding on purpose or already reversing isn't a stall — counting it as
+    // one misreads a polite wait as a blockage.
+    const holding = inst.yielding || inst.reverseTimer != null;
+    r.stallTimer = !holding && inst.speed < STALL_SPEED ? (r.stallTimer ?? 0) + dt : 0;
     if (r.stallTimer > STALL_TIMEOUT) {
       r.stallTimer = 0;
       inst.arrive('cancelled');
-      if (inst.reverseTimer == null) inst.beginReverse(REVERSE_DURATION);
+      if (inst.reverseTimer == null && !hasVehicleBehind(inst, this.vehicles.instances)) {
+        inst.beginReverse(REVERSE_DURATION);
+      }
+      // Without this, the very next tick's `!inst.hasOrder` branch re-targets
+      // the same straight line via the `r.detours === 0` path, which usually
+      // *succeeds* (setTarget only fails underwater/immobile) — so `detours`
+      // never climbs and the out-of-detours give-up below is unreachable.
+      // A stall-triggered abandon counts as one used detour.
+      r.detours = (r.detours ?? 0) + 1;
     }
     return false;
   }

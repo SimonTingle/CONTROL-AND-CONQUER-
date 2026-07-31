@@ -14,6 +14,8 @@
  * exactly.
  */
 
+import { hasVehicleBehind } from './trafficController.js';
+
 const IDLE = 'idle';
 const TO_FIELD = 'to-field';
 const FILLING = 'filling';
@@ -84,9 +86,26 @@ export class HarvesterAI {
   }
 
   update(dt) {
+    this._sweepFacilities();
     for (const inst of this.vehicles.instances) {
       if (!inst.def.capacity) continue; // not a hauler
       this._drive(inst, this._stateFor(inst), dt);
+    }
+  }
+
+  /**
+   * Validates every facility's dock reservation each tick: if
+   * `dockedHarvester` points at a harvester whose own AI state no longer
+   * agrees it's docked there — destroyed, or any path that didn't route
+   * through `_releaseDock` — release it. Recovers a game that's already
+   * broken, not just prevents it breaking again.
+   */
+  _sweepFacilities() {
+    for (const f of this.structures?.instances ?? []) {
+      if (f.def.id !== 'harvester-facility' || !f.dockedHarvester) continue;
+      if (this.stateOf(f.dockedHarvester)?.state !== UNLOADING) {
+        f.dockedHarvester = null;
+      }
     }
   }
 
@@ -121,7 +140,7 @@ export class HarvesterAI {
     const driven = inst.throttle !== 0 || inst.steer !== 0 || inst.menuOpen || !!inst.repair;
     if (driven) {
       if (s.state !== PAUSED) {
-        s.resumeState = s.state;
+        s.resumeState = this._safeResumeState(inst, s);
         s.state = PAUSED;
       }
       s.pauseTimer = RESUME_DELAY;
@@ -251,7 +270,31 @@ export class HarvesterAI {
   }
 
   _fill(inst, s, dt) {
-    if (inst.speed > TRANSFER_SPEED) return; // let it roll to a stop first
+    // Normally resolves itself within a frame or two of arriving (arrive()
+    // already zeroed speed) — this is just letting genuine rolling residue
+    // settle. If a bump or a slope keeps it above threshold well past that,
+    // stop waiting on it: force the stop rather than filling from wherever it
+    // happens to be drifting.
+    if (inst.speed > TRANSFER_SPEED) {
+      s.fillWaitTimer = (s.fillWaitTimer ?? 0) + dt;
+      if (s.fillWaitTimer < 2) return;
+      inst.forwardSpeed = 0;
+      inst.speed = 0;
+    }
+    s.fillWaitTimer = 0;
+
+    // Drifted off the field entirely (pushed by traffic, slid downhill) —
+    // this isn't "rolling to a stop" anymore, it's somewhere else. Go back to
+    // properly approaching it instead of harvesting from a distance.
+    if (s.field) {
+      const pos = inst.group.position;
+      const d = Math.hypot(pos.x - s.field.x, pos.z - s.field.z);
+      if (d > (s.field.radius ?? 12) + 20) {
+        s.state = TO_FIELD;
+        s.dest = null;
+        return;
+      }
+    }
 
     const def = inst.def;
     const room = def.capacity - s.load;
@@ -271,11 +314,29 @@ export class HarvesterAI {
   }
 
   _unload(inst, s, dt) {
-    if (inst.speed > TRANSFER_SPEED) return;
+    // Same "let it settle, but not forever" shape as _fill — see its comment.
+    if (inst.speed > TRANSFER_SPEED) {
+      s.unloadWaitTimer = (s.unloadWaitTimer ?? 0) + dt;
+      if (s.unloadWaitTimer < 2) return;
+      inst.forwardSpeed = 0;
+      inst.speed = 0;
+    }
+    s.unloadWaitTimer = 0;
 
     const facility = this._facility();
     if (!facility) {
       s.state = IDLE;
+      return;
+    }
+
+    // Drifted off the dock (bumped, slid down a grade) — holding the lock
+    // from out here isn't doing anyone any good. Give it up and re-approach
+    // properly instead of "unloading" from wherever it ended up.
+    const pos = inst.group.position;
+    if (Math.hypot(pos.x - facility.x, pos.z - facility.z) > DOCK_DISTANCE * 1.5) {
+      this._releaseDock(facility, inst);
+      s.state = TO_BASE;
+      s.dest = null;
       return;
     }
 
@@ -288,10 +349,7 @@ export class HarvesterAI {
 
     if (s.load <= 1e-6) {
       s.load = 0;
-      // Release dock bay for next harvester
-      if (facility.dockedHarvester === inst) {
-        facility.dockedHarvester = null;
-      }
+      this._releaseDock(facility, inst);
       // Go to parking bay if shouldPark is set, else idle
       if (inst.shouldPark) {
         s.state = PARKED;
@@ -318,9 +376,10 @@ export class HarvesterAI {
     if (!facility.dockedHarvester) {
       facility.dockedHarvester = inst;
       s.state = UNLOADING;
+      s.unloadWaitTimer = 0;
     } else {
       s.state = WAITING_FOR_DOCK;
-      s.queuePosition = 0;
+      s.queuePosition = this._claimQueueSlot(facility);
     }
   }
 
@@ -333,12 +392,17 @@ export class HarvesterAI {
 
     // Check if dock is now free
     if (!facility.dockedHarvester) {
+      this._releaseQueueSlot(facility, s);
       facility.dockedHarvester = inst;
       s.state = UNLOADING;
+      s.unloadWaitTimer = 0;
       return;
     }
 
-    // Park in queue position around facility
+    // Park in queue position around facility. A real per-waiter index, not
+    // the hardcoded 0 this used to assign to everyone — that funnelled every
+    // waiting harvester onto the identical world point, where they piled up
+    // and collided with each other.
     const angle = (s.queuePosition ?? 0) * (Math.PI * 2 / MAX_QUEUE_POSITIONS);
     const queueX = facility.x + Math.cos(angle) * QUEUE_RING;
     const queueZ = facility.z + Math.sin(angle) * QUEUE_RING;
@@ -349,6 +413,50 @@ export class HarvesterAI {
     if (d > 1) {
       this._order(inst, s, { x: queueX, z: queueZ });
     }
+  }
+
+  /** Release `facility.dockedHarvester` — the single place this ever happens,
+   * so every exit from UNLOADING/WAITING_FOR_DOCK goes through the same door. */
+  _releaseDock(facility, inst) {
+    if (facility && facility.dockedHarvester === inst) facility.dockedHarvester = null;
+  }
+
+  /** Real per-waiter allocation — mirrors repairController's own queue Set. */
+  _claimQueueSlot(facility) {
+    const taken = facility._haulQueue ?? (facility._haulQueue = new Set());
+    for (let i = 0; i < 64; i++) {
+      if (!taken.has(i)) {
+        taken.add(i);
+        return i;
+      }
+    }
+    return -1; // 64 concurrent waiters at one facility — not a realistic fleet size
+  }
+
+  _releaseQueueSlot(facility, s) {
+    facility?._haulQueue?.delete(s.queuePosition);
+    s.queuePosition = null;
+  }
+
+  /**
+   * What to resume into once manual driving, an open menu, or a repair trip
+   * ends. Docking and queueing hold an exclusive reservation — the dock slot,
+   * a queue ring position — that a forced pause can't honestly keep: the
+   * harvester isn't meaningfully "still there" once something else has the
+   * wheel. Both release their reservation and resume into TO_BASE instead of
+   * their own state, which cleanly re-approaches and re-claims one rather
+   * than resuming an unload/wait that no longer owns what it thinks it does.
+   */
+  _safeResumeState(inst, s) {
+    if (s.state === UNLOADING) {
+      this._releaseDock(this._facility(), inst);
+      return TO_BASE;
+    }
+    if (s.state === WAITING_FOR_DOCK) {
+      this._releaseQueueSlot(this._facility(), s);
+      return TO_BASE;
+    }
+    return s.state;
   }
 
   _parked(inst, s) {
@@ -462,7 +570,14 @@ export class HarvesterAI {
     }
 
     // Stuck without abandoning: grinding at something with the order still live.
-    s.stallTimer = inst.speed < STALL_SPEED ? s.stallTimer + dt : 0;
+    //
+    // "Not moving" is not the same as "stuck". A vehicle yielding to traffic is
+    // holding on purpose, and one mid-reverse is moving away from the goal by
+    // design — counting either as a stall diagnoses a polite wait as a blockage
+    // and drives the vehicle off with a detour, which is exactly how a loaded
+    // harvester ends up circling a busy dock forever instead of unloading.
+    const holding = inst.yielding || inst.reverseTimer != null;
+    s.stallTimer = !holding && inst.speed < STALL_SPEED ? s.stallTimer + dt : 0;
     if (s.stallTimer > STALL_TIMEOUT) {
       s.stallTimer = 0;
       this._onAbandoned(inst, s, dest, d);
@@ -471,12 +586,18 @@ export class HarvesterAI {
 
   _onAbandoned(inst, s, dest, distance) {
     const pos = inst.group.position;
-    // Back off before trying the next angle — a vehicle already touching
-    // whatever blocked it often can't clear by turning alone. Doesn't touch
-    // the detour waypoint being set up below: reversing takes priority in
-    // VehicleInstance.update() but leaves `target` alone, so the vehicle
-    // drives straight to that waypoint the moment the reverse ends.
-    if (inst.reverseTimer == null) inst.beginReverse(REVERSE_DURATION);
+    // This fires on the very first tick of a fresh leg too — `_travel`'s own
+    // `!inst.hasOrder` check can't tell "never ordered yet" from "genuinely
+    // abandoned," since issuing that first order *is* one of this function's
+    // jobs. `s.detours`/`s.waypoint` are what distinguish them: both are 0/
+    // null on a clean entry (reset at every state transition) and only
+    // become non-zero once this function has already run once for this leg.
+    // Reversing on a fresh order the vehicle hasn't even attempted yet would
+    // mean every routine trip starts by backing up for no reason.
+    const alreadyTrying = s.detours > 0 || !!s.waypoint;
+    if (alreadyTrying && inst.reverseTimer == null && !hasVehicleBehind(inst, this.vehicles.instances)) {
+      inst.beginReverse(REVERSE_DURATION);
+    }
 
     if (s.detours < DETOUR_ANGLES.length) {
       const bearing = Math.atan2(dest.z - pos.z, dest.x - pos.x) + DETOUR_ANGLES[s.detours];
