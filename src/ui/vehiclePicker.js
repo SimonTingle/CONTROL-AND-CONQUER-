@@ -5,13 +5,18 @@ const SPIN_SPEED = 0.5; // radians / second
 
 /**
  * Right-side drawer of small live 3D previews, one per catalog entry. Each
- * preview owns a tiny renderer/scene/camera so the vehicle can actually spin
- * in real time rather than being a canned sprite — consistent with the
- * "procedural, not sprites" goal for units.
+ * preview owns its own scene/camera so the vehicle can actually spin in real
+ * time rather than being a canned sprite — consistent with the "procedural,
+ * not sprites" goal for units. All cards share one WebGL context, rendered
+ * into in turn and blitted onto each card's plain 2D canvas, so the context
+ * count stays fixed regardless of catalog size.
  *
  * Rendering only happens while the drawer is open: update() is a no-op
  * otherwise, so hidden canvases cost nothing per frame.
  */
+const PREVIEW_WIDTH = 150;
+const PREVIEW_HEIGHT = 108;
+
 export class VehiclePicker {
   constructor(catalog, { onSelect, vehicles } = {}) {
     this.catalog = catalog;
@@ -19,6 +24,14 @@ export class VehiclePicker {
     this.vehicles = vehicles;
     this.open = false;
     this.previews = [];
+
+    // One WebGL context shared by every card, rendered into in turn and
+    // blitted onto each card's own plain 2D canvas — a context per card
+    // would scale with the catalog and browsers cap those around sixteen.
+    this.sharedRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    this.sharedRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.sharedRenderer.setSize(PREVIEW_WIDTH, PREVIEW_HEIGHT, false);
+    this.sharedRenderer.shadowMap.enabled = false;
     // Entries with no `unlock` requirement are available from the start.
     this.unlocked = new Set(catalog.filter((d) => !d.unlock).map((d) => d.id));
     this.cards = new Map();
@@ -72,8 +85,7 @@ export class VehiclePicker {
     heading.textContent = 'Available to Spawn';
     section.appendChild(heading);
 
-    // Produced units are not spawnable from the drawer — and each card costs a
-    // WebGL context, which browsers cap at around sixteen.
+    // Produced units are not spawnable from the drawer.
     for (const def of this.catalog.filter((d) => d.spawnable !== false)) {
       const card = document.createElement('button');
       card.className = 'vehicle-card';
@@ -161,13 +173,11 @@ export class VehiclePicker {
   }
 
   createPreview(def, canvas) {
-    const width = 150;
-    const height = 108;
-
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.setSize(width, height, false);
-    renderer.shadowMap.enabled = false;
+    const width = PREVIEW_WIDTH;
+    const height = PREVIEW_HEIGHT;
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(35, width / height, 0.1, 100);
@@ -188,7 +198,11 @@ export class VehiclePicker {
     mesh.position.y = 0;
     scene.add(mesh);
 
-    return { renderer, scene, camera, mesh };
+    return { ctx, scene, camera, mesh };
+  }
+
+  dispose() {
+    this.sharedRenderer.dispose();
   }
 
   setOpen(open) {
@@ -212,7 +226,10 @@ export class VehiclePicker {
 
     for (const p of this.previews) {
       p.mesh.rotation.y += dt * SPIN_SPEED;
-      p.renderer.render(p.scene, p.camera);
+      // Render through the one shared context, then copy the result onto
+      // this card's own 2D canvas before moving to the next preview.
+      this.sharedRenderer.render(p.scene, p.camera);
+      p.ctx.drawImage(this.sharedRenderer.domElement, 0, 0);
     }
   }
 }

@@ -41,6 +41,11 @@ const REVERSE_DURATION = 1.5; // seconds backing off before trying the next deto
 const BAN_SECONDS = 45;
 const TRANSFER_SPEED = 0.5; // must be near enough stopped to load or unload
 
+// A fresh automatic pick prefers to leave a nearly-drained field alone and to
+// spread out rather than pile onto one — both soft: see _idle()'s fallback.
+const LOW_STOCK_FRACTION = 0.33;
+const MAX_HARVESTERS_PER_FIELD = 2;
+
 /** Widening, alternating. A straight retry cannot work: the heading is unchanged. */
 const DETOUR_ANGLES = [0.9, -0.9, 1.6, -1.6, 2.4];
 const QUEUE_RING = 35; // distance from facility center to queue parking spots
@@ -217,10 +222,18 @@ export class HarvesterAI {
     // A field the player picked wins over the driver's own judgement, once.
     let field = this._consumeTargetField(inst);
     if (!field) {
+      // Prefer a healthy, uncrowded field, but fall back to plain nearest if
+      // nothing satisfies both constraints — never let the harvester idle.
       field = this.world.blooms.nearestTo(inst.group.position.x, inst.group.position.z, {
         minStock: 1,
-        reject: (f) => (s.bans.get(f.id) ?? 0) > now,
+        reject: (f) => (s.bans.get(f.id) ?? 0) > now || this._isFieldCrowdedOrLow(f, inst),
       });
+      if (!field) {
+        field = this.world.blooms.nearestTo(inst.group.position.x, inst.group.position.z, {
+          minStock: 1,
+          reject: (f) => (s.bans.get(f.id) ?? 0) > now,
+        });
+      }
     }
 
     if (!field) {
@@ -239,6 +252,20 @@ export class HarvesterAI {
       s.bans.set(field.id, now + BAN_SECONDS);
       s.retryTimer = RETRY_PAUSE;
     }
+  }
+
+  _isFieldCrowdedOrLow(field, inst) {
+    if (field.capacity > 0 && field.stock / field.capacity <= LOW_STOCK_FRACTION) return true;
+    return this._countHarvestersOnField(field, inst) >= MAX_HARVESTERS_PER_FIELD;
+  }
+
+  _countHarvestersOnField(field, excludeInst) {
+    let count = 0;
+    for (const [inst, s] of this.states) {
+      if (inst === excludeInst) continue;
+      if (s.field === field && (s.state === TO_FIELD || s.state === FILLING)) count++;
+    }
+    return count;
   }
 
   /**
