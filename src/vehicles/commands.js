@@ -27,6 +27,101 @@ export function commandsFor(instance, ctx) {
   }));
 }
 
+/**
+ * The pad a base station's own build/upgrade commands operate on. Its
+ * `deployOrigin`, not its live position — a deployed base is drivable (see
+ * vehicleController.js's `immobile`), so "the pad under my current feet"
+ * stops being the right question the moment it drives off it.
+ */
+function basePad(instance, ctx) {
+  const anchor = instance.deployOrigin ?? instance.group.position;
+  return ctx.terraform.padAt(anchor.x, anchor.z);
+}
+
+/**
+ * The nearest finished repair bay, or null. Filtered to `mode === 'idle'` so a
+ * bay still rising out of the ground can't be targeted — same convention
+ * harvesterAI's own facility lookup uses.
+ */
+function nearestRepairBay(instance, ctx) {
+  const pos = instance.group.position;
+  let best = null;
+  let bestD = Infinity;
+  for (const s of ctx.structures.instances) {
+    if (s.def.id !== 'repair-bay' || s.mode !== 'idle') continue;
+    const d = Math.hypot(s.x - pos.x, s.z - pos.z);
+    if (d < bestD) {
+      bestD = d;
+      best = s;
+    }
+  }
+  return best;
+}
+
+/**
+ * Shared across every vehicle type that can actually drive to a bay. The base
+ * station isn't spliced in below — a deployed one can drive now (see
+ * vehicleController.js's `immobile`), but it isn't wired into the repair
+ * queue/dock flow the way scouts and harvesters are, so it's left out rather
+ * than half-supported. One object, spliced into more than one catalog entry
+ * below; `commandsFor` shallow-spreads it per use, so sharing the reference is
+ * safe.
+ */
+const REPAIR_COMMAND = {
+  id: 'repair',
+  label: 'Repair',
+  hint(instance, ctx) {
+    const bay = nearestRepairBay(instance, ctx);
+    if (!bay) return 'Needs a repair bay';
+    const missing = instance.def.maxHealth - instance.health;
+    return `${Math.ceil(missing * bay.def.repair.creditsPerHealth)} cr`;
+  },
+  enabled(instance, ctx) {
+    // Re-issuing this mid-repair would overwrite `instance.repair` without
+    // releasing whatever dock/queue slot it already holds at the old bay —
+    // simplest correct fix is to not offer it again until the current one ends.
+    if (instance.repair) return 'Already repairing';
+    if (instance.health >= instance.def.maxHealth) return 'Already at full health';
+    if (!nearestRepairBay(instance, ctx)) return 'No repair bay built';
+    return true;
+  },
+  execute(instance, ctx) {
+    const bay = nearestRepairBay(instance, ctx);
+    if (!bay) return; // balance of enabled() may have moved since the menu opened
+    instance.repair = { bay, state: 'to-bay' };
+  },
+};
+
+/**
+ * Shared by every building def that carries an `upgradeTiers` array —
+ * currently the repair bay and the harvester facility. Per-instance: each
+ * building tracks its own `upgradeLevel`, so upgrading one never touches
+ * another, even of the same type.
+ */
+const UPGRADE_COMMAND = {
+  id: 'upgrade',
+  label: 'Upgrade',
+  hint(instance) {
+    const tiers = instance.def.upgradeTiers;
+    const tier = tiers?.[instance.upgradeLevel];
+    if (!tier) return 'Max tier';
+    return `${tier.cost} cr — tier ${instance.upgradeLevel + 1}/${tiers.length}`;
+  },
+  enabled(instance, ctx) {
+    const tiers = instance.def.upgradeTiers;
+    if (!tiers || instance.upgradeLevel >= tiers.length) return 'Already at max tier';
+    const tier = tiers[instance.upgradeLevel];
+    if (ctx.game.credits < tier.cost) return `Needs ${tier.cost} cr (have ${Math.floor(ctx.game.credits)})`;
+    return true;
+  },
+  execute(instance, ctx) {
+    const tier = instance.def.upgradeTiers?.[instance.upgradeLevel];
+    if (!tier) return;
+    // spend() is the real gate — balance may have moved since the menu opened.
+    if (ctx.game.spend(tier.cost)) instance.upgradeLevel++;
+  },
+};
+
 const COMMANDS = {
   'scout-buggy': {
     mobile: [
@@ -42,6 +137,7 @@ const COMMANDS = {
           instance.target = null;
         },
       },
+      REPAIR_COMMAND,
     ],
     armed: [
       {
@@ -75,6 +171,11 @@ const COMMANDS = {
             // The vehicle only calls itself deployed once the ground actually is.
             onComplete: () => {
               instance.mode = 'deployed';
+              // Anchor for "has it wandered off the dock" — pos can't have
+              // moved since deploying is still immobile, so this is the true
+              // settle point, not a snapshot taken too early.
+              instance.deployOrigin = { x: pos.x, z: pos.z };
+              instance.spireGrown = false;
             },
           });
         },
@@ -87,7 +188,7 @@ const COMMANDS = {
         label: 'Harvester Facility',
         hint: 'Ships one harvester',
         enabled(instance, ctx) {
-          const pad = ctx.terraform.padAt(instance.group.position.x, instance.group.position.z);
+          const pad = basePad(instance, ctx);
           if (!pad || !pad.complete) return 'Needs a finished pad';
           const def = ctx.structures.defOf('harvester-facility');
           if (ctx.structures.instanceOf('harvester-facility')) return 'Already built';
@@ -95,8 +196,52 @@ const COMMANDS = {
           return true;
         },
         execute(instance, ctx) {
-          const pad = ctx.terraform.padAt(instance.group.position.x, instance.group.position.z);
-          ctx.structures.place(ctx.structures.defOf('harvester-facility'), pad);
+          const pad = basePad(instance, ctx);
+          // Enters manual placement instead of placing immediately — the
+          // player picks exactly where on the pad it goes.
+          ctx.buildPlacementMode = { def: ctx.structures.defOf('harvester-facility'), pad };
+        },
+      },
+      {
+        id: 'build-repair-bay',
+        label: 'Repair Bay',
+        hint: (instance, ctx) => `${ctx.structures.defOf('repair-bay').cost} cr`,
+        enabled(instance, ctx) {
+          const pad = basePad(instance, ctx);
+          if (!pad || !pad.complete) return 'Needs a finished pad';
+          const def = ctx.structures.defOf('repair-bay');
+          // Per-pad, not global — a base built after relocating gets its own
+          // fresh allowance rather than being blocked by one built earlier.
+          if (pad.buildings.some((b) => b.id === 'repair-bay')) return 'Already built here';
+          if (ctx.game.credits < def.cost) {
+            return `Needs ${def.cost} cr (have ${Math.floor(ctx.game.credits)})`;
+          }
+          if (!ctx.structures.freeSlot(pad, def.footprint)) return 'No free slot on the pad';
+          return true;
+        },
+        execute(instance, ctx) {
+          const pad = basePad(instance, ctx);
+          const def = ctx.structures.defOf('repair-bay');
+          // spend() is the real gate — balance can have moved since the menu
+          // opened — so only enter placement mode once it actually clears.
+          if (!pad || !ctx.game.spend(def.cost)) return;
+          ctx.buildPlacementMode = { def, pad };
+        },
+      },
+      {
+        id: 'relocate-base',
+        label: 'Relocate Base',
+        hint: 'Leaves a power spire behind',
+        enabled(instance, ctx) {
+          if (!ctx.game.reachedRelocateThreshold) return 'Needs 50000 cr lifetime earned';
+          return true;
+        },
+        execute(instance, ctx) {
+          const pos = instance.group.position;
+          ctx.structures.placeAt(ctx.structures.defOf('power-spire'), pos.x, pos.z, ctx.heightmap);
+          // Free to drive off and redeploy elsewhere via the existing 'deploy'
+          // command, completely unchanged.
+          instance.mode = 'mobile';
         },
       },
     ],
@@ -123,6 +268,36 @@ const COMMANDS = {
           if (ctx.game.spend(def.cost)) ctx.produceUnit(def, instance);
         },
       },
+      UPGRADE_COMMAND,
+    ],
+  },
+
+  'repair-bay': {
+    building: [],
+    idle: [UPGRADE_COMMAND],
+  },
+
+  'crystal-harvester': {
+    mobile: [
+      {
+        id: 'target-harvest',
+        label: 'Target Harvest',
+        hint: 'Click a specific bloom',
+        execute(instance, ctx) {
+          ctx.harvestSelectMode = { harvester: instance };
+        },
+      },
+      {
+        id: 'return-to-base',
+        label: 'Return to Base',
+        hint: 'Park at facility',
+        execute(instance) {
+          // The driver reads this when it next finishes unloading; there is no
+          // handle to the AI from here, and it does not need one.
+          instance.shouldPark = true;
+        },
+      },
+      REPAIR_COMMAND,
     ],
   },
 };

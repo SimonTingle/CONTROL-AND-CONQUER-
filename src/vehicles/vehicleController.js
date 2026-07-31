@@ -7,6 +7,11 @@ const BRAKE_SPEED = 0.1; // at or below this the vehicle counts as stopped
 const STEER_GAIN = 1.8; // how hard a click order leans on the steering
 const GRADE_PROBE = 2.5; // world units to look ahead when measuring the climb
 const MIN_CLIMB_FACTOR = 0.15; // a near-limit climb is a crawl, not a stop
+// Grinding against terrain too steep to climb wears the vehicle down — the
+// game's only damage source today, just enough to give the repair bay a real
+// reason to run. Floored well above zero: nothing here destroys a vehicle.
+const BLOCKED_DAMAGE_RATE = 3; // health/second while blocked
+const BLOCKED_DAMAGE_FLOOR = 0.15; // fraction of maxHealth
 const _up = new THREE.Vector3(0, 1, 0);
 const _forward = new THREE.Vector3(1, 0, 0); // body-local forward axis
 const _lateral = new THREE.Vector3(0, 0, 1); // body-local lateral axis
@@ -14,6 +19,13 @@ const _yawQuat = new THREE.Quaternion();
 const _pitchQuat = new THREE.Quaternion();
 const _rollQuat = new THREE.Quaternion();
 const _contact = new THREE.Vector3();
+
+const LOD_TIERS = {
+  FULL: 0,  // 0-40 units: full detail, all lights
+  MID: 1,   // 40-100 units: headlamps only
+  LOW: 2,   // 100+ units: no lights
+};
+const LOD_DISTANCES = [40, 100];
 
 // Per-wheel travel scratch, reused each frame and grown for the widest rig seen.
 // Shared across instances safely because it never outlives a single call.
@@ -48,7 +60,19 @@ class VehicleInstance {
     this.steerAngle = 0; // current front-wheel angle, radians
     this.grade = 0;
     this.blocked = false;
+    // Set fresh each tick by TrafficController, ahead of movement — true holds
+    // an autonomous vehicle in place rather than push through one nearby.
+    this.yielding = false;
+    // Seconds remaining in a reverse maneuver, or null when not reversing —
+    // see beginReverse().
+    this.reverseTimer = null;
     this.headlightsOn = false;
+    this.lodTier = LOD_TIERS.FULL; // distance-based level of detail
+    this.createdAt = Date.now(); // timestamp for menu ordering
+    // Set by RadialMenu while this vehicle's command menu is up. An autonomous
+    // driver holds position while it is true, so the menu does not slide away
+    // from under the player's cursor mid-decision.
+    this.menuOpen = false;
   }
 
   /**
@@ -84,8 +108,11 @@ class VehicleInstance {
   }
 
   /** Deployed or deploying: the vehicle is committed to a spot and cannot drive. */
+  /** Only mid-flatten is locked down — once deployed the base is free to
+   * drive off its dock spot (nothing in the pad/building system is tied to
+   * its live position; see deployOrigin below for what does track it). */
   get immobile() {
-    return this.mode === 'deploying' || this.mode === 'deployed';
+    return this.mode === 'deploying';
   }
 
   /** Order a move. Silently refused if the point is underwater. */
@@ -174,11 +201,66 @@ class VehicleInstance {
   }
 
   update(dt, heightmap) {
+    // Manual input always wins, the same as every other override in this
+    // class — a reverse maneuver only an autonomous driver would have
+    // started should not fight the player's own hands on the wheel.
+    if (this.reverseTimer != null && this.throttle === 0 && this.steer === 0) {
+      this._driveReverse(dt, heightmap);
+      this.settleOnGround(heightmap);
+      return;
+    }
+
     if (this.throttle !== 0 || this.steer !== 0) this.driveManual(dt, heightmap);
     else if (this.target) this.driveToTarget(dt, heightmap);
     else this.coast(dt, heightmap);
 
     this.settleOnGround(heightmap);
+  }
+
+  /**
+   * Back straight up for `duration` seconds — no steering, whatever order is
+   * live stays live (untouched), so normal driving just resumes toward it
+   * once this clears. For an autonomous vehicle whose forward path is
+   * genuinely blocked, backing off is often the only thing that actually
+   * creates room; a forward-angled detour alone can't help a vehicle that's
+   * already touching the obstacle.
+   */
+  beginReverse(duration) {
+    this.reverseTimer = duration;
+  }
+
+  _driveReverse(dt, heightmap) {
+    this.reverseTimer -= dt;
+    this.accelerating = false;
+    // Probe the grade behind it — that's the direction it's about to travel.
+    const { factor, climbable } = this.readGrade(heightmap, this.heading + Math.PI);
+    if (climbable) {
+      this.forwardSpeed = Math.max(
+        this.forwardSpeed - this.def.acceleration * dt,
+        -this.def.reverseSpeed * factor * this.speedFactor
+      );
+    } else {
+      // Backing into terrain just as bad — don't crawl into it either.
+      this.forwardSpeed = Math.min(this.forwardSpeed, 0);
+    }
+    this.advance(dt);
+
+    if (this.reverseTimer <= 0) {
+      this.reverseTimer = null;
+      this.forwardSpeed = 0;
+    }
+  }
+
+  /**
+   * Called only from the frame `blocked` is actively (re)determined — never
+   * from a blanket per-frame check. `blocked` has no path back to false once
+   * a vehicle gives up trying (coasting doesn't touch it), so gating damage
+   * on the flag alone would grind a motionless, no-longer-trying vehicle down
+   * forever instead of just the moment it's genuinely pushing against terrain.
+   */
+  _applyBlockedDamage(dt) {
+    const floor = this.def.maxHealth * BLOCKED_DAMAGE_FLOOR;
+    this.health = Math.max(floor, this.health - BLOCKED_DAMAGE_RATE * dt);
   }
 
   /**
@@ -231,6 +313,7 @@ class VehicleInstance {
     if (this.throttle > 0) {
       this.accelerating = true;
       this.blocked = !climbable;
+      if (this.blocked) this._applyBlockedDamage(dt);
       if (climbable) {
         this.forwardSpeed = Math.min(
           this.forwardSpeed + def.acceleration * dt,
@@ -261,6 +344,16 @@ class VehicleInstance {
 
   /** Click-to-move (mobile): steer toward the order and drive it out. */
   driveToTarget(dt, heightmap) {
+    // Set by TrafficController just before this runs, for autonomous vehicles
+    // with another one nearby. A hold, not an abandonment — the order stays
+    // live, and driving resumes on its own the moment the flag clears.
+    if (this.yielding) {
+      this.forwardSpeed = 0;
+      this.speed = 0;
+      this.accelerating = false;
+      return;
+    }
+
     const pos = this.group.position;
     const dx = this.target.x - pos.x;
     const dz = this.target.y - pos.z;
@@ -279,6 +372,7 @@ class VehicleInstance {
     if (!climbable) {
       // Abandon the order rather than grind against the slope forever.
       this.blocked = true;
+      this._applyBlockedDamage(dt);
       this.arrive('blocked');
       return;
     }
@@ -362,6 +456,24 @@ class VehicleInstance {
       if (Math.abs(turret.rotation.y) < 1e-3) turret.rotation.y = 0;
       this.sweepPhase = 0;
     }
+  }
+
+  updateLOD(camera) {
+    const dist = this.group.position.distanceTo(camera.position);
+    let newTier = LOD_TIERS.FULL;
+    if (dist > LOD_DISTANCES[1]) newTier = LOD_TIERS.LOW;
+    else if (dist > LOD_DISTANCES[0]) newTier = LOD_TIERS.MID;
+
+    if (newTier === this.lodTier) return;
+    this.lodTier = newTier;
+
+    const lights = this.group.userData.lights;
+    if (!lights) return;
+
+    // Lights visible at all zoom levels; updateLights controls intensity
+    for (const spot of lights.spots) spot.visible = true;
+    for (const spot of lights.tailSpots) spot.visible = true;
+    for (const spot of lights.reverseSpots) spot.visible = true;
   }
 
   updateLights(headlightsOn) {
@@ -556,11 +668,13 @@ export class VehicleController {
   /**
    * @param {boolean} headlightsOn driven by time of day, decided by the caller
    *   so the fleet does not have to know about the sky.
+   * @param {THREE.Camera} [camera] for LOD distance calculations
    */
-  update(dt, heightmap, headlightsOn = false) {
+  update(dt, heightmap, headlightsOn = false, camera = null) {
     for (const instance of this.instances) {
       instance.update(dt, heightmap);
       instance.updateTurret(dt);
+      if (camera) instance.updateLOD(camera);
       instance.updateLights(headlightsOn);
     }
   }

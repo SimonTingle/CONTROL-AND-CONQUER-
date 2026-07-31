@@ -13,6 +13,8 @@ import { VehicleController } from './vehicles/vehicleController.js';
 import { VEHICLE_CATALOG } from './vehicles/catalog.js';
 import { commandsFor } from './vehicles/commands.js';
 import { HarvesterAI } from './vehicles/harvesterAI.js';
+import { RepairController } from './vehicles/repairController.js';
+import { TrafficController } from './vehicles/trafficController.js';
 import { Terraform } from './core/terraform.js';
 import { StructureController } from './structures/structures.js';
 
@@ -72,10 +74,249 @@ function updateMarker(elapsed) {
   marker.rotation.y = elapsed * 0.8;
 }
 
+// Harvest-target marker: the same idea in the crystals' own colour, so "go here"
+// and "harvest this" read as different orders at a glance. A second mesh rather
+// than a reuse of `marker` because that one retires on the *active* vehicle's
+// order finishing — and the harvester being targeted is usually not the vehicle
+// the player is driving, so a shared marker would vanish almost at once.
+const harvestMarker = new THREE.Mesh(
+  new THREE.SphereGeometry(1.6, 24, 16),
+  new THREE.MeshStandardMaterial({
+    color: 0x2ad9ff,
+    emissive: 0x06323d,
+    metalness: 1.0,
+    roughness: 0.18,
+  })
+);
+harvestMarker.castShadow = true;
+harvestMarker.visible = false;
+harvestMarker.userData.groundY = 0;
+world.scene.add(harvestMarker);
+
+/** Which harvester/field pair the harvest marker is currently vouching for. */
+let harvestMarkerFor = null;
+
+function showHarvestMarker(harvester, field) {
+  const groundY = heightmap.heightAt(field.x, field.z);
+  harvestMarker.userData.groundY = groundY;
+  harvestMarker.position.set(field.x, groundY + MARKER_HOVER, field.z);
+  harvestMarker.visible = true;
+  harvestMarkerFor = { harvester, field };
+}
+
+function hideHarvestMarker() {
+  harvestMarker.visible = false;
+  harvestMarkerFor = null;
+}
+
+/** Retire the marker once the order it stands for is no longer outstanding. */
+function updateHarvestMarker(elapsed) {
+  if (!harvestMarkerFor) return;
+
+  // The driver clears targetField the moment it acts on it, so this covers
+  // "picked up", "superseded by a newer pick" and "wiped by a regenerate" alike.
+  if (harvestMarkerFor.harvester.targetField !== harvestMarkerFor.field) {
+    hideHarvestMarker();
+    return;
+  }
+
+  harvestMarker.position.y =
+    harvestMarker.userData.groundY + MARKER_HOVER + Math.sin(elapsed * 2.4) * 0.6;
+  harvestMarker.rotation.y = elapsed * 0.8;
+}
+
+// Building placement preview: a neon square outline, sized to the pending
+// building's own real footprint (not a generic circle), that snaps to a fixed
+// grid while commandContext.buildPlacementMode is active. Cyan reads as a
+// legal drop, red as illegal — the same signal a click will actually get.
+const GRID_CELL_SIZE = 4; // world units per snap step
+const PLACEMENT_VALID_COLOR = new THREE.Color(0x22e5ff);
+const PLACEMENT_INVALID_COLOR = new THREE.Color(0xff3b3b);
+const OUTLINE_THICKNESS = 0.6;
+const OUTLINE_HEIGHT = 0.7;
+
+/** Snap a world point to the nearest grid intersection. */
+function snapToGrid(x, z) {
+  return {
+    x: Math.round(x / GRID_CELL_SIZE) * GRID_CELL_SIZE,
+    z: Math.round(z / GRID_CELL_SIZE) * GRID_CELL_SIZE,
+  };
+}
+
+/**
+ * The building's real footprint, in world units — its actual plan dimensions,
+ * not `def.footprint` (which is a clearance radius for overlap checking, and
+ * on its own reads far too big or small as an outline: a repair bay's
+ * footprint value alone would draw larger than the whole area it can legally
+ * stand in).
+ */
+function footprintSize(def) {
+  if (def.dims.width != null && def.dims.depth != null) return { w: def.dims.width, d: def.dims.depth };
+  if (def.dims.padRadius != null) return { w: def.dims.padRadius * 2, d: def.dims.padRadius * 2 };
+  return { w: def.footprint * 2, d: def.footprint * 2 };
+}
+
+/** A four-bar picture-frame outline — cheap, and every bar shares one
+ * material so a single colour swap recolors the whole frame at once. */
+function buildFootprintOutline() {
+  const group = new THREE.Group();
+  const material = new THREE.MeshBasicMaterial({ color: PLACEMENT_VALID_COLOR });
+  const bars = [
+    new THREE.Mesh(new THREE.BoxGeometry(1, OUTLINE_HEIGHT, OUTLINE_THICKNESS), material),
+    new THREE.Mesh(new THREE.BoxGeometry(1, OUTLINE_HEIGHT, OUTLINE_THICKNESS), material),
+    new THREE.Mesh(new THREE.BoxGeometry(OUTLINE_THICKNESS, OUTLINE_HEIGHT, 1), material),
+    new THREE.Mesh(new THREE.BoxGeometry(OUTLINE_THICKNESS, OUTLINE_HEIGHT, 1), material),
+  ];
+  for (const bar of bars) group.add(bar);
+  group.userData.bars = bars;
+  group.userData.material = material;
+  group.visible = false;
+  world.scene.add(group);
+  return group;
+}
+
+const placementPreview = buildFootprintOutline();
+
+/** Resize the four bars to frame a `w` x `d` rectangle, in place. */
+function resizeFootprintOutline(group, w, d) {
+  const [top, bottom, left, right] = group.userData.bars;
+  const halfW = w / 2;
+  const halfD = d / 2;
+
+  top.geometry.dispose();
+  top.geometry = new THREE.BoxGeometry(w + OUTLINE_THICKNESS, OUTLINE_HEIGHT, OUTLINE_THICKNESS);
+  top.position.set(0, 0, -halfD);
+
+  bottom.geometry.dispose();
+  bottom.geometry = new THREE.BoxGeometry(w + OUTLINE_THICKNESS, OUTLINE_HEIGHT, OUTLINE_THICKNESS);
+  bottom.position.set(0, 0, halfD);
+
+  left.geometry.dispose();
+  left.geometry = new THREE.BoxGeometry(OUTLINE_THICKNESS, OUTLINE_HEIGHT, d + OUTLINE_THICKNESS);
+  left.position.set(-halfW, 0, 0);
+
+  right.geometry.dispose();
+  right.geometry = new THREE.BoxGeometry(OUTLINE_THICKNESS, OUTLINE_HEIGHT, d + OUTLINE_THICKNESS);
+  right.position.set(halfW, 0, 0);
+}
+
+function cancelPlacementMode() {
+  commandContext.buildPlacementMode = null;
+  placementPreview.visible = false;
+}
+
+/** Re-picks every frame rather than caching from a stale hover — same idiom
+ * as harvest-select's own click-time pick, just run continuously here since
+ * the preview has to track the cursor, not just react to a click. */
+function updatePlacementPreview(clientX, clientY) {
+  const mode = commandContext.buildPlacementMode;
+  if (!mode) {
+    placementPreview.visible = false;
+    return;
+  }
+
+  const point = pickTerrain(clientX, clientY, canvas, camera, heightmap, hit);
+  if (!point) {
+    placementPreview.visible = false;
+    return;
+  }
+
+  const snapped = snapToGrid(point.x, point.z);
+  const groundY = heightmap.heightAt(snapped.x, snapped.z);
+
+  if (placementPreview.userData.defId !== mode.def.id) {
+    const size = footprintSize(mode.def);
+    resizeFootprintOutline(placementPreview, size.w, size.d);
+    placementPreview.userData.defId = mode.def.id;
+  }
+
+  placementPreview.position.set(snapped.x, groundY + OUTLINE_HEIGHT / 2 + 0.1, snapped.z);
+  placementPreview.visible = true;
+
+  const valid = structures.canPlaceAt(mode.pad, mode.def, snapped.x, snapped.z);
+  placementPreview.userData.material.color.copy(valid ? PLACEMENT_VALID_COLOR : PLACEMENT_INVALID_COLOR);
+}
+
+// Spanner queue icon: a small transparent neon wrench hovering over any
+// vehicle currently waiting its turn at a repair bay (`state === 'queued'`
+// specifically — not while still driving over, only once it's actually
+// stuck in line). One per queued vehicle, created and torn down as the
+// queue's membership changes.
+function buildSpannerIcon() {
+  const group = new THREE.Group();
+  const material = new THREE.MeshBasicMaterial({
+    color: 0x22e5ff,
+    transparent: true,
+    opacity: 0.55,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  const handle = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.18, 0.18), material);
+  handle.position.x = 0.1;
+  const head = new THREE.Mesh(new THREE.TorusGeometry(0.35, 0.09, 8, 16), material);
+  head.position.x = -0.75;
+  group.add(handle, head);
+  return group;
+}
+
+const queueIcons = new Map(); // vehicle instance -> icon group
+
+function syncQueueIcons() {
+  const queued = new Set();
+  for (const inst of vehicles.instances) {
+    if (inst.repair?.state !== 'queued') continue;
+    queued.add(inst);
+    if (!queueIcons.has(inst)) {
+      const icon = buildSpannerIcon();
+      world.scene.add(icon);
+      queueIcons.set(inst, icon);
+    }
+  }
+
+  for (const [inst, icon] of queueIcons) {
+    if (queued.has(inst)) continue;
+    world.scene.remove(icon);
+    queueIcons.delete(inst);
+  }
+
+  for (const [inst, icon] of queueIcons) {
+    const pos = inst.group.position;
+    icon.position.set(pos.x, pos.y + inst.menuAnchorHeight + 1.4, pos.z);
+    // Billboarded so it reads the same from any camera angle, the same idea
+    // as every other "float above a vehicle" marker in the game, just facing
+    // the viewer instead of sitting flat.
+    icon.quaternion.copy(camera.quaternion);
+  }
+}
+
+// A deployed base is drivable — nothing in the pad/building system is tied
+// to its live position — but driving off the dock spot is a one-way trigger:
+// once it's unambiguously left, a power spire grows (slowly — visibly slower
+// than the one Relocate Base plants) at the vacated spot, since whatever's
+// still built there needs a story for why it's still powered.
+const BASE_MOVE_THRESHOLD = 45; // comparable to the pad's own inner radius
+const SPIRE_GROW_TIME = 60; // seconds — deliberately slow, distinct from Relocate Base's
+
+function checkBaseRepositioning() {
+  for (const inst of vehicles.instances) {
+    if (inst.def.id !== 'base-station' || inst.mode !== 'deployed') continue;
+    if (inst.spireGrown || !inst.deployOrigin) continue;
+    const dist = Math.hypot(
+      inst.group.position.x - inst.deployOrigin.x,
+      inst.group.position.z - inst.deployOrigin.z
+    );
+    if (dist < BASE_MOVE_THRESHOLD) continue;
+    structures.placeAt(structures.defOf('power-spire'), inst.deployOrigin.x, inst.deployOrigin.z, heightmap, {
+      buildTimeOverride: SPIRE_GROW_TIME,
+    });
+    inst.spireGrown = true;
+  }
+}
+
 const vehicles = new VehicleController(world.scene);
 
 const terraform = new Terraform(world);
-const structures = new StructureController(world.scene);
+const structures = new StructureController(world.scene, vehicles);
 
 const chase = new ChaseCamera(camera, heightmap);
 
@@ -99,6 +340,44 @@ let dragButton = -1;
 let lastX = 0;
 let lastY = 0;
 
+// touch-action: none on the canvas (needed so a finger-drag orbits the camera
+// instead of the browser trying to scroll/pinch-zoom the page) has a side
+// effect: on touch devices the double-tap-to-zoom gesture that most browsers'
+// synthetic `dblclick` rides on is disabled along with it, so no `dblclick`
+// event ever reaches the listener below. A manual detector fills the gap for
+// touch only — a real mouse's dblclick is unaffected by touch-action and
+// keeps working through the native listener.
+const DOUBLE_TAP_MS = 350;
+const DOUBLE_TAP_PX = 24;
+let lastTap = null; // { x, y, time } of the most recent unconsumed touch tap
+let suppressNextTapMove = false; // set when pointerdown recognises a double-tap or long-press
+
+// A press-and-hold on a vehicle or building also opens its menu — the mouse
+// equivalent of a long-press, and the touch one too, sharing one timer and one
+// threshold (`dragged`) rather than a second movement tolerance.
+const LONG_PRESS_MS = 500;
+let longPressTimer = null;
+
+function clearLongPress() {
+  if (longPressTimer === null) return;
+  clearTimeout(longPressTimer);
+  longPressTimer = null;
+}
+
+function startLongPress() {
+  longPressTimer = setTimeout(() => {
+    longPressTimer = null;
+    if (dragged) return; // moved since the press started — a drag, not a hold
+    // Picks at the *live* pointer position, not where the press started half a
+    // second ago. An autonomous harvester can drive clear of the original ray
+    // inside the hold window, and a pick against stale coordinates then misses
+    // a vehicle the cursor is still sitting on.
+    if (!pickSelectable(lastX, lastY)) return;
+    suppressNextTapMove = true;
+    openMenuAt(lastX, lastY);
+  }, LONG_PRESS_MS);
+}
+
 canvas.addEventListener('pointerdown', (e) => {
   dragged = false;
   dragButton = e.button;
@@ -107,6 +386,32 @@ canvas.addEventListener('pointerdown', (e) => {
   // Any press on the world dismisses an open command menu. The menu's own
   // buttons live outside the canvas, so their clicks never reach here.
   radialMenu.close();
+  clearLongPress();
+
+  if (e.pointerType === 'touch') {
+    const prev = lastTap;
+    const now = performance.now();
+    const isDoubleTap =
+      prev &&
+      now - prev.time <= DOUBLE_TAP_MS &&
+      Math.hypot(e.clientX - prev.x, e.clientY - prev.y) <= DOUBLE_TAP_PX;
+
+    if (isDoubleTap) {
+      // Recognised before pointerup runs, so the second tap's move order can
+      // be skipped outright rather than issued and then cancelled after the
+      // fact. No long-press timer either — this press is already spoken for.
+      suppressNextTapMove = true;
+      lastTap = null;
+      openMenuAt(e.clientX, e.clientY);
+      return;
+    }
+    lastTap = { x: e.clientX, y: e.clientY, time: now };
+  }
+
+  // Primary button/touch only — a held right-drag pans the chase camera and
+  // must not also pop the menu.
+  if (e.button !== 0) return;
+  startLongPress();
 });
 
 canvas.addEventListener('pointermove', (e) => {
@@ -115,7 +420,12 @@ canvas.addEventListener('pointermove', (e) => {
   const dy = e.clientY - lastY;
   lastX = e.clientX;
   lastY = e.clientY;
-  if (dx !== 0 || dy !== 0) dragged = true;
+  if (dx !== 0 || dy !== 0) {
+    dragged = true;
+    // A drag can never be half of a double-tap, nor a long-press hold.
+    lastTap = null;
+    clearLongPress();
+  }
 
   // MapControls handles the drag itself whenever the camera is free.
   if (!isChasing()) return;
@@ -123,8 +433,66 @@ canvas.addEventListener('pointermove', (e) => {
   else chase.orbit(dx, dy);
 });
 
+// A gesture the OS took over (e.g. a system back-swipe) fires this instead of
+// pointerup — without clearing state here a stale long-press timer could
+// still fire, or a genuine tap get misread as the first half of a double-tap.
+canvas.addEventListener('pointercancel', () => {
+  dragButton = -1;
+  dragged = false;
+  lastTap = null;
+  suppressNextTapMove = false;
+  clearLongPress();
+});
+
 canvas.addEventListener('pointerup', (e) => {
   dragButton = -1;
+  clearLongPress();
+  if (suppressNextTapMove) {
+    // This tap was already spent opening the radial menu in pointerdown.
+    suppressNextTapMove = false;
+    return;
+  }
+
+  // Handle building placement mode
+  if (commandContext.buildPlacementMode) {
+    const { def, pad } = commandContext.buildPlacementMode;
+    const point = pickTerrain(e.clientX, e.clientY, canvas, camera, heightmap, hit);
+    if (point) {
+      // Same snap the preview outline used, so the click lands exactly where
+      // the player was shown it would.
+      const snapped = snapToGrid(point.x, point.z);
+      if (structures.canPlaceAt(pad, def, snapped.x, snapped.z)) {
+        structures.place(def, pad, snapped);
+        cancelPlacementMode();
+      }
+    }
+    // An invalid click is not a cancel — mirrors "click far from any bloom has
+    // no effect" from harvest targeting. Stays in placement mode either way.
+    return;
+  }
+
+  // Handle harvest selection mode
+  if (commandContext.harvestSelectMode) {
+    const point = pickTerrain(e.clientX, e.clientY, canvas, camera, heightmap, hit);
+    if (point) {
+      // requireOnField so a click on bare ground finds nothing, rather than
+      // quietly sending the harvester to whichever field is nearest the miss.
+      const field = world.blooms.nearestTo(point.x, point.z, {
+        minStock: 0,
+        requireOnField: true,
+      });
+      if (field) {
+        const { harvester } = commandContext.harvestSelectMode;
+        harvester.targetField = field;
+        // Anchored to the field's centre, not the click: it has to be obvious
+        // *which* field was taken, even when the click landed out at the edge.
+        showHarvestMarker(harvester, field);
+      }
+    }
+    commandContext.harvestSelectMode = null;
+    return;
+  }
+
   if (!input.tapToMove || dragged || e.button !== 0) return;
 
   const point = pickTerrain(e.clientX, e.clientY, canvas, camera, heightmap, hit);
@@ -173,26 +541,37 @@ function pickSelectable(clientX, clientY) {
   return node?.userData.selectable ?? null;
 }
 
-// Mobile browsers synthesise dblclick from a double-tap, so one listener covers
-// both pointer types.
-canvas.addEventListener('dblclick', (e) => {
-  // A double-click that ended a drag is really an orbit; the flag is set by the
-  // first pixel of movement, so this is a strict test.
-  if (dragged) return;
-
-  const instance = pickSelectable(e.clientX, e.clientY);
+/**
+ * Open the radial menu for whatever's at this screen point, if anything.
+ * Shared by the native `dblclick` listener (real mouse/trackpad, or the rare
+ * touch browser that does still synthesise dblclick) and the manual touch
+ * double-tap detector in `pointerdown` above.
+ */
+function openMenuAt(clientX, clientY) {
+  const instance = pickSelectable(clientX, clientY);
   if (!instance) return;
 
-  // On touch, the first tap of the double-tap already issued a move order
-  // through pointerup. Double-tapping a vehicle means "command this one", not
-  // "drive it to the ground behind it" — so take that order back. A building
-  // has no order to cancel.
+  // On touch, the first tap of a double-tap can already have issued a move
+  // order through pointerup before this ever runs (the native dblclick path
+  // only, since the manual detector suppresses it up front). Double-tapping a
+  // vehicle means "command this one", not "drive it to the ground behind it"
+  // — so take that order back. A building has no order to cancel.
   if (input.tapToMove) {
     instance.arrive?.('cancelled');
     marker.visible = false;
   }
 
   radialMenu.openFor(instance, commandsFor(instance, commandContext));
+}
+
+// Kept for real mice/trackpads, and as a fallback on any touch browser that
+// still does synthesise it despite touch-action: none — harmless if it fires
+// a second time, since openMenuAt is idempotent per tap.
+canvas.addEventListener('dblclick', (e) => {
+  // A double-click that ended a drag is really an orbit; the flag is set by the
+  // first pixel of movement, so this is a strict test.
+  if (dragged) return;
+  openMenuAt(e.clientX, e.clientY);
 });
 
 // MapControls owns the wheel when it is enabled, so this only has to cover the
@@ -215,6 +594,7 @@ addEventListener('keydown', (e) => {
   // Keys are bound to the window, so the difficulty overlay has to swallow them
   // explicitly or the player drives a vehicle that does not exist yet.
   if (k in driveKeys && !isTextInputFocused() && !game.difficultyScreen?.open) driveKeys[k] = true;
+  if (e.key === 'Escape' && commandContext.buildPlacementMode) cancelPlacementMode();
 });
 addEventListener('keyup', (e) => {
   const k = e.key.toLowerCase();
@@ -255,8 +635,11 @@ const view = {
   lighting,
   regenerate(params) {
     world.regenerate(params);
-    // The marker is anchored to terrain that no longer exists.
+    // The markers are anchored to terrain that no longer exists.
     marker.visible = false;
+    hideHarvestMarker();
+    // A pending placement targets a pad that's about to be orphaned too.
+    cancelPlacementMode();
     // So are any pads: regenerate swaps in a fresh heightfield array, which
     // orphans the flattening the old one was carrying.
     terraform.clear();
@@ -264,6 +647,7 @@ const view = {
     // fields that no longer exist.
     structures.clear();
     harvesterAI.reset();
+    repairController.reset();
     radialMenu.close();
   },
   setChase(enabled) {
@@ -291,8 +675,13 @@ const game = {
   unlocked: false,
   difficultyScreen: null,
   credits: 0,
+  // Latched the same way `unlocked` is: relocating spends nothing, so without
+  // a latch a base built just past 50k could spend back below it and lose the
+  // option it already earned.
+  reachedRelocateThreshold: false,
   earn(n) {
     this.credits += n;
+    if (this.credits >= 50000) this.reachedRelocateThreshold = true;
     return this.credits;
   },
   /** @returns {boolean} false when short, so the caller can explain why. */
@@ -312,12 +701,59 @@ const radialMenu = new RadialMenu(camera, {
 });
 
 /**
+ * Check if a route from facility to spawn point is drivable (climb grade acceptable).
+ * Samples 5 points along the path to validate.
+ */
+function isSpawnLocationViable(facilityX, facilityZ, spawnX, spawnZ, maxClimbGrade) {
+  if (heightmap.heightAt(spawnX, spawnZ) <= heightmap.seaLevelY + 1) return false;
+
+  const samples = 5;
+  let worst = 0;
+  let prev = heightmap.heightAt(facilityX, facilityZ);
+  for (let i = 1; i <= samples; i++) {
+    const t = i / samples;
+    const px = facilityX + (spawnX - facilityX) * t;
+    const pz = facilityZ + (spawnZ - facilityZ) * t;
+    const h = heightmap.heightAt(px, pz);
+    const run = Math.hypot(spawnX - facilityX, spawnZ - facilityZ) / samples;
+    worst = Math.max(worst, Math.abs(h - prev) / Math.max(run, 1e-3));
+    prev = h;
+  }
+  return worst < maxClimbGrade * 0.8;
+}
+
+/**
  * Roll a unit out of a factory, parked at its dock facing away from the
- * building. Deliberately does *not* take the keys: the player is usually
- * watching the factory when this fires, and yanking the camera onto a new
- * vehicle mid-build would be jarring.
+ * building. On mountains, searches for a drivable exit angle to avoid spawning
+ * the vehicle in terrain it cannot escape from.
  */
 function produceUnit(def, facility) {
+  const angles = [0, 0.9, -0.9, 1.6, -1.6, 2.4];
+  const maxClimbGrade = def.maxClimbGrade ?? 0.62;
+  let dockOffset = facility.def.dockOffset;
+  let attempt = 0;
+  const maxAttempts = 5;
+
+  while (attempt < maxAttempts) {
+    for (const angleOffset of angles) {
+      const angle = facility.angle + angleOffset;
+      const dock = {
+        x: facility.x + Math.cos(angle) * dockOffset,
+        z: facility.z + Math.sin(angle) * dockOffset,
+      };
+
+      if (isSpawnLocationViable(facility.x, facility.z, dock.x, dock.z, maxClimbGrade)) {
+        const point = new THREE.Vector3(dock.x, heightmap.heightAt(dock.x, dock.z) + 0.05, dock.z);
+        return vehicles.spawn(def, point, facility.angle, { activate: false });
+      }
+    }
+
+    // No viable angle at this distance; try farther out
+    dockOffset += 8;
+    attempt++;
+  }
+
+  // Fallback: spawn at original dock position even if not ideal
   const dock = facility.dock;
   const point = new THREE.Vector3(dock.x, heightmap.heightAt(dock.x, dock.z) + 0.05, dock.z);
   return vehicles.spawn(def, point, facility.angle, { activate: false });
@@ -332,11 +768,14 @@ structures.onComplete = (instance) => {
 };
 
 const harvesterAI = new HarvesterAI({ vehicles, world, heightmap, structures, game });
+const repairController = new RepairController({ vehicles, structures, heightmap, game });
+const trafficController = new TrafficController({ vehicles });
 
 /** Everything a command might need, so commands.js imports no game systems. */
 const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit };
 
 const vehiclePicker = new VehiclePicker(VEHICLE_CATALOG, {
+  vehicles,
   onSelect(def) {
     vehiclePicker.setOpen(false);
     // Selecting a vehicle that is already out there takes the keys back rather
@@ -351,18 +790,31 @@ const vehiclePicker = new VehiclePicker(VEHICLE_CATALOG, {
           // vehicle after that arrives beside whichever one is already out
           // there, which — since maxRadius sits well inside a sight radius —
           // also means it lands on ground the fog of war already knows about.
-          const reference = vehicles.active ?? vehicles.instances[0];
-          const { point, heading } = reference
-            ? findSpawnPointNear(heightmap, reference.group.position, {
-                minRadius: (reference.def.dims.hullLength + def.dims.hullLength) / 2 + 4,
+          // For base station, prefer spawning at scout's original location
+          let spawnOrigin = vehicles.active ?? vehicles.instances[0];
+          if (def.id === 'base-station' && game.scoutSpawnPoint) {
+            spawnOrigin = { group: { position: { x: game.scoutSpawnPoint.x, z: game.scoutSpawnPoint.z } }, def: { sightRadius: 80 } };
+          }
+          const { point, heading } = spawnOrigin
+            ? findSpawnPointNear(heightmap, spawnOrigin.group.position, {
+                minRadius: (spawnOrigin.def.dims?.hullLength ?? 5.2 + def.dims.hullLength) / 2 + 4,
                 // Comfortably inside the reference vehicle's sight radius, so
                 // the spot lands on ground its fog reveal has already covered.
-                maxRadius: reference.def.sightRadius * 0.8,
+                maxRadius: spawnOrigin.def.sightRadius * 0.8,
                 camera,
               })
             : findEdgeSpawnPoint(heightmap, camera);
           point.y += 0.05; // avoid z-fighting with the ground on the spawn frame
-          return vehicles.spawn(def, point, heading);
+          // findSpawnPointNear/findEdgeSpawnPoint face a vehicle back toward
+          // its reference point — for the base station that consistently
+          // leaves it facing out to sea instead of toward land, so flip it.
+          const spawnHeading = def.id === 'base-station' ? heading + Math.PI : heading;
+          const instance = vehicles.spawn(def, point, spawnHeading);
+          // Store scout's spawn point for base station to reuse later
+          if (def.id === 'scout-buggy' && !game.scoutSpawnPoint) {
+            game.scoutSpawnPoint = { x: point.x, z: point.z };
+          }
+          return instance;
         })();
     // Snap in behind the new vehicle rather than flying across the map to it.
     if (chase.enabled) chase.reset(instance);
@@ -422,7 +874,14 @@ function tick(dt, { render = true } = {}) {
   // deciding (so it never issues an order the player just cancelled) and set
   // its targets before the fleet consumes them.
   harvesterAI.update(dt);
-  vehicles.update(dt, heightmap, headlightsWanted());
+  // After harvesterAI: a repairing harvester is already paused by the check
+  // above, so this is the only thing setting its target this frame.
+  repairController.update(dt);
+  // After both AI systems have set their targets, and before movement reads
+  // them: this is what actually decides `yielding` and hands out collision
+  // damage for the frame about to run.
+  trafficController.update(dt);
+  vehicles.update(dt, heightmap, headlightsWanted(), camera);
   structures.update(dt, heightmap);
 
   // Reveal after the vehicles have moved — world.update() runs before them, so
@@ -447,11 +906,19 @@ function tick(dt, { render = true } = {}) {
   // After the camera has settled, so the menu projects against this frame's
   // view rather than lagging it by one.
   terraform.update(dt);
+  checkBaseRepositioning();
   radialMenu.update();
 
   if (!render) return;
 
   updateMarker(clock.elapsedTime);
+  updateHarvestMarker(clock.elapsedTime);
+  updatePlacementPreview(lastX, lastY);
+  syncQueueIcons();
+  canvas.classList.toggle(
+    'crosshair-mode',
+    !!commandContext.harvestSelectMode || !!commandContext.buildPlacementMode
+  );
   vehiclePicker.update(dt);
   renderer.render(world.scene, camera);
 
@@ -556,5 +1023,7 @@ window.__probe = (count = 100) => {
 Object.assign(window, {
   world, camera, renderer, controls, chase, THREE, vehicles, vehiclePicker, input, lighting, driveKeys,
   game, hud, terraform, radialMenu, commandsFor, commandContext,
-  structures, harvesterAI, produceUnit,
+  structures, harvesterAI, repairController, trafficController, produceUnit,
+  syncQueueIcons, queueIcons, checkBaseRepositioning,
+  updatePlacementPreview, placementPreview, snapToGrid, footprintSize, resizeFootprintOutline,
 });

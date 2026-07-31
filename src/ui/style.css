@@ -28,6 +28,9 @@ html, body {
   touch-action: none;
 }
 
+/* Armed to pick a bloom: the pointer says so, since the next click is special. */
+#viewport.crosshair-mode { cursor: crosshair; }
+
 /* ---- hamburger ---- */
 
 #menu-toggle {
@@ -353,6 +356,28 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
   text-align: left;
 }
 
+.vehicle-section {
+  margin-bottom: 24px;
+}
+
+.vehicle-section-title {
+  margin: 0 0 10px 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.vehicle-card-active {
+  opacity: 0.9;
+}
+
+.vehicle-card-active:hover {
+  border-color: var(--accent);
+  background: rgba(79, 209, 197, 0.12);
+}
+
 /* ---- HUD ---- */
 
 #hud {
@@ -547,11 +572,22 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
 }
 
 .rm-sub {
+  display: none;
   font-size: 9px;
   font-weight: 400;
   letter-spacing: 0.02em;
   color: var(--text-dim);
   text-shadow: none;
+}
+
+/* Desktop: show hints on hover */
+.rm-item:hover:not(.disabled) .rm-sub {
+  display: block;
+}
+
+/* Mobile: show hints when user holds finger on button */
+.rm-item.hint-active .rm-sub {
+  display: block;
 }
 
 /* ---- difficulty select ---- */

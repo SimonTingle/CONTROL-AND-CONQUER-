@@ -27,6 +27,13 @@ const MAX_SLOPE = 0.2;
 
 const FIELD_TARGET = 26;
 const FIELD_RADIUS = 14;
+/**
+ * How far past a field's own radius a `requireOnField` query still counts as
+ * having hit it. Generous enough that aiming at the edge of a visible cluster
+ * lands, tight enough that a click on bare ground finds nothing rather than
+ * silently snapping to whichever field happens to be nearest on the map.
+ */
+const PICK_MAX_FACTOR = 1.6;
 const MIN_SEPARATION = 90;
 const CRYSTALS_PER_FIELD = 28;
 
@@ -189,8 +196,12 @@ export class Blooms {
    * @param {object} [opts]
    * @param {number} [opts.minStock] ignore fields thinner than this
    * @param {(field) => boolean} [opts.reject] e.g. a harvester's ban list
+   * @param {boolean} [opts.requireOnField] only match a field the point is
+   *   actually on. For picking by click, where "nearest anywhere" would accept
+   *   a click on empty ground. The autonomous driver wants the opposite — the
+   *   nearest field at any distance — so this defaults off.
    */
-  nearestTo(x, z, { minStock = 1, reject = null } = {}) {
+  nearestTo(x, z, { minStock = 1, reject = null, requireOnField = false } = {}) {
     const seaY = this.heightmap.seaLevelY;
     let best = null;
     let bestD = Infinity;
@@ -203,6 +214,7 @@ export class Blooms {
       if (reject?.(f)) continue;
 
       const d = Math.hypot(f.x - x, f.z - z);
+      if (requireOnField && d > f.radius * PICK_MAX_FACTOR) continue;
       if (d < bestD) {
         bestD = d;
         best = f;

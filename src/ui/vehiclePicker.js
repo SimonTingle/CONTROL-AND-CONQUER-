@@ -18,9 +18,10 @@ const PREVIEW_WIDTH = 150;
 const PREVIEW_HEIGHT = 108;
 
 export class VehiclePicker {
-  constructor(catalog, { onSelect } = {}) {
+  constructor(catalog, { onSelect, vehicles } = {}) {
     this.catalog = catalog;
     this.onSelect = onSelect;
+    this.vehicles = vehicles;
     this.open = false;
     this.previews = [];
 
@@ -35,6 +36,7 @@ export class VehiclePicker {
     this.unlocked = new Set(catalog.filter((d) => !d.unlock).map((d) => d.id));
     this.cards = new Map();
     this.lockText = () => 'Locked';
+    this.lastInstanceCount = 0;
 
     this.toggleButton = document.getElementById('vehicle-toggle');
     this.panel = document.getElementById('vehicle-panel');
@@ -50,6 +52,38 @@ export class VehiclePicker {
 
   buildPreviews() {
     this.grid.replaceChildren();
+    this.previews = [];
+    this.cards = new Map();
+
+    // Section 1: Active spawned vehicles
+    const instances = this.vehicles?.instances ?? [];
+    if (instances.length > 0) {
+      const section = document.createElement('div');
+      section.className = 'vehicle-section';
+
+      const heading = document.createElement('h3');
+      heading.className = 'vehicle-section-title';
+      heading.textContent = 'Active Vehicles';
+      section.appendChild(heading);
+
+      // Sort by creation time (oldest first)
+      const sortedInstances = [...instances].sort((a, b) => a.createdAt - b.createdAt);
+
+      for (const instance of sortedInstances) {
+        const card = this._buildInstanceCard(instance);
+        section.appendChild(card);
+      }
+      this.grid.appendChild(section);
+    }
+
+    // Section 2: Available to spawn
+    const section = document.createElement('div');
+    section.className = 'vehicle-section';
+
+    const heading = document.createElement('h3');
+    heading.className = 'vehicle-section-title';
+    heading.textContent = 'Available to Spawn';
+    section.appendChild(heading);
 
     // Produced units are not spawnable from the drawer.
     for (const def of this.catalog.filter((d) => d.spawnable !== false)) {
@@ -85,12 +119,35 @@ export class VehiclePicker {
         if (!this.unlocked.has(def.id)) return;
         this.onSelect?.(def);
       });
-      this.grid.appendChild(card);
+      section.appendChild(card);
       this.cards.set(def.id, { card, lock, def });
       this.applyLockState(def.id);
 
       this.previews.push(this.createPreview(def, canvas));
     }
+    this.grid.appendChild(section);
+  }
+
+  _buildInstanceCard(instance) {
+    const card = document.createElement('button');
+    card.className = 'vehicle-card vehicle-card-active';
+    card.type = 'button';
+    card.setAttribute('aria-label', `Select ${instance.def.name}`);
+
+    const canvas = document.createElement('canvas');
+    card.appendChild(canvas);
+
+    const label = document.createElement('span');
+    label.className = 'vehicle-card-label';
+    label.textContent = instance.def.name;
+    card.appendChild(label);
+
+    card.addEventListener('click', () => {
+      this.vehicles?.setActive(instance);
+    });
+
+    this.previews.push(this.createPreview(instance.def, canvas));
+    return card;
   }
 
   /** Unlock (or re-lock) a catalog entry and update its card in place. */
@@ -159,6 +216,14 @@ export class VehiclePicker {
   /** Spins and renders every preview. Cheap no-op while the drawer is closed. */
   update(dt) {
     if (!this.open) return;
+
+    // Rebuild active vehicles section if instances have changed
+    const currentInstanceCount = this.vehicles?.instances?.length ?? 0;
+    if (currentInstanceCount !== this.lastInstanceCount) {
+      this.buildPreviews();
+      this.lastInstanceCount = currentInstanceCount;
+    }
+
     for (const p of this.previews) {
       p.mesh.rotation.y += dt * SPIN_SPEED;
       // Render through the one shared context, then copy the result onto

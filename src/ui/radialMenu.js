@@ -43,6 +43,9 @@ export class RadialMenu {
   openFor(instance, commands) {
     this.instance = instance;
     this.items = commands;
+    // Autonomous drivers watch this to hold position while the player decides —
+    // without it the harvester's AI drives it away and update() shuts the menu.
+    instance.menuOpen = true;
 
     const ring = el('div', 'rm-ring');
     const title = el('div', 'rm-title');
@@ -54,10 +57,10 @@ export class RadialMenu {
       const button = el('button', 'rm-item');
       button.type = 'button';
 
-      // Fan the entries around the top of the ring, so a single command sits
-      // directly above the vehicle rather than off at 3 o'clock.
-      const spread = Math.min(commands.length, 6);
-      const angle = -Math.PI / 2 + (i - (spread - 1) / 2) * (Math.PI / 3.2);
+      // Spread commands evenly around the full circle. Two commands sit left-right
+      // (0° and 180°); six spread 60° apart.
+      const spread = commands.length;
+      const angle = (i / spread) * Math.PI * 2;
       button.style.left = `${Math.cos(angle) * RING_RADIUS}px`;
       button.style.top = `${Math.sin(angle) * RING_RADIUS}px`;
 
@@ -89,11 +92,39 @@ export class RadialMenu {
 
     this.root.replaceChildren(...nodes);
     this.root.classList.remove('hidden');
-    this.update();
+
+    // On mobile, hints only show when the user holds a finger on the button.
+    // On desktop, :hover in CSS handles it.
+    const isMobile = navigator.maxTouchPoints > 0;
+    if (isMobile) {
+      for (const button of this.root.querySelectorAll('.rm-item:not(.disabled)')) {
+        let hintTimer = null;
+        button.addEventListener('pointerdown', () => {
+          hintTimer = setTimeout(() => {
+            button.classList.add('hint-active');
+          }, 200);
+        });
+        button.addEventListener('pointerup', () => {
+          if (hintTimer) clearTimeout(hintTimer);
+          button.classList.remove('hint-active');
+        });
+        button.addEventListener('pointercancel', () => {
+          if (hintTimer) clearTimeout(hintTimer);
+          button.classList.remove('hint-active');
+        });
+      }
+    }
+
+    // Position only. Going through update() here would run the drove-away check
+    // against the speed the vehicle still has *this* instant — closing the menu
+    // on the same call stack that opened it, before any tick has had a chance to
+    // honour menuOpen and bring an autonomous vehicle to a stop.
+    this._reposition();
   }
 
   close() {
     if (!this.isOpen) return;
+    this.instance.menuOpen = false;
     this.instance = null;
     this.items = [];
     this.root.classList.add('hidden');
@@ -103,10 +134,14 @@ export class RadialMenu {
   /** Re-anchor to the vehicle, and retire the menu if it no longer applies. */
   update() {
     if (!this.isOpen) return;
-
-    const instance = this.instance;
     // Driving away is an implicit "never mind". Structures report zero.
-    if (instance.speed > CLOSE_SPEED) return this.close();
+    if (this.instance.speed > CLOSE_SPEED) return this.close();
+    this._reposition();
+  }
+
+  /** Project the anchor to screen space and move the menu there. */
+  _reposition() {
+    const instance = this.instance;
 
     _anchor.copy(instance.group.position);
     _anchor.y += instance.menuAnchorHeight;
