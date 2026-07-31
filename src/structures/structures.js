@@ -59,8 +59,16 @@ export const STRUCTURE_CATALOG = [
     maxHealth: 500,
     sightRadius: 30,
     buildTime: 6,
-    footprint: 24, // roughly double the harvester facility's — the closest this
-    // codebase's scalar-radius footprint model gets to "twice the size"
+    // `footprint` is the collision radius used by canPlaceAt/freeSlot, not a
+    // visual size — it must track the bay's real physical extent (its pad is
+    // dims.padRadius=10, gantry ring at padRadius*0.86, LED strip at
+    // padRadius+0.4 — nothing reaches much past 10.5). An earlier value of 24
+    // ("roughly double the harvester facility's, to read as bigger") drove
+    // placement math instead of visuals: canPlaceAt's overlap rule rejects
+    // anything within footprint*1.6 (≈38) of another building, which — given
+    // the pad itself is only radius 40 — left no legal spot anywhere on the
+    // pad at all once a harvester facility already occupied it.
+    footprint: 11,
     cost: 2000, // credits to build, separate from the per-repair cost below
     dockOffset: 16,
     ledSegments: 12,
@@ -513,9 +521,9 @@ export class StructureController {
     // check against whichever base is actually parked here right now, not a
     // stored reference. Deliberately just the vehicle's own hull plus a small
     // fixed clearance, not scaled by the new building's footprint the way the
-    // building-overlap check above is — a footprint-sized buffer on top of a
-    // building's own footprint radius would swallow most or all of a pad this
-    // size (the repair bay's is already most of the usable ring on its own).
+    // building-overlap check above is — a footprint-sized buffer swallowed
+    // most or all of a pad this size when footprint values were inflated for
+    // visual reasons (see the repair bay's own footprint comment).
     const base = this.vehicles?.instances.find(
       (v) => v.def.id === 'base-station' && v.mode === 'deployed' && Math.hypot(v.group.position.x - pad.x, v.group.position.z - pad.z) <= pad.radius
     );
