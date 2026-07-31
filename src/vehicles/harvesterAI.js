@@ -372,7 +372,9 @@ export class HarvesterAI {
     const rate = Math.min(facility.def.unloadRate * unloadMultiplier, inst.def.unloadRate);
     const moved = Math.min(rate * dt, s.load);
     s.load -= moved;
-    this.game.earn(moved);
+    // Credited to the harvester's own team. `_facility()` only ever returns a
+    // same-team facility, so the two can never disagree.
+    this.game.teamOf(inst).earn(moved);
 
     if (s.load <= 1e-6) {
       s.load = 0;

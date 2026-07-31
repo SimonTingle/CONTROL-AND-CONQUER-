@@ -105,7 +105,7 @@ export class RepairController {
     const bay = this._nearestBay(inst);
     const missing = bay ? inst.def.maxHealth - inst.health : 0;
     const cost = bay ? Math.ceil(missing * bay.def.repair.creditsPerHealth) : Infinity;
-    if (!bay || this.game.credits < cost) {
+    if (!bay || this.game.teamOf(inst).credits < cost) {
       inst._autoRepairCooldown = AUTO_REPAIR_RETRY_COOLDOWN;
       return;
     }
@@ -248,7 +248,7 @@ export class RepairController {
       r.duration = Math.max(0.1, missing * bay.def.repair.secondsPerHealth * speedMultiplier);
       r.startHealth = inst.health;
 
-      if (!this.game.spend(r.cost)) {
+      if (!this.game.teamOf(inst).spend(r.cost)) {
         // Balance moved while queueing — release the bay without repairing.
         this._leaveBay(inst, bay);
         return;

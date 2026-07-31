@@ -9,6 +9,7 @@ import { VehiclePicker } from './ui/vehiclePicker.js';
 import { DifficultyScreen, DIFFICULTIES } from './ui/difficultyScreen.js';
 import { PortalScreen } from './ui/portalScreen.js';
 import { AiDifficultyScreen } from './ui/aiDifficultyScreen.js';
+import { createTeams, PLAYER_TEAM_ID } from './core/team.js';
 import { Hud } from './ui/hud.js';
 import { RadialMenu } from './ui/radialMenu.js';
 import { VehicleController } from './vehicles/vehicleController.js';
@@ -680,22 +681,23 @@ const game = {
   portalScreen: null,
   difficultyScreen: null,
   aiDifficultyScreen: null,
-  aiMatch: null, // { teamCount, buildDelaySeconds } once Multiplayer AI is chosen — unused until the AI-opponent system exists
-  credits: 0,
-  // Latched the same way `unlocked` is: relocating spends nothing, so without
-  // a latch a base built just past 50k could spend back below it and lose the
-  // option it already earned.
-  reachedRelocateThreshold: false,
-  earn(n) {
-    this.credits += n;
-    if (this.credits >= 50000) this.reachedRelocateThreshold = true;
-    return this.credits;
+  aiMatch: null, // { teamCount, buildDelaySeconds } once Multiplayer AI is chosen
+  // Sandbox is a one-team match, so this is never empty and nothing has to
+  // special-case "no teams". Rebuilt by beginMatch once the mode is known.
+  teams: createTeams(0),
+  get playerTeam() {
+    return this.teams[PLAYER_TEAM_ID];
   },
-  /** @returns {boolean} false when short, so the caller can explain why. */
-  spend(n) {
-    if (this.credits < n) return false;
-    this.credits -= n;
-    return true;
+  /**
+   * The owning team of any vehicle, structure or pad.
+   *
+   * Falls back to the player's team rather than null: everything placed before
+   * teams existed (and everything in sandbox) is the player's, and a null here
+   * would turn every economy call site into a null check for a case that
+   * cannot happen.
+   */
+  teamOf(entity) {
+    return this.teams[entity?.teamId ?? PLAYER_TEAM_ID] ?? this.playerTeam;
   },
   // Placeholder persistence: a tiny progress snapshot in localStorage, not the
   // full world state. Real save/load (terrain, vehicles, structures, fog) is
@@ -704,7 +706,7 @@ const game = {
     const snapshot = {
       mode: this.mode,
       difficultyId: this.difficulty?.id,
-      credits: this.credits,
+      credits: this.playerTeam.credits,
       savedAt: Date.now(),
     };
     localStorage.setItem('ptg-save', JSON.stringify(snapshot));
@@ -872,6 +874,8 @@ function updateProgression(explored) {
  * any per-mode extras (like the AI match config) differ. */
 function beginMatch(difficulty) {
   game.difficulty = difficulty;
+  // Sandbox is a one-team match; Multiplayer AI adds one team per AI opponent.
+  game.teams = createTeams(game.aiMatch?.teamCount ?? 0);
   // Re-render the lock hint now that the target percentage is known.
   for (const def of VEHICLE_CATALOG) vehiclePicker.applyLockState(def.id);
   // Nothing is spawned yet, so open the drawer on the one vehicle available.
@@ -990,10 +994,10 @@ function tick(dt, { render = true } = {}) {
       explored,
       difficulty: game.difficulty,
       unlocked: game.unlocked,
-      credits: game.credits,
+      credits: game.playerTeam.credits,
       // Nothing to report before there is an economy — a permanent "0 cr"
       // during the scouting game is just noise.
-      economyActive: game.credits > 0 || structures.instances.length > 0,
+      economyActive: game.playerTeam.credits > 0 || structures.instances.length > 0,
       load: harvesterAI.stateOf(vehicles.active)?.load ?? 0,
     });
 

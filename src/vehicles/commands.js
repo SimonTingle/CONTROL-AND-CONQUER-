@@ -111,14 +111,15 @@ const UPGRADE_COMMAND = {
     const tiers = instance.def.upgradeTiers;
     if (!tiers || instance.upgradeLevel >= tiers.length) return 'Already at max tier';
     const tier = tiers[instance.upgradeLevel];
-    if (ctx.game.credits < tier.cost) return `Needs ${tier.cost} cr (have ${Math.floor(ctx.game.credits)})`;
+    const team = ctx.game.teamOf(instance);
+    if (team.credits < tier.cost) return `Needs ${tier.cost} cr (have ${Math.floor(team.credits)})`;
     return true;
   },
   execute(instance, ctx) {
     const tier = instance.def.upgradeTiers?.[instance.upgradeLevel];
     if (!tier) return;
     // spend() is the real gate — balance may have moved since the menu opened.
-    if (ctx.game.spend(tier.cost)) instance.upgradeLevel++;
+    if (ctx.game.teamOf(instance).spend(tier.cost)) instance.upgradeLevel++;
   },
 };
 
@@ -213,8 +214,9 @@ const COMMANDS = {
           // Per-pad, not global — a base built after relocating gets its own
           // fresh allowance rather than being blocked by one built earlier.
           if (pad.buildings.some((b) => b.id === 'repair-bay')) return 'Already built here';
-          if (ctx.game.credits < def.cost) {
-            return `Needs ${def.cost} cr (have ${Math.floor(ctx.game.credits)})`;
+          const team = ctx.game.teamOf(instance);
+          if (team.credits < def.cost) {
+            return `Needs ${def.cost} cr (have ${Math.floor(team.credits)})`;
           }
           if (!ctx.structures.freeSlot(pad, def.footprint)) return 'No free slot on the pad';
           return true;
@@ -224,7 +226,7 @@ const COMMANDS = {
           const def = ctx.structures.defOf('repair-bay');
           // spend() is the real gate — balance can have moved since the menu
           // opened — so only enter placement mode once it actually clears.
-          if (!pad || !ctx.game.spend(def.cost)) return;
+          if (!pad || !ctx.game.teamOf(instance).spend(def.cost)) return;
           ctx.buildPlacementMode = { def, pad };
         },
       },
@@ -233,7 +235,9 @@ const COMMANDS = {
         label: 'Relocate Base',
         hint: 'Leaves a power spire behind',
         enabled(instance, ctx) {
-          if (!ctx.game.reachedRelocateThreshold) return 'Needs 50000 cr lifetime earned';
+          if (!ctx.game.teamOf(instance).reachedRelocateThreshold) {
+            return 'Needs 50000 cr lifetime earned';
+          }
           return true;
         },
         execute(instance, ctx) {
@@ -256,8 +260,9 @@ const COMMANDS = {
         hint: (instance, ctx) => `${ctx.vehicles.defOf(instance.def.produces).cost} cr`,
         enabled(instance, ctx) {
           const def = ctx.vehicles.defOf(instance.def.produces);
-          if (ctx.game.credits < def.cost) {
-            return `Needs ${def.cost} cr (have ${Math.floor(ctx.game.credits)})`;
+          const team = ctx.game.teamOf(instance);
+          if (team.credits < def.cost) {
+            return `Needs ${def.cost} cr (have ${Math.floor(team.credits)})`;
           }
           return true;
         },
@@ -265,7 +270,7 @@ const COMMANDS = {
           const def = ctx.vehicles.defOf(instance.def.produces);
           // spend() is the gate, not the enabled() check — that ran when the
           // menu opened and the balance can have moved since.
-          if (ctx.game.spend(def.cost)) ctx.produceUnit(def, instance);
+          if (ctx.game.teamOf(instance).spend(def.cost)) ctx.produceUnit(def, instance);
         },
       },
       UPGRADE_COMMAND,
