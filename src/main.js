@@ -2,7 +2,12 @@ import * as THREE from 'three';
 import { World } from './core/world.js';
 import { createCameraControls } from './core/controls.js';
 import { ChaseCamera } from './core/chaseCamera.js';
-import { pickTerrain, findEdgeSpawnPoint, findSpawnPointNear } from './core/pick.js';
+import {
+  pickTerrain,
+  findEdgeSpawnPoint,
+  findSpawnPointNear,
+  findTeamSpawnPoints,
+} from './core/pick.js';
 import { Menu } from './ui/menu.js';
 import { buildSchema } from './ui/controlSchema.js';
 import { VehiclePicker } from './ui/vehiclePicker.js';
@@ -908,11 +913,48 @@ function beginMatch(difficulty) {
     for (const def of VEHICLE_CATALOG) {
       if (def.unlock === 'exploration') vehiclePicker.setUnlocked(def.id, true);
     }
+    deployStartingForces();
   }
   // Re-render the lock hint now that the target percentage is known.
   for (const def of VEHICLE_CATALOG) vehiclePicker.applyLockState(def.id);
-  // Nothing is spawned yet, so open the drawer on the one vehicle available.
-  vehiclePicker.setOpen(true);
+  // The drawer is only the opening move in sandbox; an AI match has already
+  // put everyone on the board.
+  if (game.mode !== 'multiplayer-ai') vehiclePicker.setOpen(true);
+}
+
+/**
+ * Put every team on the island at once, evenly spaced around the coast.
+ *
+ * Each gets the same opening — a base station to deploy and a scout to look
+ * around with — so "all versus all" starts genuinely symmetric. Only the
+ * player's scout takes the keys; the rest are somebody else's problem until
+ * the AI commander exists to drive them.
+ */
+function deployStartingForces() {
+  const baseDef = vehicles.defOf('base-station');
+  const scoutDef = vehicles.defOf('scout-buggy');
+  const starts = findTeamSpawnPoints(heightmap, game.teams.length);
+
+  game.teams.forEach((team, i) => {
+    const { point, heading } = starts[i];
+    point.y += 0.05; // avoid z-fighting with the ground on the spawn frame
+
+    // findEdgeSpawnPointAtAngle faces a vehicle back toward the map centre,
+    // which for the base station reads as facing out to sea — the same flip
+    // the picker's own base spawn applies.
+    vehicles.spawn(baseDef, point, heading + Math.PI, { activate: false, teamId: team.id });
+
+    const beside = findSpawnPointNear(heightmap, point, {
+      minRadius: baseDef.dims.hullLength / 2 + scoutDef.dims.hullLength / 2 + 4,
+      maxRadius: baseDef.sightRadius * 0.8,
+      camera,
+    });
+    beside.point.y += 0.05;
+    vehicles.spawn(scoutDef, beside.point, beside.heading, {
+      activate: team.isHuman,
+      teamId: team.id,
+    });
+  });
 }
 
 game.difficultyScreen = new DifficultyScreen((difficulty) => {
