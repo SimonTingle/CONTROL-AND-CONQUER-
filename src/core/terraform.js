@@ -180,7 +180,9 @@ export class Terraform {
       if (i !== -1) this.jobs.splice(i, 1);
       // Order matters: the fog's cached heights have to be right before
       // anything reads the explored fraction off them.
-      this.world.fog.patchTerrain(pad.x, pad.z, outer);
+      // Shared land data, so one patch heals every team's mask at once — each
+      // recounts its own revealed total lazily off the version bump.
+      this.world.fogTerrain.patchTerrain(pad.x, pad.z, outer);
       // Same "the world changed shape here" moment: anything growing under the
       // new concrete is gone.
       this.world.blooms.clearUnder(pad.x, pad.z, pad.radius);

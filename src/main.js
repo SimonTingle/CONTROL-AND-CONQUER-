@@ -10,6 +10,7 @@ import { DifficultyScreen, DIFFICULTIES } from './ui/difficultyScreen.js';
 import { PortalScreen } from './ui/portalScreen.js';
 import { AiDifficultyScreen } from './ui/aiDifficultyScreen.js';
 import { createTeams, PLAYER_TEAM_ID } from './core/team.js';
+import { FogMask } from './core/fogOfWar.js';
 import { Hud } from './ui/hud.js';
 import { RadialMenu } from './ui/radialMenu.js';
 import { VehicleController } from './vehicles/vehicleController.js';
@@ -700,6 +701,10 @@ const game = {
   teamOf(entity) {
     return this.teams[entity?.teamId ?? PLAYER_TEAM_ID] ?? this.playerTeam;
   },
+  /** The fog mask a team reveals into. */
+  fogFor(teamId) {
+    return this.teams[teamId ?? PLAYER_TEAM_ID]?.fog ?? this.playerTeam.fog;
+  },
   // Placeholder persistence: a tiny progress snapshot in localStorage, not the
   // full world state. Real save/load (terrain, vehicles, structures, fog) is
   // its own backend-backed design — see the roadmap's Phase 3.
@@ -884,6 +889,17 @@ function beginMatch(difficulty) {
   game.difficulty = difficulty;
   // Sandbox is a one-team match; Multiplayer AI adds one team per AI opponent.
   game.teams = createTeams(game.aiMatch?.teamCount ?? 0);
+
+  // The player keeps the mask the world already built (the shaders point at
+  // its texture and must not be re-pointed). Every AI team gets a CPU-only
+  // one — they scout for themselves and nothing draws their view.
+  game.playerTeam.fog = world.fog;
+  world.fogMasks.length = 1;
+  for (const team of game.teams) {
+    if (team.isHuman) continue;
+    team.fog = new FogMask(world.fogTerrain);
+    world.fogMasks.push(team.fog);
+  }
   // Sandbox keeps the explore-to-unlock pacing untouched. An AI match starts
   // every team on equal footing — making the human scout first while AI
   // teams build from tick one would not be a fair opening.
@@ -957,13 +973,18 @@ function tick(dt, { render = true } = {}) {
   structures.update(dt, heightmap);
 
   // Reveal after the vehicles have moved — world.update() runs before them, so
-  // committing there would upload a frame stale.
+  // committing there would upload a frame stale. Each entity reveals into its
+  // own team's mask: an AI scouting the far coast must not chart it for you.
   for (const v of vehicles.instances) {
-    world.fog.reveal(v.group.position.x, v.group.position.z, v.def.sightRadius, v);
+    const mask = game.fogFor(v.teamId);
+    if (mask) mask.reveal(v.group.position.x, v.group.position.z, v.def.sightRadius, v);
   }
   for (const s of structures.instances) {
-    world.fog.reveal(s.x, s.z, s.def.sightRadius, s);
+    const mask = game.fogFor(s.teamId);
+    if (mask) mask.reveal(s.x, s.z, s.def.sightRadius, s);
   }
+  // Only the player's mask is drawn, so only it needs uploading; the AI masks
+  // are read on the CPU and have no texture to commit.
   world.fog.commit();
 
   if (isChasing()) {
