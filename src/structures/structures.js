@@ -43,8 +43,9 @@ export const STRUCTURE_CATALOG = [
     maxHealth: 500,
     sightRadius: 30,
     buildTime: 6,
-    footprint: 24, // roughly double the harvester facility's — the closest this
-    // codebase's scalar-radius footprint model gets to "twice the size"
+    // Must satisfy pad.radius - footprint >= SLOT_RING (canPlaceAt's boundary
+    // check), not just approximate visual size — 24 made every slot invalid.
+    footprint: 13,
     cost: 2000, // credits to build, separate from the per-repair cost below
     dockOffset: 16,
     ledSegments: 12,
