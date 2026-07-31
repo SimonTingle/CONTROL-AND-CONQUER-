@@ -59,8 +59,14 @@ export const STRUCTURE_CATALOG = [
     maxHealth: 500,
     sightRadius: 30,
     buildTime: 6,
-    // Must satisfy pad.radius - footprint >= SLOT_RING (canPlaceAt's boundary
-    // check), not just approximate visual size — 24 made every slot invalid.
+    // `footprint` is the collision radius canPlaceAt uses, not a visual size —
+    // it has to track the bay's real physical extent, not "make it read as
+    // bigger." An earlier value of 24 (roughly double the harvester facility's,
+    // chosen for visual weight) drove placement math instead: canPlaceAt's
+    // overlap rule rejects anything within footprint*1.6 (≈38) of another
+    // building, which — on a pad whose own radius is only 40 — left no legal
+    // spot anywhere on the pad once a harvester facility already occupied it.
+    // Matches the facility's own footprint now, the same convention it uses.
     footprint: 13,
     cost: 2000, // credits to build, separate from the per-repair cost below
     dockOffset: 16,
@@ -514,9 +520,9 @@ export class StructureController {
     // check against whichever base is actually parked here right now, not a
     // stored reference. Deliberately just the vehicle's own hull plus a small
     // fixed clearance, not scaled by the new building's footprint the way the
-    // building-overlap check above is — a footprint-sized buffer on top of a
-    // building's own footprint radius would swallow most or all of a pad this
-    // size (the repair bay's is already most of the usable ring on its own).
+    // building-overlap check above is — a footprint-sized buffer swallowed
+    // most or all of a pad this size when footprint values were inflated for
+    // visual reasons (see the repair bay's own footprint comment).
     const base = this.vehicles?.instances.find(
       (v) => v.def.id === 'base-station' && v.mode === 'deployed' && Math.hypot(v.group.position.x - pad.x, v.group.position.z - pad.z) <= pad.radius
     );
