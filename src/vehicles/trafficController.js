@@ -7,10 +7,13 @@
  *   the way clears. The player's own vehicle never yields — ramming one is
  *   still possible, on purpose.
  * - Collision: any pair that actually makes contact — a much tighter radius
- *   than avoidance — takes a one-time damage hit, player included. Contact
- *   only deals damage on the tick it begins, not every tick two vehicles
- *   happen to still be overlapping, or a stuck pair would grind toward the
- *   floor in seconds.
+ *   than avoidance — takes a one-time damage hit and a positional bump apart,
+ *   player included. Both only fire on the tick contact begins, not every
+ *   tick two vehicles happen to still be overlapping, or a stuck pair would
+ *   grind toward the floor in seconds (and the bump would fight itself).
+ *   The bump is a snap, not a spring-animated bounce — the bicycle drive
+ *   model has no lateral degree of freedom to inject a sideways velocity
+ *   into, so separation is applied directly to position on the contact tick.
  *
  * Object identity, not array index, is what tracks "was this pair already
  * touching last tick" — instances aren't guaranteed to keep a stable index as
@@ -21,6 +24,9 @@ const AVOIDANCE_MARGIN = 6; // world units of clearance beyond both hulls before
 const COLLISION_MARGIN = 0.5; // world units of tolerance before overlap counts as a hit
 const COLLISION_DAMAGE = 15; // flat chunk per impact, not a per-second rate
 const DAMAGE_FLOOR_FRACTION = 0.15; // matches vehicleController's own blocked-damage floor
+const BUMP_CLEARANCE = 0.3; // extra separation beyond "just barely not touching"
+const YIELD_REVERSE_THRESHOLD = 2; // seconds continuously yielding before backing off
+const REVERSE_DURATION = 1.5;
 
 function hullRadius(def) {
   return Math.max(def.dims.hullLength, def.dims.hullWidth) / 2;
@@ -33,7 +39,7 @@ export class TrafficController {
     this._colliding = new Map();
   }
 
-  update() {
+  update(dt) {
     const instances = this.vehicles.instances;
     const nextColliding = new Map();
 
@@ -68,8 +74,26 @@ export class TrafficController {
           if (!this._hasPair(this._colliding, a, b)) {
             this._applyCollisionDamage(a);
             this._applyCollisionDamage(b);
+            this._applyBump(a, b, dist, hitRadius);
           }
         }
+      }
+    }
+
+    // A vehicle that's been yielding continuously for a while — not just this
+    // tick — backs off rather than sit frozen indefinitely next to whatever's
+    // in its way. `_yieldTimer` lives directly on the instance, the same
+    // pattern repairController already uses for its own per-instance
+    // bookkeeping (e.g. a bay's `_repairQueue`).
+    for (const inst of instances) {
+      if (!inst.yielding) {
+        inst._yieldTimer = 0;
+        continue;
+      }
+      inst._yieldTimer = (inst._yieldTimer ?? 0) + dt;
+      if (inst._yieldTimer >= YIELD_REVERSE_THRESHOLD && inst.reverseTimer == null) {
+        inst.beginReverse(REVERSE_DURATION);
+        inst._yieldTimer = 0;
       }
     }
 
@@ -84,6 +108,24 @@ export class TrafficController {
   _applyCollisionDamage(inst) {
     const floor = inst.def.maxHealth * DAMAGE_FLOOR_FRACTION;
     inst.health = Math.max(floor, inst.health - COLLISION_DAMAGE);
+  }
+
+  /** Push both vehicles apart along the line between their centres, split
+   * evenly, so neither is still overlapping the other afterward. */
+  _applyBump(a, b, dist, hitRadius) {
+    const ap = a.group.position;
+    const bp = b.group.position;
+    const dx = ap.x - bp.x;
+    const dz = ap.z - bp.z;
+    // Exactly coincident (dist ~ 0) has no direction to push along — pick an
+    // arbitrary stable one rather than dividing by zero.
+    const nx = dist > 1e-4 ? dx / dist : 1;
+    const nz = dist > 1e-4 ? dz / dist : 0;
+    const push = (hitRadius - dist) / 2 + BUMP_CLEARANCE;
+    ap.x += nx * push;
+    ap.z += nz * push;
+    bp.x -= nx * push;
+    bp.z -= nz * push;
   }
 
   _markPair(map, a, b) {

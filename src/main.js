@@ -289,6 +289,30 @@ function syncQueueIcons() {
   }
 }
 
+// A deployed base is drivable — nothing in the pad/building system is tied
+// to its live position — but driving off the dock spot is a one-way trigger:
+// once it's unambiguously left, a power spire grows (slowly — visibly slower
+// than the one Relocate Base plants) at the vacated spot, since whatever's
+// still built there needs a story for why it's still powered.
+const BASE_MOVE_THRESHOLD = 45; // comparable to the pad's own inner radius
+const SPIRE_GROW_TIME = 60; // seconds — deliberately slow, distinct from Relocate Base's
+
+function checkBaseRepositioning() {
+  for (const inst of vehicles.instances) {
+    if (inst.def.id !== 'base-station' || inst.mode !== 'deployed') continue;
+    if (inst.spireGrown || !inst.deployOrigin) continue;
+    const dist = Math.hypot(
+      inst.group.position.x - inst.deployOrigin.x,
+      inst.group.position.z - inst.deployOrigin.z
+    );
+    if (dist < BASE_MOVE_THRESHOLD) continue;
+    structures.placeAt(structures.defOf('power-spire'), inst.deployOrigin.x, inst.deployOrigin.z, heightmap, {
+      buildTimeOverride: SPIRE_GROW_TIME,
+    });
+    inst.spireGrown = true;
+  }
+}
+
 const vehicles = new VehicleController(world.scene);
 
 const terraform = new Terraform(world);
@@ -852,7 +876,7 @@ function tick(dt, { render = true } = {}) {
   // After both AI systems have set their targets, and before movement reads
   // them: this is what actually decides `yielding` and hands out collision
   // damage for the frame about to run.
-  trafficController.update();
+  trafficController.update(dt);
   vehicles.update(dt, heightmap, headlightsWanted(), camera);
   structures.update(dt, heightmap);
 
@@ -878,6 +902,7 @@ function tick(dt, { render = true } = {}) {
   // After the camera has settled, so the menu projects against this frame's
   // view rather than lagging it by one.
   terraform.update(dt);
+  checkBaseRepositioning();
   radialMenu.update();
 
   if (!render) return;
@@ -995,6 +1020,6 @@ Object.assign(window, {
   world, camera, renderer, controls, chase, THREE, vehicles, vehiclePicker, input, lighting, driveKeys,
   game, hud, terraform, radialMenu, commandsFor, commandContext,
   structures, harvesterAI, repairController, trafficController, produceUnit,
-  syncQueueIcons, queueIcons,
+  syncQueueIcons, queueIcons, checkBaseRepositioning,
   updatePlacementPreview, placementPreview, snapToGrid, footprintSize, resizeFootprintOutline,
 });
