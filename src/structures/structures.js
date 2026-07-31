@@ -372,7 +372,7 @@ function buildSpireMesh(def) {
 
 /** One placed building. */
 class StructureInstance {
-  constructor(def, { x, z, hN, angle, pad, slot }) {
+  constructor(def, { x, z, hN, angle, pad, slot, buildTimeOverride }) {
     this.def = def;
     this.group = buildStructureMesh(def);
     this.x = x;
@@ -381,6 +381,10 @@ class StructureInstance {
     this.angle = angle;
     this.pad = pad;
     this.slot = slot;
+    // Per-instance override of the def's own buildTime — the shared def stays
+    // untouched (other instances of the same building still use its normal
+    // pace), only this one instance rises slower (or faster).
+    this.buildTimeOverride = buildTimeOverride;
 
     this.health = def.maxHealth;
     this.mode = 'building'; // 'building' | 'idle'
@@ -425,7 +429,7 @@ class StructureInstance {
     const g = this.group;
 
     if (this.mode === 'building') {
-      this.progress = Math.min(1, this.progress + dt / this.def.buildTime);
+      this.progress = Math.min(1, this.progress + dt / (this.buildTimeOverride ?? this.def.buildTime));
       const eased = this.progress * this.progress * (3 - 2 * this.progress);
       // Rises from fully below the pad through it. The terrain is opaque and
       // genuinely triangulated, so the buried part is correctly occluded — no
@@ -550,12 +554,13 @@ export class StructureController {
    * from the heightmap rather than a pad's flattened target, since nothing
    * flattens the ground here.
    */
-  placeAt(def, x, z, heightmap) {
+  placeAt(def, x, z, heightmap, { buildTimeOverride } = {}) {
     const instance = new StructureInstance(def, {
       x,
       z,
       hN: heightmap.sampleNormalized(x, z),
       angle: 0,
+      buildTimeOverride,
     });
 
     instance.group.userData.selectable = instance;

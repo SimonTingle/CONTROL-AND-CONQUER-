@@ -28,6 +28,17 @@ export function commandsFor(instance, ctx) {
 }
 
 /**
+ * The pad a base station's own build/upgrade commands operate on. Its
+ * `deployOrigin`, not its live position — a deployed base is drivable (see
+ * vehicleController.js's `immobile`), so "the pad under my current feet"
+ * stops being the right question the moment it drives off it.
+ */
+function basePad(instance, ctx) {
+  const anchor = instance.deployOrigin ?? instance.group.position;
+  return ctx.terraform.padAt(anchor.x, anchor.z);
+}
+
+/**
  * The nearest finished repair bay, or null. Filtered to `mode === 'idle'` so a
  * bay still rising out of the ground can't be targeted — same convention
  * harvesterAI's own facility lookup uses.
@@ -48,9 +59,11 @@ function nearestRepairBay(instance, ctx) {
 }
 
 /**
- * Shared across every vehicle type that can actually drive to a bay — a
- * deployed base station can't move, so it's excluded (matches the existing
- * `immobile` getter). One object, spliced into more than one catalog entry
+ * Shared across every vehicle type that can actually drive to a bay. The base
+ * station isn't spliced in below — a deployed one can drive now (see
+ * vehicleController.js's `immobile`), but it isn't wired into the repair
+ * queue/dock flow the way scouts and harvesters are, so it's left out rather
+ * than half-supported. One object, spliced into more than one catalog entry
  * below; `commandsFor` shallow-spreads it per use, so sharing the reference is
  * safe.
  */
@@ -158,6 +171,11 @@ const COMMANDS = {
             // The vehicle only calls itself deployed once the ground actually is.
             onComplete: () => {
               instance.mode = 'deployed';
+              // Anchor for "has it wandered off the dock" — pos can't have
+              // moved since deploying is still immobile, so this is the true
+              // settle point, not a snapshot taken too early.
+              instance.deployOrigin = { x: pos.x, z: pos.z };
+              instance.spireGrown = false;
             },
           });
         },
@@ -170,7 +188,7 @@ const COMMANDS = {
         label: 'Harvester Facility',
         hint: 'Ships one harvester',
         enabled(instance, ctx) {
-          const pad = ctx.terraform.padAt(instance.group.position.x, instance.group.position.z);
+          const pad = basePad(instance, ctx);
           if (!pad || !pad.complete) return 'Needs a finished pad';
           const def = ctx.structures.defOf('harvester-facility');
           if (ctx.structures.instanceOf('harvester-facility')) return 'Already built';
@@ -178,7 +196,7 @@ const COMMANDS = {
           return true;
         },
         execute(instance, ctx) {
-          const pad = ctx.terraform.padAt(instance.group.position.x, instance.group.position.z);
+          const pad = basePad(instance, ctx);
           // Enters manual placement instead of placing immediately — the
           // player picks exactly where on the pad it goes.
           ctx.buildPlacementMode = { def: ctx.structures.defOf('harvester-facility'), pad };
@@ -189,7 +207,7 @@ const COMMANDS = {
         label: 'Repair Bay',
         hint: (instance, ctx) => `${ctx.structures.defOf('repair-bay').cost} cr`,
         enabled(instance, ctx) {
-          const pad = ctx.terraform.padAt(instance.group.position.x, instance.group.position.z);
+          const pad = basePad(instance, ctx);
           if (!pad || !pad.complete) return 'Needs a finished pad';
           const def = ctx.structures.defOf('repair-bay');
           // Per-pad, not global — a base built after relocating gets its own
@@ -202,7 +220,7 @@ const COMMANDS = {
           return true;
         },
         execute(instance, ctx) {
-          const pad = ctx.terraform.padAt(instance.group.position.x, instance.group.position.z);
+          const pad = basePad(instance, ctx);
           const def = ctx.structures.defOf('repair-bay');
           // spend() is the real gate — balance can have moved since the menu
           // opened — so only enter placement mode once it actually clears.

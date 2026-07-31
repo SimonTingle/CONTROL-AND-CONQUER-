@@ -63,6 +63,9 @@ class VehicleInstance {
     // Set fresh each tick by TrafficController, ahead of movement — true holds
     // an autonomous vehicle in place rather than push through one nearby.
     this.yielding = false;
+    // Seconds remaining in a reverse maneuver, or null when not reversing —
+    // see beginReverse().
+    this.reverseTimer = null;
     this.headlightsOn = false;
     this.lodTier = LOD_TIERS.FULL; // distance-based level of detail
     this.createdAt = Date.now(); // timestamp for menu ordering
@@ -105,8 +108,11 @@ class VehicleInstance {
   }
 
   /** Deployed or deploying: the vehicle is committed to a spot and cannot drive. */
+  /** Only mid-flatten is locked down — once deployed the base is free to
+   * drive off its dock spot (nothing in the pad/building system is tied to
+   * its live position; see deployOrigin below for what does track it). */
   get immobile() {
-    return this.mode === 'deploying' || this.mode === 'deployed';
+    return this.mode === 'deploying';
   }
 
   /** Order a move. Silently refused if the point is underwater. */
@@ -195,11 +201,54 @@ class VehicleInstance {
   }
 
   update(dt, heightmap) {
+    // Manual input always wins, the same as every other override in this
+    // class — a reverse maneuver only an autonomous driver would have
+    // started should not fight the player's own hands on the wheel.
+    if (this.reverseTimer != null && this.throttle === 0 && this.steer === 0) {
+      this._driveReverse(dt, heightmap);
+      this.settleOnGround(heightmap);
+      return;
+    }
+
     if (this.throttle !== 0 || this.steer !== 0) this.driveManual(dt, heightmap);
     else if (this.target) this.driveToTarget(dt, heightmap);
     else this.coast(dt, heightmap);
 
     this.settleOnGround(heightmap);
+  }
+
+  /**
+   * Back straight up for `duration` seconds — no steering, whatever order is
+   * live stays live (untouched), so normal driving just resumes toward it
+   * once this clears. For an autonomous vehicle whose forward path is
+   * genuinely blocked, backing off is often the only thing that actually
+   * creates room; a forward-angled detour alone can't help a vehicle that's
+   * already touching the obstacle.
+   */
+  beginReverse(duration) {
+    this.reverseTimer = duration;
+  }
+
+  _driveReverse(dt, heightmap) {
+    this.reverseTimer -= dt;
+    this.accelerating = false;
+    // Probe the grade behind it — that's the direction it's about to travel.
+    const { factor, climbable } = this.readGrade(heightmap, this.heading + Math.PI);
+    if (climbable) {
+      this.forwardSpeed = Math.max(
+        this.forwardSpeed - this.def.acceleration * dt,
+        -this.def.reverseSpeed * factor * this.speedFactor
+      );
+    } else {
+      // Backing into terrain just as bad — don't crawl into it either.
+      this.forwardSpeed = Math.min(this.forwardSpeed, 0);
+    }
+    this.advance(dt);
+
+    if (this.reverseTimer <= 0) {
+      this.reverseTimer = null;
+      this.forwardSpeed = 0;
+    }
   }
 
   /**

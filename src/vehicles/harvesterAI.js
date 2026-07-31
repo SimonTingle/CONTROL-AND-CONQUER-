@@ -35,6 +35,7 @@ const RESUME_DELAY = 0.35; // seconds of quiet keys before the loop picks up aga
 const STALL_SPEED = 0.3;
 const STALL_TIMEOUT = 3; // seconds barely moving in a driving state
 const RETRY_PAUSE = 1.5;
+const REVERSE_DURATION = 1.5; // seconds backing off before trying the next detour angle
 const BAN_SECONDS = 45;
 const TRANSFER_SPEED = 0.5; // must be near enough stopped to load or unload
 
@@ -470,6 +471,12 @@ export class HarvesterAI {
 
   _onAbandoned(inst, s, dest, distance) {
     const pos = inst.group.position;
+    // Back off before trying the next angle — a vehicle already touching
+    // whatever blocked it often can't clear by turning alone. Doesn't touch
+    // the detour waypoint being set up below: reversing takes priority in
+    // VehicleInstance.update() but leaves `target` alone, so the vehicle
+    // drives straight to that waypoint the moment the reverse ends.
+    if (inst.reverseTimer == null) inst.beginReverse(REVERSE_DURATION);
 
     if (s.detours < DETOUR_ANGLES.length) {
       const bearing = Math.atan2(dest.z - pos.z, dest.x - pos.x) + DETOUR_ANGLES[s.detours];

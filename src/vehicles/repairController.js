@@ -27,6 +27,7 @@ const WAYPOINT_RADIUS = 8;
 const DETOUR_ANGLES = [0.6, -0.6, 1.2, -1.2, 1.9, -1.9]; // radians off the direct bearing
 const STALL_SPEED = 0.4;
 const STALL_TIMEOUT = 1.5; // seconds near-stopped before trying the next detour
+const REVERSE_DURATION = 1.5; // seconds backing off before the next detour attempt
 // Any non-player vehicle at or below this fraction of health queues for
 // repair on its own, without the player having to notice and click Repair.
 const AUTO_REPAIR_HEALTH_FRACTION = 0.3;
@@ -313,11 +314,14 @@ export class RepairController {
 
     // Under way with a live order: only a genuine stall (near-zero speed while
     // still supposedly driving) counts as stuck — abandon it and let the next
-    // tick's `!inst.hasOrder` branch try a fresh angle.
+    // tick's `!inst.hasOrder` branch try a fresh angle. Back off first: a
+    // vehicle already touching whatever stalled it often can't clear by
+    // turning alone.
     r.stallTimer = inst.speed < STALL_SPEED ? (r.stallTimer ?? 0) + dt : 0;
     if (r.stallTimer > STALL_TIMEOUT) {
       r.stallTimer = 0;
       inst.arrive('cancelled');
+      if (inst.reverseTimer == null) inst.beginReverse(REVERSE_DURATION);
     }
     return false;
   }
