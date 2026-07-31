@@ -22,7 +22,20 @@ export class Terraform {
     this.world = world;
     /** Completed and in-progress pads. Stage 2's building placement reads this. */
     this.pads = [];
-    this.active = null;
+    /**
+     * In-progress flattenings, one per deploying base. A list rather than a
+     * single job because every team deploys at match start and they would
+     * otherwise serialise — three of four bases would get `null` back and
+     * silently never deploy. The edits are region-local and teams spawn far
+     * apart, so concurrent jobs never touch the same texels.
+     */
+    this.jobs = [];
+  }
+
+  /** Is this team already flattening somewhere? Deploying two at once is still
+   * one-at-a-time *per base*, just no longer per world. */
+  activeFor(teamId) {
+    return this.jobs.find((j) => (j.pad.teamId ?? 0) === teamId) ?? null;
   }
 
   get heightmap() {
@@ -34,7 +47,7 @@ export class Terraform {
    *
    * @returns {true|string} true, or a short reason to show on the disabled menu entry
    */
-  canDeployAt(x, z, { padRadius, padBlend, maxRelief }) {
+  canDeployAt(x, z, { padRadius, padBlend, maxRelief }, teamId = 0) {
     const hm = this.heightmap;
     const outer = padRadius + padBlend;
     const half = hm.params.size / 2;
@@ -60,7 +73,7 @@ export class Terraform {
     }
 
     if (hi - lo > maxRelief) return 'Ground too uneven';
-    if (this.active) return 'Already deploying';
+    if (this.activeFor(teamId)) return 'Already deploying';
     return true;
   }
 
@@ -69,7 +82,7 @@ export class Terraform {
    * being built.
    */
   deployPad(x, z, { padRadius, padBlend, duration, onComplete, teamId = 0 } = {}) {
-    if (this.active) return null;
+    if (this.activeFor(teamId)) return null;
 
     const hm = this.heightmap;
     const p = hm.params;
@@ -119,15 +132,18 @@ export class Terraform {
     };
 
     this.pads.push(pad);
-    this.active = { pad, original, i0, i1, j0, j1, w, duration: duration ?? 5, onComplete };
+    this.jobs.push({ pad, original, i0, i1, j0, j1, w, duration: duration ?? 5, onComplete });
     this._applyUniforms(pad, 0);
     return pad;
   }
 
   update(dt) {
-    const job = this.active;
-    if (!job) return;
+    if (this.jobs.length === 0) return;
+    // Iterate a copy: a completing job splices itself out of this.jobs.
+    for (const job of [...this.jobs]) this._updateJob(job, dt);
+  }
 
+  _updateJob(job, dt) {
     const { pad, original, i0, i1, j0, j1, w } = job;
     const hm = this.heightmap;
     const n = hm.params.size;
@@ -152,11 +168,16 @@ export class Terraform {
       }
     }
     hm.texture.needsUpdate = true;
-    this._applyUniforms(pad, eased);
+    // The pour effect is a single set of shader uniforms, so only one pad can
+    // animate it. Give it to the player's — an AI pad flattening on the far
+    // side of the island is usually fogged anyway, and the heightfield edit
+    // (which is what actually matters) happens for every job regardless.
+    if ((pad.teamId ?? 0) === 0) this._applyUniforms(pad, eased);
 
     if (pad.progress >= 1) {
       pad.complete = true;
-      this.active = null;
+      const i = this.jobs.indexOf(job);
+      if (i !== -1) this.jobs.splice(i, 1);
       // Order matters: the fog's cached heights have to be right before
       // anything reads the explored fraction off them.
       this.world.fog.patchTerrain(pad.x, pad.z, outer);
@@ -175,7 +196,7 @@ export class Terraform {
   /** Terrain was regenerated: the pads describe a heightfield that no longer exists. */
   clear() {
     this.pads.length = 0;
-    this.active = null;
+    this.jobs.length = 0;
     const u = this.world.terrain.uniforms;
     u.uPadRadius.value = 0;
     u.uPadProgress.value = 0;

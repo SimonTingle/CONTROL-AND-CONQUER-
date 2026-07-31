@@ -884,6 +884,15 @@ function beginMatch(difficulty) {
   game.difficulty = difficulty;
   // Sandbox is a one-team match; Multiplayer AI adds one team per AI opponent.
   game.teams = createTeams(game.aiMatch?.teamCount ?? 0);
+  // Sandbox keeps the explore-to-unlock pacing untouched. An AI match starts
+  // every team on equal footing — making the human scout first while AI
+  // teams build from tick one would not be a fair opening.
+  if (game.mode === 'multiplayer-ai') {
+    game.unlocked = true;
+    for (const def of VEHICLE_CATALOG) {
+      if (def.unlock === 'exploration') vehiclePicker.setUnlocked(def.id, true);
+    }
+  }
   // Re-render the lock hint now that the target percentage is known.
   for (const def of VEHICLE_CATALOG) vehiclePicker.applyLockState(def.id);
   // Nothing is spawned yet, so open the drawer on the one vehicle available.

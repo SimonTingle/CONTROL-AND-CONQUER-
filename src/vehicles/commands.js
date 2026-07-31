@@ -164,7 +164,7 @@ const COMMANDS = {
         hint: 'Flattens a construction pad',
         enabled(instance, ctx) {
           const pos = instance.group.position;
-          return ctx.terraform.canDeployAt(pos.x, pos.z, instance.def.deploy);
+          return ctx.terraform.canDeployAt(pos.x, pos.z, instance.def.deploy, instance.teamId);
         },
         execute(instance, ctx) {
           const pos = instance.group.position;
