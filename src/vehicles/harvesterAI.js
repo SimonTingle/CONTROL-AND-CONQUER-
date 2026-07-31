@@ -278,7 +278,9 @@ export class HarvesterAI {
       return;
     }
 
-    const rate = Math.min(facility.def.unloadRate, inst.def.unloadRate);
+    // Tier 0 (unupgraded) leaves the facility's own base rate untouched.
+    const unloadMultiplier = facility.def.upgradeTiers?.[facility.upgradeLevel - 1]?.unloadRateMultiplier ?? 1;
+    const rate = Math.min(facility.def.unloadRate * unloadMultiplier, inst.def.unloadRate);
     const moved = Math.min(rate * dt, s.load);
     s.load -= moved;
     this.game.earn(moved);

@@ -14,6 +14,7 @@ import { VEHICLE_CATALOG } from './vehicles/catalog.js';
 import { commandsFor } from './vehicles/commands.js';
 import { HarvesterAI } from './vehicles/harvesterAI.js';
 import { RepairController } from './vehicles/repairController.js';
+import { TrafficController } from './vehicles/trafficController.js';
 import { Terraform } from './core/terraform.js';
 import { StructureController } from './structures/structures.js';
 
@@ -236,10 +237,62 @@ function updatePlacementPreview(clientX, clientY) {
   placementPreview.userData.material.color.copy(valid ? PLACEMENT_VALID_COLOR : PLACEMENT_INVALID_COLOR);
 }
 
+// Spanner queue icon: a small transparent neon wrench hovering over any
+// vehicle currently waiting its turn at a repair bay (`state === 'queued'`
+// specifically — not while still driving over, only once it's actually
+// stuck in line). One per queued vehicle, created and torn down as the
+// queue's membership changes.
+function buildSpannerIcon() {
+  const group = new THREE.Group();
+  const material = new THREE.MeshBasicMaterial({
+    color: 0x22e5ff,
+    transparent: true,
+    opacity: 0.55,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  const handle = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.18, 0.18), material);
+  handle.position.x = 0.1;
+  const head = new THREE.Mesh(new THREE.TorusGeometry(0.35, 0.09, 8, 16), material);
+  head.position.x = -0.75;
+  group.add(handle, head);
+  return group;
+}
+
+const queueIcons = new Map(); // vehicle instance -> icon group
+
+function syncQueueIcons() {
+  const queued = new Set();
+  for (const inst of vehicles.instances) {
+    if (inst.repair?.state !== 'queued') continue;
+    queued.add(inst);
+    if (!queueIcons.has(inst)) {
+      const icon = buildSpannerIcon();
+      world.scene.add(icon);
+      queueIcons.set(inst, icon);
+    }
+  }
+
+  for (const [inst, icon] of queueIcons) {
+    if (queued.has(inst)) continue;
+    world.scene.remove(icon);
+    queueIcons.delete(inst);
+  }
+
+  for (const [inst, icon] of queueIcons) {
+    const pos = inst.group.position;
+    icon.position.set(pos.x, pos.y + inst.menuAnchorHeight + 1.4, pos.z);
+    // Billboarded so it reads the same from any camera angle, the same idea
+    // as every other "float above a vehicle" marker in the game, just facing
+    // the viewer instead of sitting flat.
+    icon.quaternion.copy(camera.quaternion);
+  }
+}
+
 const vehicles = new VehicleController(world.scene);
 
 const terraform = new Terraform(world);
-const structures = new StructureController(world.scene);
+const structures = new StructureController(world.scene, vehicles);
 
 const chase = new ChaseCamera(camera, heightmap);
 
@@ -691,7 +744,8 @@ structures.onComplete = (instance) => {
 };
 
 const harvesterAI = new HarvesterAI({ vehicles, world, heightmap, structures, game });
-const repairController = new RepairController({ vehicles, heightmap, game });
+const repairController = new RepairController({ vehicles, structures, heightmap, game });
+const trafficController = new TrafficController({ vehicles });
 
 /** Everything a command might need, so commands.js imports no game systems. */
 const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit };
@@ -795,6 +849,10 @@ function tick(dt, { render = true } = {}) {
   // After harvesterAI: a repairing harvester is already paused by the check
   // above, so this is the only thing setting its target this frame.
   repairController.update(dt);
+  // After both AI systems have set their targets, and before movement reads
+  // them: this is what actually decides `yielding` and hands out collision
+  // damage for the frame about to run.
+  trafficController.update();
   vehicles.update(dt, heightmap, headlightsWanted(), camera);
   structures.update(dt, heightmap);
 
@@ -827,6 +885,7 @@ function tick(dt, { render = true } = {}) {
   updateMarker(clock.elapsedTime);
   updateHarvestMarker(clock.elapsedTime);
   updatePlacementPreview(lastX, lastY);
+  syncQueueIcons();
   canvas.classList.toggle(
     'crosshair-mode',
     !!commandContext.harvestSelectMode || !!commandContext.buildPlacementMode
@@ -935,6 +994,7 @@ window.__probe = (count = 100) => {
 Object.assign(window, {
   world, camera, renderer, controls, chase, THREE, vehicles, vehiclePicker, input, lighting, driveKeys,
   game, hud, terraform, radialMenu, commandsFor, commandContext,
-  structures, harvesterAI, repairController, produceUnit,
+  structures, harvesterAI, repairController, trafficController, produceUnit,
+  syncQueueIcons, queueIcons,
   updatePlacementPreview, placementPreview, snapToGrid, footprintSize, resizeFootprintOutline,
 });

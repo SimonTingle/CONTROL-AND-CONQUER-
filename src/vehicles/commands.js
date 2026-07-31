@@ -79,6 +79,36 @@ const REPAIR_COMMAND = {
   },
 };
 
+/**
+ * Shared by every building def that carries an `upgradeTiers` array —
+ * currently the repair bay and the harvester facility. Per-instance: each
+ * building tracks its own `upgradeLevel`, so upgrading one never touches
+ * another, even of the same type.
+ */
+const UPGRADE_COMMAND = {
+  id: 'upgrade',
+  label: 'Upgrade',
+  hint(instance) {
+    const tiers = instance.def.upgradeTiers;
+    const tier = tiers?.[instance.upgradeLevel];
+    if (!tier) return 'Max tier';
+    return `${tier.cost} cr — tier ${instance.upgradeLevel + 1}/${tiers.length}`;
+  },
+  enabled(instance, ctx) {
+    const tiers = instance.def.upgradeTiers;
+    if (!tiers || instance.upgradeLevel >= tiers.length) return 'Already at max tier';
+    const tier = tiers[instance.upgradeLevel];
+    if (ctx.game.credits < tier.cost) return `Needs ${tier.cost} cr (have ${Math.floor(ctx.game.credits)})`;
+    return true;
+  },
+  execute(instance, ctx) {
+    const tier = instance.def.upgradeTiers?.[instance.upgradeLevel];
+    if (!tier) return;
+    // spend() is the real gate — balance may have moved since the menu opened.
+    if (ctx.game.spend(tier.cost)) instance.upgradeLevel++;
+  },
+};
+
 const COMMANDS = {
   'scout-buggy': {
     mobile: [
@@ -220,7 +250,13 @@ const COMMANDS = {
           if (ctx.game.spend(def.cost)) ctx.produceUnit(def, instance);
         },
       },
+      UPGRADE_COMMAND,
     ],
+  },
+
+  'repair-bay': {
+    building: [],
+    idle: [UPGRADE_COMMAND],
   },
 
   'crystal-harvester': {

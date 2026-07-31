@@ -60,6 +60,9 @@ class VehicleInstance {
     this.steerAngle = 0; // current front-wheel angle, radians
     this.grade = 0;
     this.blocked = false;
+    // Set fresh each tick by TrafficController, ahead of movement — true holds
+    // an autonomous vehicle in place rather than push through one nearby.
+    this.yielding = false;
     this.headlightsOn = false;
     this.lodTier = LOD_TIERS.FULL; // distance-based level of detail
     this.createdAt = Date.now(); // timestamp for menu ordering
@@ -292,6 +295,16 @@ class VehicleInstance {
 
   /** Click-to-move (mobile): steer toward the order and drive it out. */
   driveToTarget(dt, heightmap) {
+    // Set by TrafficController just before this runs, for autonomous vehicles
+    // with another one nearby. A hold, not an abandonment — the order stays
+    // live, and driving resumes on its own the moment the flag clears.
+    if (this.yielding) {
+      this.forwardSpeed = 0;
+      this.speed = 0;
+      this.accelerating = false;
+      return;
+    }
+
     const pos = this.group.position;
     const dx = this.target.x - pos.x;
     const dz = this.target.y - pos.z;

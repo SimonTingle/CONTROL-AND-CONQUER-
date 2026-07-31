@@ -34,6 +34,22 @@ export const STRUCTURE_CATALOG = [
       doorWidth: 7,
     },
     colors: { shell: '#3a4048', trim: '#9aa6b2', accent: '#2ad9ff', dark: '#1c2026' },
+    // Ten-step upgrade track, paid per instance. Each tier raises the unload
+    // rate a facility offers a docked harvester — a faster facility is worth
+    // less if the harvester it's unloading into can't keep up either, but that
+    // ceiling is the harvester's own def, unaffected by this.
+    upgradeTiers: [
+      { cost: 500, unloadRateMultiplier: 1.15 },
+      { cost: 900, unloadRateMultiplier: 1.3 },
+      { cost: 1400, unloadRateMultiplier: 1.45 },
+      { cost: 2000, unloadRateMultiplier: 1.6 },
+      { cost: 2800, unloadRateMultiplier: 1.8 },
+      { cost: 3800, unloadRateMultiplier: 2.0 },
+      { cost: 5000, unloadRateMultiplier: 2.2 },
+      { cost: 6500, unloadRateMultiplier: 2.4 },
+      { cost: 8500, unloadRateMultiplier: 2.6 },
+      { cost: 11000, unloadRateMultiplier: 2.85 },
+    ],
   },
   {
     id: 'repair-bay',
@@ -50,8 +66,9 @@ export const STRUCTURE_CATALOG = [
     dockOffset: 16,
     ledSegments: 12,
     // Tunable repair economy: a fully-depleted crystal-harvester (220 hp) costs
-    // 220*4 = 880cr and takes 220*0.15 ≈ 33s; a scout (100 hp) costs 400cr/15s.
-    repair: { creditsPerHealth: 4, secondsPerHealth: 0.15 },
+    // 220*4 = 880cr and takes 220*1.5 = 330s at tier 0 — ten times the original
+    // pace, brought back down by the upgrade track below.
+    repair: { creditsPerHealth: 4, secondsPerHealth: 1.5 },
     dims: {
       padRadius: 10,
       height: 9, // gantry height — reused by the generic rise-out-of-ground animation
@@ -63,7 +80,23 @@ export const STRUCTURE_CATALOG = [
       accent: '#ffb020',
       dark: '#1c2026',
       led: '#39ff6a',
+      ringWorking: '#ffcc33', // brighter gold than the idle accent — a vehicle is in the bay
+      ringReady: '#39ff6a', // matches the LED color — "done" reads the same way twice
     },
+    // Ten-step upgrade track, paid per instance. Each tier multiplies
+    // secondsPerHealth down (never creditsPerHealth — only speed, not price).
+    upgradeTiers: [
+      { cost: 500, repairSpeedMultiplier: 0.9 },
+      { cost: 900, repairSpeedMultiplier: 0.8 },
+      { cost: 1400, repairSpeedMultiplier: 0.7 },
+      { cost: 2000, repairSpeedMultiplier: 0.6 },
+      { cost: 2800, repairSpeedMultiplier: 0.5 },
+      { cost: 3800, repairSpeedMultiplier: 0.42 },
+      { cost: 5000, repairSpeedMultiplier: 0.34 },
+      { cost: 6500, repairSpeedMultiplier: 0.27 },
+      { cost: 8500, repairSpeedMultiplier: 0.2 },
+      { cost: 11000, repairSpeedMultiplier: 0.15 },
+    ],
   },
   {
     id: 'power-spire',
@@ -268,6 +301,9 @@ function buildRepairBayMesh(def) {
   group.userData.buildRing = ring;
   group.userData.shadowCasters = [pad, ...posts, gantryRing];
   group.userData.ledCells = ledCells;
+  // The repair controller recolors this by state (idle/working/ready) —
+  // its own emissive color is the "idle" default and never touched directly.
+  group.userData.ringMaterial = accentMat;
   return group;
 }
 
@@ -349,6 +385,9 @@ class StructureInstance {
     this.health = def.maxHealth;
     this.mode = 'building'; // 'building' | 'idle'
     this.progress = 0;
+    // 0 = base, unupgraded. 1-10 index into def.upgradeTiers. Per-instance —
+    // upgrading one repair bay never affects another.
+    this.upgradeLevel = 0;
 
     // Doors face outward from the pad centre, so a harvester never has to drive
     // across the parked base station to dock.
@@ -416,8 +455,10 @@ class StructureInstance {
 }
 
 export class StructureController {
-  constructor(scene) {
+  constructor(scene, vehicles) {
     this.scene = scene;
+    // Optional — only needed for canPlaceAt's base-vehicle exclusion below.
+    this.vehicles = vehicles;
     this.instances = [];
     /** Called with (instance) when a building finishes. */
     this.onComplete = null;
@@ -461,7 +502,25 @@ export class StructureController {
     if (Math.hypot(x - pad.x, z - pad.z) + def.footprint > pad.radius) return false;
     // Same overlap rule freeSlot used to enforce on its fixed ring positions,
     // now evaluated at an arbitrary point instead of one of six angles.
-    return !pad.buildings.some((b) => Math.hypot(b.x - x, b.z - z) < def.footprint * 1.6);
+    if (pad.buildings.some((b) => Math.hypot(b.x - x, b.z - z) < def.footprint * 1.6)) return false;
+
+    // A deployed base station sitting on this pad is an obstacle too, even
+    // though it's a vehicle, not a `pad.buildings` entry — pads have no
+    // ownership link back to it (see terraform.js), so this is a proximity
+    // check against whichever base is actually parked here right now, not a
+    // stored reference. Deliberately just the vehicle's own hull plus a small
+    // fixed clearance, not scaled by the new building's footprint the way the
+    // building-overlap check above is — a footprint-sized buffer on top of a
+    // building's own footprint radius would swallow most or all of a pad this
+    // size (the repair bay's is already most of the usable ring on its own).
+    const base = this.vehicles?.instances.find(
+      (v) => v.def.id === 'base-station' && v.mode === 'deployed' && Math.hypot(v.group.position.x - pad.x, v.group.position.z - pad.z) <= pad.radius
+    );
+    if (base && Math.hypot(base.group.position.x - x, base.group.position.z - z) < base.def.dims.hullLength / 2 + 3) {
+      return false;
+    }
+
+    return true;
   }
 
   /** Place a building at an explicit point on a pad. Returns the instance, or null if invalid. */
