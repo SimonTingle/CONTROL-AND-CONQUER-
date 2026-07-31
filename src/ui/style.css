@@ -676,6 +676,149 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
   .difficulty-grid { grid-template-columns: 1fr; }
 }
 
+.difficulty-card.selected {
+  border-color: var(--accent);
+  background: rgba(79, 209, 197, 0.12);
+}
+
+/* ---- portal (landing screen) ---- */
+
+#portal {
+  position: fixed;
+  inset: 0;
+  z-index: 32; /* above the difficulty/AI-difficulty screens it routes to */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(5, 8, 12, 0.94);
+  backdrop-filter: blur(6px);
+  transition: opacity 0.35s ease;
+}
+
+#portal.hidden { opacity: 0; pointer-events: none; }
+
+.portal-panel {
+  width: 100%;
+  max-width: 760px;
+  text-align: center;
+}
+
+.portal-panel h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.portal-panel .hint {
+  margin: 10px auto 24px;
+  max-width: 460px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.portal-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.portal-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 22px 16px;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.portal-card:hover {
+  border-color: var(--accent);
+  background: rgba(79, 209, 197, 0.08);
+}
+
+.portal-card-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.portal-card-blurb {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.portal-back {
+  margin: 0 auto;
+  max-width: 160px;
+  text-align: center;
+  align-items: center;
+}
+
+@media (max-width: 620px) {
+  .portal-grid { grid-template-columns: 1fr; }
+}
+
+/* ---- AI difficulty select ---- */
+
+#ai-difficulty {
+  position: fixed;
+  inset: 0;
+  z-index: 31;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(5, 8, 12, 0.94);
+  backdrop-filter: blur(6px);
+  transition: opacity 0.35s ease;
+}
+
+#ai-difficulty.hidden { opacity: 0; pointer-events: none; }
+
+.ai-difficulty-grid { grid-template-columns: repeat(4, 1fr); }
+
+@media (max-width: 780px) {
+  .ai-difficulty-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+.ai-difficulty-delay {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: center;
+  margin: 20px auto 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.ai-difficulty-delay .readout {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  min-width: 34px;
+}
+
+.ai-difficulty-note {
+  margin-top: 16px !important;
+}
+
+.ai-difficulty-start {
+  margin: 4px auto 0;
+  max-width: 220px;
+  align-items: center;
+  text-align: center;
+  border-color: var(--accent);
+}
+
 /* ---- loading ---- */
 
 #loading {
