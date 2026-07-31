@@ -89,12 +89,20 @@ export function isBuildable(heightmap, x, z, maxSlope = 0.35) {
  * waterline — the closest-to-edge point that is still land.
  */
 export function findEdgeSpawnPoint(heightmap, camera, target = new THREE.Vector3()) {
-  const { size } = heightmap.params;
-
   const forward = new THREE.Vector3();
   camera.getWorldDirection(forward);
   let angle = Math.atan2(forward.z, forward.x);
   if (!Number.isFinite(angle)) angle = 0;
+  return findEdgeSpawnPointAtAngle(heightmap, angle, target);
+}
+
+/**
+ * The same coast-finding march, but along an angle the caller chooses rather
+ * than the one the camera happens to face. Multi-team match setup needs to
+ * place N bases on N specific bearings; the camera has no say in that.
+ */
+export function findEdgeSpawnPointAtAngle(heightmap, angle, target = new THREE.Vector3()) {
+  const { size } = heightmap.params;
 
   const dirX = Math.cos(angle);
   const dirZ = Math.sin(angle);
@@ -111,6 +119,52 @@ export function findEdgeSpawnPoint(heightmap, camera, target = new THREE.Vector3
 
   // Degenerate fallback (e.g. a fully-flooded map): spawn at the centre.
   return { point: target.set(0, heightmap.heightAt(0, 0), 0), heading: 0 };
+}
+
+/**
+ * Coastal start positions for an all-versus-all match, one per team.
+ *
+ * Equal *compass angles* are not equal *distances* on an irregular coastline:
+ * two bearings can both march inland into the same bay and land the teams on
+ * top of each other. So each bearing is nudged within its own slice until the
+ * point it finds clears everything already placed, and the best candidate is
+ * kept if none fully clears — a slightly tight start beats no start at all.
+ *
+ * @param {number} count how many teams
+ * @param {number} [minSeparation] world units teams should be apart
+ * @param {number} [phase] rotates the whole ring, so successive matches on one
+ *   island do not always start on the same beaches
+ */
+export function findTeamSpawnPoints(heightmap, count, { minSeparation = 260, phase = 0 } = {}) {
+  const placed = [];
+  const slice = (Math.PI * 2) / count;
+  // Odd count so the nudges are symmetric about the slice's own centre.
+  const NUDGES = [0, 0.18, -0.18, 0.34, -0.34, 0.48, -0.48];
+
+  for (let i = 0; i < count; i++) {
+    const centre = phase + i * slice;
+    let best = null;
+    let bestClearance = -Infinity;
+
+    for (const nudge of NUDGES) {
+      // Never let a nudge cross into a neighbouring slice.
+      const angle = centre + nudge * slice;
+      const found = findEdgeSpawnPointAtAngle(heightmap, angle, new THREE.Vector3());
+      const clearance = placed.length
+        ? Math.min(...placed.map((p) => Math.hypot(p.point.x - found.point.x, p.point.z - found.point.z)))
+        : Infinity;
+
+      if (clearance > bestClearance) {
+        bestClearance = clearance;
+        best = found;
+      }
+      if (clearance >= minSeparation) break; // good enough, stop nudging
+    }
+
+    placed.push(best);
+  }
+
+  return placed;
 }
 
 /**
