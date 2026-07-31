@@ -350,7 +350,7 @@ export class HarvesterAI {
     }
     s.unloadWaitTimer = 0;
 
-    const facility = this._facility();
+    const facility = this._facility(inst);
     if (!facility) {
       s.state = IDLE;
       return;
@@ -395,7 +395,7 @@ export class HarvesterAI {
   }
 
   _atDock(inst, s) {
-    const facility = this._facility();
+    const facility = this._facility(inst);
     if (!facility) {
       s.state = IDLE;
       return;
@@ -413,7 +413,7 @@ export class HarvesterAI {
   }
 
   _waitingForDock(inst, s) {
-    const facility = this._facility();
+    const facility = this._facility(inst);
     if (!facility) {
       s.state = IDLE;
       return;
@@ -478,11 +478,11 @@ export class HarvesterAI {
    */
   _safeResumeState(inst, s) {
     if (s.state === UNLOADING) {
-      this._releaseDock(this._facility(), inst);
+      this._releaseDock(this._facility(inst), inst);
       return TO_BASE;
     }
     if (s.state === WAITING_FOR_DOCK) {
-      this._releaseQueueSlot(this._facility(), s);
+      this._releaseQueueSlot(this._facility(inst), s);
       return TO_BASE;
     }
     return s.state;
@@ -501,7 +501,7 @@ export class HarvesterAI {
       return;
     }
 
-    const facility = this._facility();
+    const facility = this._facility(inst);
     if (!facility) {
       s.state = IDLE;
       inst.shouldPark = false;
@@ -540,15 +540,25 @@ export class HarvesterAI {
 
   // ---- driving ----
 
-  _facility() {
-    return this.structures.instances.find((i) => i.mode === 'idle' && i.def.unloadRate) ?? null;
+  /**
+   * A refinery this harvester can actually deliver to: same team, finished,
+   * and able to accept cargo. Team-scoping is not cosmetic — without it a
+   * harvester hauls its load to whichever refinery happens to be first in the
+   * array and pays an opponent for it.
+   */
+  _facility(inst) {
+    return (
+      this.structures.instances.find(
+        (i) => i.mode === 'idle' && i.def.unloadRate && i.teamId === inst.teamId
+      ) ?? null
+    );
   }
 
   /** Where this state is trying to get to, recomputed so it can never go stale. */
   _destination(inst, s) {
     if (s.state === TO_FIELD) return s.field ? { x: s.field.x, z: s.field.z } : null;
     if (s.state === TO_BASE) {
-      const f = this._facility();
+      const f = this._facility(inst);
       return f ? { x: f.dock.x, z: f.dock.z } : null;
     }
     return null;

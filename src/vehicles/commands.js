@@ -35,7 +35,10 @@ export function commandsFor(instance, ctx) {
  */
 function basePad(instance, ctx) {
   const anchor = instance.deployOrigin ?? instance.group.position;
-  return ctx.terraform.padAt(anchor.x, anchor.z);
+  const pad = ctx.terraform.padAt(anchor.x, anchor.z);
+  // A pad found by position could belong to somebody else if two bases
+  // deployed close together; only your own is yours to build on.
+  return pad && (pad.teamId ?? 0) === instance.teamId ? pad : null;
 }
 
 /**
@@ -49,6 +52,7 @@ function nearestRepairBay(instance, ctx) {
   let bestD = Infinity;
   for (const s of ctx.structures.instances) {
     if (s.def.id !== 'repair-bay' || s.mode !== 'idle') continue;
+    if (s.teamId !== instance.teamId) continue; // never queue at an enemy bay
     const d = Math.hypot(s.x - pos.x, s.z - pos.z);
     if (d < bestD) {
       bestD = d;
@@ -169,6 +173,8 @@ const COMMANDS = {
           instance.target = null;
           ctx.terraform.deployPad(pos.x, pos.z, {
             ...instance.def.deploy,
+            // The pad belongs to whoever's base flattened it.
+            teamId: instance.teamId,
             // The vehicle only calls itself deployed once the ground actually is.
             onComplete: () => {
               instance.mode = 'deployed';
@@ -192,7 +198,9 @@ const COMMANDS = {
           const pad = basePad(instance, ctx);
           if (!pad || !pad.complete) return 'Needs a finished pad';
           const def = ctx.structures.defOf('harvester-facility');
-          if (ctx.structures.instanceOf('harvester-facility')) return 'Already built';
+          if (ctx.structures.instanceOf('harvester-facility', instance.teamId)) {
+            return 'Already built';
+          }
           if (!ctx.structures.freeSlot(pad, def.footprint)) return 'No free slot on the pad';
           return true;
         },
@@ -242,7 +250,9 @@ const COMMANDS = {
         },
         execute(instance, ctx) {
           const pos = instance.group.position;
-          ctx.structures.placeAt(ctx.structures.defOf('power-spire'), pos.x, pos.z, ctx.heightmap);
+          ctx.structures.placeAt(ctx.structures.defOf('power-spire'), pos.x, pos.z, ctx.heightmap, {
+            teamId: instance.teamId,
+          });
           // Free to drive off and redeploy elsewhere via the existing 'deploy'
           // command, completely unchanged.
           instance.mode = 'mobile';

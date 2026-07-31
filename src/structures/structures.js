@@ -378,8 +378,10 @@ function buildSpireMesh(def) {
 
 /** One placed building. */
 class StructureInstance {
-  constructor(def, { x, z, hN, angle, pad, slot, buildTimeOverride }) {
+  constructor(def, { x, z, hN, angle, pad, slot, buildTimeOverride, teamId = 0 }) {
     this.def = def;
+    // Numeric, not a Team reference — see core/team.js for why.
+    this.teamId = teamId;
     this.group = buildStructureMesh(def);
     this.x = x;
     this.z = z;
@@ -478,8 +480,10 @@ export class StructureController {
     return STRUCTURE_CATALOG.find((d) => d.id === id) ?? null;
   }
 
-  instanceOf(id) {
-    return this.instances.find((i) => i.def.id === id) ?? null;
+  /** Team-scoped: "have *I* built one of these?" is never a question about
+   * somebody else's base. */
+  instanceOf(id, teamId = 0) {
+    return this.instances.find((i) => i.def.id === id && i.teamId === teamId) ?? null;
   }
 
   /**
@@ -508,23 +512,31 @@ export class StructureController {
    * the player commits) and by `place()` itself, as a final guard against a
    * stale click landing after the pad or its neighbours changed underneath it.
    */
-  canPlaceAt(pad, def, x, z) {
+  canPlaceAt(pad, def, x, z, teamId = pad.teamId ?? 0) {
+    // You can only build on ground your own base flattened. Defaults to the
+    // pad's own owner so callers that have no actor in hand (the placement
+    // preview) keep their existing behaviour.
+    if ((pad.teamId ?? 0) !== teamId) return false;
     if (Math.hypot(x - pad.x, z - pad.z) + def.footprint > pad.radius) return false;
     // Same overlap rule freeSlot used to enforce on its fixed ring positions,
     // now evaluated at an arbitrary point instead of one of six angles.
     if (pad.buildings.some((b) => Math.hypot(b.x - x, b.z - z) < def.footprint * 1.6)) return false;
 
     // A deployed base station sitting on this pad is an obstacle too, even
-    // though it's a vehicle, not a `pad.buildings` entry — pads have no
-    // ownership link back to it (see terraform.js), so this is a proximity
-    // check against whichever base is actually parked here right now, not a
-    // stored reference. Deliberately just the vehicle's own hull plus a small
-    // fixed clearance, not scaled by the new building's footprint the way the
-    // building-overlap check above is — a footprint-sized buffer swallowed
-    // most or all of a pad this size when footprint values were inflated for
-    // visual reasons (see the repair bay's own footprint comment).
+    // though it's a vehicle, not a `pad.buildings` entry. The pad now records
+    // its owner, so this is scoped to that team's own base — otherwise an
+    // enemy base parked nearby would silently veto legitimate placements.
+    // Deliberately just the vehicle's own hull plus a small fixed clearance,
+    // not scaled by the new building's footprint the way the building-overlap
+    // check above is — a footprint-sized buffer swallowed most or all of a pad
+    // this size when footprint values were inflated for visual reasons (see
+    // the repair bay's own footprint comment).
     const base = this.vehicles?.instances.find(
-      (v) => v.def.id === 'base-station' && v.mode === 'deployed' && Math.hypot(v.group.position.x - pad.x, v.group.position.z - pad.z) <= pad.radius
+      (v) =>
+        v.def.id === 'base-station' &&
+        v.mode === 'deployed' &&
+        v.teamId === (pad.teamId ?? 0) &&
+        Math.hypot(v.group.position.x - pad.x, v.group.position.z - pad.z) <= pad.radius
     );
     if (base && Math.hypot(base.group.position.x - x, base.group.position.z - z) < base.def.dims.hullLength / 2 + 3) {
       return false;
@@ -545,6 +557,10 @@ export class StructureController {
       // ring slots used, just derived from wherever the player actually clicked.
       angle: Math.atan2(pos.z - pad.z, pos.x - pad.x),
       pad,
+      // Ownership comes from the pad, never from the caller: whoever's base
+      // flattened this ground owns what goes on it, so a building can never
+      // disagree with the pad it stands on.
+      teamId: pad.teamId ?? 0,
     });
 
     instance.group.userData.selectable = instance;
@@ -560,13 +576,14 @@ export class StructureController {
    * from the heightmap rather than a pad's flattened target, since nothing
    * flattens the ground here.
    */
-  placeAt(def, x, z, heightmap, { buildTimeOverride } = {}) {
+  placeAt(def, x, z, heightmap, { buildTimeOverride, teamId = 0 } = {}) {
     const instance = new StructureInstance(def, {
       x,
       z,
       hN: heightmap.sampleNormalized(x, z),
       angle: 0,
       buildTimeOverride,
+      teamId,
     });
 
     instance.group.userData.selectable = instance;

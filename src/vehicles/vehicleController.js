@@ -37,8 +37,10 @@ function travelScratch(n) {
 
 /** One spawned, drivable vehicle. */
 class VehicleInstance {
-  constructor(def, spawnPoint, facing) {
+  constructor(def, spawnPoint, facing, teamId = 0) {
     this.def = def;
+    // Numeric, not a Team reference — see core/team.js for why.
+    this.teamId = teamId;
     this.group = buildVehicleMesh(def);
     this.group.position.copy(spawnPoint);
     this.heading = facing;
@@ -615,9 +617,11 @@ export class VehicleController {
    * @param {boolean} [opts.activate] false to spawn without taking the keys —
    *   a factory shipping a unit must not yank the camera off whatever the
    *   player was watching.
+   * @param {number} [opts.teamId] owning team; defaults to the player's, so
+   *   every existing caller keeps spawning player units unchanged.
    */
-  spawn(def, spawnPoint, facing = 0, { activate = true } = {}) {
-    const instance = new VehicleInstance(def, spawnPoint, facing);
+  spawn(def, spawnPoint, facing = 0, { activate = true, teamId = 0 } = {}) {
+    const instance = new VehicleInstance(def, spawnPoint, facing, teamId);
     this.instances.push(instance);
     // So a raycast hit on any part of the mesh can walk up to its instance.
     instance.group.userData.selectable = instance;
@@ -633,9 +637,13 @@ export class VehicleController {
     return VEHICLE_CATALOG.find((d) => d.id === id) ?? null;
   }
 
-  /** The spawned instance of a catalog entry, if there is one. */
-  instanceOf(def) {
-    return this.instances.find((i) => i.def.id === def.id) ?? null;
+  /**
+   * The spawned instance of a catalog entry owned by a team, if there is one.
+   * Team-scoped because "do I already have one of these?" is only ever a
+   * question about your own fleet.
+   */
+  instanceOf(def, teamId = 0) {
+    return this.instances.find((i) => i.def.id === def.id && i.teamId === teamId) ?? null;
   }
 
   /**

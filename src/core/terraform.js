@@ -68,7 +68,7 @@ export class Terraform {
    * Begin flattening a pad. Returns the pad record, or null if one is already
    * being built.
    */
-  deployPad(x, z, { padRadius, padBlend, duration, onComplete } = {}) {
+  deployPad(x, z, { padRadius, padBlend, duration, onComplete, teamId = 0 } = {}) {
     if (this.active) return null;
 
     const hm = this.heightmap;
@@ -107,6 +107,9 @@ export class Terraform {
     const pad = {
       x,
       z,
+      // The team whose base flattened this ground. Everything built here
+      // inherits it, so a building can never disagree with its own pad.
+      teamId,
       radius: padRadius,
       blend: padBlend,
       targetN,

@@ -119,6 +119,7 @@ export class RepairController {
     let bestD = Infinity;
     for (const s of this.structures?.instances ?? []) {
       if (s.def.id !== 'repair-bay' || s.mode !== 'idle') continue;
+      if (s.teamId !== inst.teamId) continue; // never queue at an enemy bay
       const d = Math.hypot(s.x - pos.x, s.z - pos.z);
       if (d < bestD) {
         bestD = d;

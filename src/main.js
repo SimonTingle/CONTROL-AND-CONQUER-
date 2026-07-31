@@ -311,6 +311,7 @@ function checkBaseRepositioning() {
     if (dist < BASE_MOVE_THRESHOLD) continue;
     structures.placeAt(structures.defOf('power-spire'), inst.deployOrigin.x, inst.deployOrigin.z, heightmap, {
       buildTimeOverride: SPIRE_GROW_TIME,
+      teamId: inst.teamId,
     });
     inst.spireGrown = true;
   }
@@ -779,7 +780,11 @@ function produceUnit(def, facility) {
 
       if (isSpawnLocationViable(facility.x, facility.z, dock.x, dock.z, maxClimbGrade)) {
         const point = new THREE.Vector3(dock.x, heightmap.heightAt(dock.x, dock.z) + 0.05, dock.z);
-        return vehicles.spawn(def, point, facility.angle, { activate: false });
+        return vehicles.spawn(def, point, facility.angle, {
+          activate: false,
+          // A factory's output belongs to whoever owns the factory.
+          teamId: facility.teamId,
+        });
       }
     }
 
@@ -791,7 +796,10 @@ function produceUnit(def, facility) {
   // Fallback: spawn at original dock position even if not ideal
   const dock = facility.dock;
   const point = new THREE.Vector3(dock.x, heightmap.heightAt(dock.x, dock.z) + 0.05, dock.z);
-  return vehicles.spawn(def, point, facility.angle, { activate: false });
+  return vehicles.spawn(def, point, facility.angle, {
+    activate: false,
+    teamId: facility.teamId,
+  });
 }
 
 // A facility ships one harvester the moment it finishes. Without that bootstrap
