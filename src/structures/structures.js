@@ -59,16 +59,15 @@ export const STRUCTURE_CATALOG = [
     maxHealth: 500,
     sightRadius: 30,
     buildTime: 6,
-    // `footprint` is the collision radius used by canPlaceAt/freeSlot, not a
-    // visual size — it must track the bay's real physical extent (its pad is
-    // dims.padRadius=10, gantry ring at padRadius*0.86, LED strip at
-    // padRadius+0.4 — nothing reaches much past 10.5). An earlier value of 24
-    // ("roughly double the harvester facility's, to read as bigger") drove
-    // placement math instead of visuals: canPlaceAt's overlap rule rejects
-    // anything within footprint*1.6 (≈38) of another building, which — given
-    // the pad itself is only radius 40 — left no legal spot anywhere on the
-    // pad at all once a harvester facility already occupied it.
-    footprint: 11,
+    // `footprint` is the collision radius canPlaceAt uses, not a visual size —
+    // it has to track the bay's real physical extent, not "make it read as
+    // bigger." An earlier value of 24 (roughly double the harvester facility's,
+    // chosen for visual weight) drove placement math instead: canPlaceAt's
+    // overlap rule rejects anything within footprint*1.6 (≈38) of another
+    // building, which — on a pad whose own radius is only 40 — left no legal
+    // spot anywhere on the pad once a harvester facility already occupied it.
+    // Matches the facility's own footprint now, the same convention it uses.
+    footprint: 13,
     cost: 2000, // credits to build, separate from the per-repair cost below
     dockOffset: 16,
     ledSegments: 12,
