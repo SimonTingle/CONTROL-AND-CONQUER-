@@ -318,17 +318,72 @@ export class AiCommander {
   /**
    * Send one unit toward a point, working around terrain it cannot cross.
    *
-   * Re-issuing the identical straight line every time an order is abandoned
-   * is not a retry, it is a loop: the heading is unchanged, so it fails
-   * exactly the same way and the unit grinds against the same slope until the
-   * blocked-damage floor. (Observed directly — an army left to it arrived at
-   * 100/400 health having never fired a shot.) harvesterAI solves this with
-   * widening alternating detour angles; this is the same idea, kept small
-   * because an army unit has somewhere to be rather than a precise dock to
-   * hit.
+   * Tries the shared NavGrid first — a coarse flow field that actually knows
+   * "go around the mountain," not just "the last heading failed, try
+   * another." Only when it has nothing (no grid yet, or the goal is
+   * unreachable) does this fall back to the local reactive fan below, so a
+   * genuinely unreachable order still degrades the same safe way it always
+   * has rather than stalling with no fallback at all.
+   *
+   * One more thing has to fall back too: NavGrid samples terrain only at
+   * ~24-unit cell centers, coarser than the ~2-unit grade probe
+   * driveToTarget actually steers by. An edge can average out clear while
+   * still hiding a local bump the fine probe meets — and because
+   * nextWaypoint is a pure function of position, asking again from the same
+   * spot returns the *identical* doomed waypoint every time. Verified
+   * directly: two calls to nextWaypoint from an unmoved position produced
+   * the same coordinates back to back — a deterministic stall with no
+   * built-in way to break it, the same failure this whole feature exists to
+   * fix, just moved up one layer. So: if the waypoint NavGrid hands back is
+   * the same one as last time, this unit did not make progress on it, and
+   * the local detour fan (which actually varies its heading) is what
+   * breaks the tie.
    */
   _advanceUnit(unit, target) {
     const pos = unit.group.position;
+    const waypoint = this.ctx.navGrid?.nextWaypoint(pos.x, pos.z, target.x, target.z);
+
+    if (waypoint) {
+      const repeat =
+        unit._navWaypoint &&
+        Math.hypot(waypoint.x - unit._navWaypoint.x, waypoint.z - unit._navWaypoint.z) < 1;
+      unit._navStallCount = repeat ? (unit._navStallCount ?? 0) + 1 : 0;
+      unit._navWaypoint = waypoint;
+
+      if (unit._navStallCount < 2 && unit.setTarget(waypoint.x, waypoint.z, this.ctx.heightmap)) {
+        unit._advanceAttempt = 0; // a real route exists; forget any stale fan history
+        return;
+      }
+    } else {
+      unit._navWaypoint = null;
+      unit._navStallCount = 0;
+    }
+
+    this._advanceUnitByDetour(unit, target);
+  }
+
+  /**
+   * The original local-only fallback: re-issuing the identical straight line
+   * every time an order is abandoned is not a retry, it is a loop — the
+   * heading is unchanged, so it fails exactly the same way and the unit
+   * grinds against the same slope until the blocked-damage floor. (Observed
+   * directly — an army left to it arrived at 100/400 health having never
+   * fired a shot.) harvesterAI solves this with widening alternating detour
+   * angles; this is the same idea, kept small because an army unit has
+   * somewhere to be rather than a precise dock to hit.
+   *
+   * Still reachable whenever the NavGrid has no answer — no grid yet, an
+   * unreachable goal, or a goal cell that reads as impassable — so a route
+   * that used to work at all keeps working at least this well.
+   */
+  _advanceUnitByDetour(unit, target) {
+    const pos = unit.group.position;
+    // Read before setTarget below overwrites it: `blocked` reflects whether
+    // the leg that just ended (and is *why* this function is running again)
+    // failed on a climb, or ended some other way. coast() — what runs on the
+    // ticks between orders — never touches it, so it's still the true
+    // outcome of that leg at this exact point, not stale.
+    const wasBlocked = unit.blocked;
     const attempt = unit._advanceAttempt ?? 0;
     const bearing = Math.atan2(target.z - pos.z, target.x - pos.x);
 
@@ -340,20 +395,25 @@ export class AiCommander {
     const x = pos.x + Math.cos(aim) * range;
     const z = pos.z + Math.sin(aim) * range;
 
-    if (unit.setTarget(x, z, this.ctx.heightmap)) {
-      // Count it as used the moment it is issued: whether it *succeeds* is
-      // only knowable later (the order simply stops being live), and by then
-      // this function has no way to tell a completed drive from an abandoned
-      // one. Resetting on arrival instead is what matters — see below.
-      unit._advanceAttempt = attempt + 1;
-    } else {
-      unit._advanceAttempt = attempt + 1;
-    }
+    unit.setTarget(x, z, this.ctx.heightmap);
+    // Count it as used the moment it is issued: whether it *succeeds* is
+    // only knowable later (the order simply stops being live), and by then
+    // this function has no way to tell a completed drive from an abandoned
+    // one. Resetting on arrival instead is what matters — see below.
+    unit._advanceAttempt = attempt + 1;
 
-    // Close enough to the real destination means the detour worked; forget the
-    // history so the next leg starts from a clean direct attempt rather than
-    // inheriting a stale fan angle.
-    if (Math.hypot(target.x - pos.x, target.z - pos.z) < 40) unit._advanceAttempt = 0;
+    // Close enough to the real destination usually means the detour worked —
+    // *unless* the leg that just ended was itself a blocked failure, in which
+    // case proximity proves nothing: a rally point sitting on genuinely
+    // unclimbable terrain keeps a unit permanently "close" without ever
+    // actually reaching it. Resetting on distance alone in that case erases
+    // the fan history on every single call, permanently disabling the
+    // escalation this method exists to provide — confirmed directly: a unit
+    // 37 units from its rally point racked up tens of thousands of stalled
+    // attempts while pinned at attempt 0, grinding on the same climb.
+    if (!wasBlocked && Math.hypot(target.x - pos.x, target.z - pos.z) < 40) {
+      unit._advanceAttempt = 0;
+    }
   }
 
   /**

@@ -186,6 +186,9 @@ export class Terraform {
       // Same "the world changed shape here" moment: anything growing under the
       // new concrete is gone.
       this.world.blooms.clearUnder(pad.x, pad.z, pad.radius);
+      // And the same moment for NavGrid's cached flow fields — a flattened pad
+      // can open a route that used to be blocked.
+      hm.terrainVersion++;
       job.onComplete?.(pad);
     }
   }

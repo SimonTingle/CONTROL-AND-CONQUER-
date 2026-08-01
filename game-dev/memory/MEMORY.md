@@ -1,0 +1,1 @@
+- [Model Selection in Planning/Auto](model_selection_planning.md) — balance capability with token efficiency via concise guidance
