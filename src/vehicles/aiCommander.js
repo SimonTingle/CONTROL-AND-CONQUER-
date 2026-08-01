@@ -40,16 +40,19 @@ const BASE_ORDER_TIMEOUT = 100;
 // driving, so "can it leave in this direction" here means the same thing it
 // will mean to the vehicle a moment later.
 const GRADE_PROBE = 2.5;
+/** Widening, alternating — the same shape harvesterAI's own detours use, and
+ * for the same reason: a straight retry cannot work, the heading is unchanged. */
+const ADVANCE_DETOURS = [0.8, -0.8, 1.5, -1.5, 2.3, -2.3];
 
 // Difficulty scales how eagerly a team spends on its fleet and how long it
 // waits before its first action — the standard skirmish-AI knobs. Keyed by
 // AI_DIFFICULTIES' own id (ui/aiDifficultyScreen.js) rather than duplicating
 // the tier data here.
 const DIFFICULTY_ECONOMY = {
-  easy: { harvesterCap: 2, buildInterval: 20 },
-  normal: { harvesterCap: 3, buildInterval: 15 },
-  hard: { harvesterCap: 4, buildInterval: 11 },
-  expert: { harvesterCap: 5, buildInterval: 8 },
+  easy: { harvesterCap: 2, buildInterval: 20, combatCap: 1, attackAt: 2 },
+  normal: { harvesterCap: 3, buildInterval: 15, combatCap: 3, attackAt: 2 },
+  hard: { harvesterCap: 4, buildInterval: 11, combatCap: 5, attackAt: 3 },
+  expert: { harvesterCap: 5, buildInterval: 8, combatCap: 7, attackAt: 3 },
 };
 const DEFAULT_ECONOMY = DIFFICULTY_ECONOMY.normal;
 
@@ -118,6 +121,7 @@ export class AiCommander {
     this._driveScout(dt);
     this._manageBase(dt);
     this._manageEconomy(dt);
+    this._manageArmy();
   }
 
   // ---- own units, re-resolved fresh every call — see the header comment ----
@@ -236,7 +240,177 @@ export class AiCommander {
     this.buildTimer -= dt;
     if (this.buildTimer > 0) return;
     this.buildTimer = this.economy.buildInterval;
-    this._tryBuildHarvester();
+    // Economy before army: a team with no income cannot sustain either, and a
+    // harvester that pays for itself is worth more than a gun that does not.
+    if (!this._tryBuildUnit('economy', this.economy.harvesterCap)) {
+      this._tryBuildUnit('combat', this.economy.combatCap);
+    }
+  }
+
+  /**
+   * Build one unit carrying `tag`, if under the cap and affordable.
+   *
+   * Reads the produced defs off whatever this team's structures actually
+   * offer, so a new unit added to any structure's `produces` list is picked
+   * up here with no change: the AI asks "what do I have that is tagged
+   * combat", never "build a gun-platform".
+   */
+  _tryBuildUnit(tag, cap) {
+    if (cap <= 0) return false;
+    for (const s of this.ctx.structures.instances) {
+      if (s.teamId !== this.team.id || s.mode !== 'idle' || !s.def.produces) continue;
+      for (const unitId of s.def.produces) {
+        const def = this.ctx.vehicles.defOf(unitId);
+        if (!def?.tags?.includes(tag)) continue;
+        if (this._ownUnits(unitId).length >= cap) continue;
+
+        const cmd = commandsFor(s, this.ctx).find((c) => c.id === `build-${unitId}`);
+        if (cmd?.enabledResult !== true) continue;
+        cmd.execute(s, this.ctx);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // ---- army: arm what it builds, and send it at something it can see ----
+
+  _manageArmy() {
+    const army = this.ctx.vehicles.instances.filter(
+      (v) => v.teamId === this.team.id && !v.dead && v.def.tags?.includes('combat') && v.def.id !== 'scout-buggy'
+    );
+    if (army.length === 0) return;
+
+    // Armed is the capability gate combatController reads, and arming costs
+    // mobility — so it happens once, on production, not per tick.
+    for (const unit of army) {
+      if (unit.mode === 'mobile') unit.mode = 'armed';
+    }
+
+    // Attack only once there is enough of a group to be worth committing.
+    // Below that they hold near home, which doubles as base defence since
+    // combatController engages anything that wanders into range regardless.
+    if (army.length < this.economy.attackAt) return;
+
+    // Somewhere scouted and worth hitting, or — failing that — forward.
+    //
+    // An army that only ever moves toward *known* enemies never moves at all
+    // on a large map: the lone scout rarely ranges far enough to reveal
+    // another team's base before the army is built, so every unit sits at home
+    // guarding nothing. Advancing on the island's middle instead keeps the
+    // fair-vision rule completely intact — it is not homing on anything it
+    // cannot see — while guaranteeing that four teams pushing outward
+    // eventually meet. The units carry their own sight radius, so the advance
+    // *is* the reconnaissance, and the moment it reveals something real
+    // `_attackTarget` starts returning it instead.
+    const target = this._attackTarget() ?? this._advancePoint();
+    if (!target) return;
+
+    for (const unit of army) {
+      // Never re-order a unit already engaging something — combatController
+      // owns the shooting, and re-targeting mid-fight just makes it drive in
+      // circles under fire.
+      if (unit.combatTarget || unit.hasOrder) continue;
+      this._advanceUnit(unit, target);
+    }
+  }
+
+  /**
+   * Send one unit toward a point, working around terrain it cannot cross.
+   *
+   * Re-issuing the identical straight line every time an order is abandoned
+   * is not a retry, it is a loop: the heading is unchanged, so it fails
+   * exactly the same way and the unit grinds against the same slope until the
+   * blocked-damage floor. (Observed directly — an army left to it arrived at
+   * 100/400 health having never fired a shot.) harvesterAI solves this with
+   * widening alternating detour angles; this is the same idea, kept small
+   * because an army unit has somewhere to be rather than a precise dock to
+   * hit.
+   */
+  _advanceUnit(unit, target) {
+    const pos = unit.group.position;
+    const attempt = unit._advanceAttempt ?? 0;
+    const bearing = Math.atan2(target.z - pos.z, target.x - pos.x);
+
+    // Attempt 0 is the direct line; each failure fans further out, alternating
+    // sides so it probes both ways around whatever is in front of it.
+    const offset = attempt === 0 ? 0 : ADVANCE_DETOURS[(attempt - 1) % ADVANCE_DETOURS.length];
+    const range = attempt === 0 ? Math.hypot(target.x - pos.x, target.z - pos.z) : 60;
+    const aim = bearing + offset;
+    const x = pos.x + Math.cos(aim) * range;
+    const z = pos.z + Math.sin(aim) * range;
+
+    if (unit.setTarget(x, z, this.ctx.heightmap)) {
+      // Count it as used the moment it is issued: whether it *succeeds* is
+      // only knowable later (the order simply stops being live), and by then
+      // this function has no way to tell a completed drive from an abandoned
+      // one. Resetting on arrival instead is what matters — see below.
+      unit._advanceAttempt = attempt + 1;
+    } else {
+      unit._advanceAttempt = attempt + 1;
+    }
+
+    // Close enough to the real destination means the detour worked; forget the
+    // history so the next leg starts from a clean direct attempt rather than
+    // inheriting a stale fan angle.
+    if (Math.hypot(target.x - pos.x, target.z - pos.z) < 40) unit._advanceAttempt = 0;
+  }
+
+  /**
+   * A point to push toward when nothing hostile has been seen yet: the map
+   * centre, nudged so several teams do not all pile onto the exact same
+   * coordinate and jam against each other there.
+   */
+  _advancePoint() {
+    const home = this.team.homePoint;
+    if (!home) return null;
+    // The nudge has to be smaller than a gun's reach, or "everyone converges
+    // on the middle" still leaves each team parked in its own pocket just out
+    // of range of the others — technically converged, permanently not
+    // fighting. Sized off the actual weapon range rather than the map so it
+    // stays correct if either is retuned.
+    const reach = this.ctx.vehicles.defOf('gun-platform')?.turret?.range ?? 90;
+    const spread = reach * 0.35;
+    const angle = (this.team.id / Math.max(1, this.ctx.game.teams.length)) * Math.PI * 2;
+    return { x: Math.cos(angle) * spread, z: Math.sin(angle) * spread };
+  }
+
+  /**
+   * Somewhere worth attacking — and, crucially, somewhere this team has
+   * actually *seen*.
+   *
+   * The fog is the whole point of the fair-vision decision: an AI that
+   * beelines an enemy base it has never scouted is cheating, however good the
+   * result looks. Filtering candidates through this team's own mask is what
+   * makes scouting matter for the AI exactly as much as it does for the player.
+   */
+  _attackTarget() {
+    const fog = this.team.fog;
+    const threshold = fog?.revealThreshold ?? 0;
+    let best = null;
+    let bestD = Infinity;
+    const home = this.team.homePoint ?? { x: 0, z: 0 };
+
+    const consider = (x, z) => {
+      if (fog && fog.seenAt(x, z) < threshold) return; // never scouted: unknown
+      const d = Math.hypot(x - home.x, z - home.z);
+      if (d < bestD) {
+        bestD = d;
+        best = { x, z };
+      }
+    };
+
+    for (const s of this.ctx.structures.instances) {
+      if (s.dead || s.teamId === this.team.id || s.def.tags?.includes('decoration')) continue;
+      consider(s.x, s.z);
+    }
+    for (const v of this.ctx.vehicles.instances) {
+      if (v.dead || v.teamId === this.team.id) continue;
+      // Bases first in spirit: they are what actually ends a match.
+      if (v.def.id !== 'base-station') continue;
+      consider(v.group.position.x, v.group.position.z);
+    }
+    return best;
   }
 
   /** Cheapest not-yet-built structure this team can currently afford, on its own pad. */
@@ -269,17 +443,6 @@ export class AiCommander {
       return false;
     }
     return true;
-  }
-
-  _tryBuildHarvester() {
-    const facility = this.ctx.structures.instances.find(
-      (s) => s.def.id === 'harvester-facility' && s.teamId === this.team.id && s.mode === 'idle'
-    );
-    if (!facility) return;
-    if (this._ownUnits('crystal-harvester').length >= this.economy.harvesterCap) return;
-
-    const cmd = commandsFor(facility, this.ctx).find((c) => c.id === 'build-harvester');
-    if (cmd?.enabledResult === true) cmd.execute(facility, this.ctx);
   }
 
   // ---- scouting: keep the recon unit moving outward, forever ----

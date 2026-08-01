@@ -25,6 +25,7 @@ import { HarvesterAI } from './vehicles/harvesterAI.js';
 import { RepairController } from './vehicles/repairController.js';
 import { TrafficController } from './vehicles/trafficController.js';
 import { AiCommander } from './vehicles/aiCommander.js';
+import { CombatController } from './vehicles/combatController.js';
 import { Terraform } from './core/terraform.js';
 import { StructureController } from './structures/structures.js';
 import { Entities } from './core/entities.js';
@@ -844,12 +845,93 @@ function produceUnit(def, facility) {
 // exists.
 structures.onComplete = (instance) => {
   if (!instance.def.freeUnitOnComplete) return;
-  produceUnit(vehicles.defOf(instance.def.produces), instance);
+  // produces[0] by convention — the economy unit. A facility must never
+  // bootstrap a team with a free combat vehicle.
+  produceUnit(vehicles.defOf(instance.def.produces[0]), instance);
 };
+
+// ---- combat visuals: tracers and wreckage ----
+
+// A small fixed pool of reusable line segments. Shots are frequent and short-
+// lived, so building a mesh per shot would allocate (and need disposing)
+// dozens of times a second; the pool caps that at a constant.
+const TRACER_POOL_SIZE = 24;
+const TRACER_LIFETIME = 0.09; // seconds
+const tracers = [];
+for (let i = 0; i < TRACER_POOL_SIZE; i++) {
+  const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+  const mat = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.9 });
+  const line = new THREE.Line(geo, mat);
+  line.visible = false;
+  line.frustumCulled = false; // endpoints move every use; a stale bound would pop
+  world.scene.add(line);
+  tracers.push({ line, mat, timer: 0 });
+}
+let nextTracer = 0;
+
+/** Draw a shot that has *already* been resolved — purely cosmetic. */
+function showTracer(from, to, teamId, fromHeight, toHeight) {
+  const t = tracers[nextTracer];
+  nextTracer = (nextTracer + 1) % TRACER_POOL_SIZE;
+  const pos = t.line.geometry.attributes.position;
+  pos.setXYZ(0, from.x, heightmap.heightAt(from.x, from.z) + fromHeight, from.z);
+  pos.setXYZ(1, to.x, heightmap.heightAt(to.x, to.z) + toHeight, to.z);
+  pos.needsUpdate = true;
+  // Team colour, so an unattended AI-vs-AI fight is readable at a glance.
+  t.mat.color.setHex(game.teams[teamId]?.color ?? 0xffffff);
+  t.line.visible = true;
+  t.timer = TRACER_LIFETIME;
+}
+
+function updateTracers(dt) {
+  for (const t of tracers) {
+    if (!t.line.visible) continue;
+    t.timer -= dt;
+    if (t.timer <= 0) {
+      t.line.visible = false;
+      continue;
+    }
+    t.mat.opacity = Math.max(0, t.timer / TRACER_LIFETIME) * 0.9;
+  }
+}
+
+/**
+ * A scorched, half-collapsed marker left where something died.
+ *
+ * Deliberately not the unit's own mesh tipped over: the wreck has to read as
+ * *not a unit* at a glance, or a battlefield of corpses becomes unparseable.
+ * Left permanently — this is the record of what happened here.
+ */
+function leaveWreckage(inst) {
+  const scale = inst.kind === 'structure' ? 3 : Math.max(1.2, (inst.def.dims?.hullLength ?? 5) * 0.28);
+  const group = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ color: 0x1a1613, roughness: 0.95, metalness: 0.1 });
+  for (let i = 0; i < 3; i++) {
+    const chunk = new THREE.Mesh(
+      new THREE.BoxGeometry(scale * (0.5 + Math.random() * 0.6), scale * 0.3, scale * (0.4 + Math.random() * 0.5)),
+      mat
+    );
+    chunk.rotation.set(Math.random() * 0.5, Math.random() * Math.PI, Math.random() * 0.4);
+    chunk.position.set((Math.random() - 0.5) * scale, scale * 0.12, (Math.random() - 0.5) * scale);
+    chunk.castShadow = true;
+    group.add(chunk);
+  }
+  const p = inst.x !== undefined ? { x: inst.x, z: inst.z } : inst.group.position;
+  group.position.set(p.x, heightmap.heightAt(p.x, p.z), p.z);
+  world.scene.add(group);
+}
 
 const harvesterAI = new HarvesterAI({ vehicles, world, heightmap, structures, game });
 const repairController = new RepairController({ vehicles, structures, heightmap, game });
 const trafficController = new TrafficController({ vehicles });
+const combatController = new CombatController({
+  vehicles,
+  structures,
+  heightmap,
+  entities,
+  game,
+  onShot: showTracer,
+});
 
 // ---- destroy pipeline: every system that owns instance-keyed state
 // registers its own cleanup hook, in the order it needs to run.
@@ -859,6 +941,17 @@ const trafficController = new TrafficController({ vehicles });
 entities.onDestroy((inst) => harvesterAI.onDestroy(inst));
 entities.onDestroy((inst) => repairController.onDestroy(inst));
 entities.onDestroy((inst) => trafficController.onDestroy(inst));
+// Anyone aiming at the deceased. combatController revalidates targets every
+// tick anyway, so this is belt-and-braces rather than load-bearing — but it
+// means a turret never spends even one frame tracking a corpse.
+entities.onDestroy((inst) => {
+  for (const v of vehicles.instances) {
+    if (v.combatTarget === inst) v.combatTarget = null;
+  }
+});
+// The record of what died here, placed while the instance still knows where
+// it was — vehicles.remove/structures.remove below drop that.
+entities.onDestroy((inst) => leaveWreckage(inst));
 // The radial menu holds a direct reference, not a lookup — nothing else
 // would ever notice it's pointed at a dead instance.
 entities.onDestroy((inst) => {
@@ -1151,6 +1244,11 @@ function tick(dt, { render = true } = {}) {
   // them: this is what actually decides `yielding` and hands out collision
   // damage for the frame about to run.
   trafficController.update(dt);
+  // After every driver has had its say and before the fleet moves: a shot is
+  // resolved against where things are *this* frame, and any resulting death is
+  // queued for the single flush below rather than removed underneath the
+  // movement step that is about to run.
+  combatController.update(dt);
   vehicles.update(dt, heightmap, headlightsWanted(), camera);
   structures.update(dt, heightmap);
 
@@ -1202,6 +1300,7 @@ function tick(dt, { render = true } = {}) {
 
   if (!render) return;
 
+  updateTracers(dt);
   updateMarker(clock.elapsedTime);
   updateHarvestMarker(clock.elapsedTime);
   updatePlacementPreview(lastX, lastY);
@@ -1317,5 +1416,5 @@ Object.assign(window, {
   structures, harvesterAI, repairController, trafficController, produceUnit,
   syncQueueIcons, queueIcons, checkBaseRepositioning,
   updatePlacementPreview, placementPreview, snapToGrid, footprintSize, resizeFootprintOutline,
-  entities, pendingRespawns, pickSelectable,
+  entities, pendingRespawns, pickSelectable, combatController, leaveWreckage,
 });

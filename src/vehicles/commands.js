@@ -11,6 +11,9 @@
  * what is wrong instead of silently doing nothing.
  */
 
+import { STRUCTURE_CATALOG } from '../structures/structures.js';
+import { VEHICLE_CATALOG } from './catalog.js';
+
 /**
  * @param {object} instance the VehicleInstance the menu was opened on
  * @param {object} ctx { vehicles, world, heightmap, terraform, game }
@@ -126,6 +129,36 @@ const UPGRADE_COMMAND = {
     if (ctx.game.teamOf(instance).spend(tier.cost)) instance.upgradeLevel++;
   },
 };
+
+/**
+ * One "Build X" command per unit a structure produces, generated from the
+ * catalog rather than written out. Adding a unit to a structure's `produces`
+ * list is then the entire change — no command to write, and nothing here to
+ * keep in sync with the catalog.
+ */
+function producedByCommands(structureId) {
+  const def = STRUCTURE_CATALOG.find((d) => d.id === structureId);
+  const produces = def?.produces ?? [];
+  return produces.map((unitId) => ({
+    id: `build-${unitId}`,
+    label: `Build ${VEHICLE_CATALOG.find((v) => v.id === unitId)?.name ?? unitId}`,
+    hint: (instance, ctx) => `${ctx.vehicles.defOf(unitId).cost} cr`,
+    enabled(instance, ctx) {
+      const unitDef = ctx.vehicles.defOf(unitId);
+      const team = ctx.game.teamOf(instance);
+      if (team.credits < unitDef.cost) {
+        return `Needs ${unitDef.cost} cr (have ${Math.floor(team.credits)})`;
+      }
+      return true;
+    },
+    execute(instance, ctx) {
+      const unitDef = ctx.vehicles.defOf(unitId);
+      // spend() is the gate, not the enabled() check — that ran when the
+      // menu opened and the balance can have moved since.
+      if (ctx.game.teamOf(instance).spend(unitDef.cost)) ctx.produceUnit(unitDef, instance);
+    },
+  }));
+}
 
 const COMMANDS = {
   'scout-buggy': {
@@ -263,28 +296,7 @@ const COMMANDS = {
 
   'harvester-facility': {
     building: [],
-    idle: [
-      {
-        id: 'build-harvester',
-        label: 'Build Harvester',
-        hint: (instance, ctx) => `${ctx.vehicles.defOf(instance.def.produces).cost} cr`,
-        enabled(instance, ctx) {
-          const def = ctx.vehicles.defOf(instance.def.produces);
-          const team = ctx.game.teamOf(instance);
-          if (team.credits < def.cost) {
-            return `Needs ${def.cost} cr (have ${Math.floor(team.credits)})`;
-          }
-          return true;
-        },
-        execute(instance, ctx) {
-          const def = ctx.vehicles.defOf(instance.def.produces);
-          // spend() is the gate, not the enabled() check — that ran when the
-          // menu opened and the balance can have moved since.
-          if (ctx.game.teamOf(instance).spend(def.cost)) ctx.produceUnit(def, instance);
-        },
-      },
-      UPGRADE_COMMAND,
-    ],
+    idle: [...producedByCommands('harvester-facility'), UPGRADE_COMMAND],
   },
 
   'repair-bay': {

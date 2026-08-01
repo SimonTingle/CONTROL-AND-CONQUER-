@@ -30,8 +30,12 @@ export const STRUCTURE_CATALOG = [
     sightRadius: 34,
     buildTime: 6, // seconds to rise into place
     footprint: 13, // radius it claims when checking overlap with neighbours
-    produces: 'crystal-harvester',
-    /** The bootstrap: without this the first harvester could never be afforded. */
+    // A list, not one id: commands.js turns each entry into its own build
+    // command, so adding a unit here is the whole change — no new command, no
+    // AI change (aiCommander picks by tag off the produced defs).
+    produces: ['crystal-harvester', 'gun-platform'],
+    /** The bootstrap: without this the first harvester could never be afforded.
+     * Ships `produces[0]` — the economy unit, never a combat one. */
     freeUnitOnComplete: true,
     unloadRate: 80, // stock units/second it will accept from a docked harvester
     dockOffset: 12, // how far out from the building a harvester parks
@@ -438,6 +442,28 @@ class StructureInstance {
   /** Screen-space anchor for the radial menu. */
   get menuAnchorHeight() {
     return this.def.dims.height + (this.def.dims.roofHeight ?? 0) + 2;
+  }
+
+  /**
+   * Mirrors VehicleInstance.takeDamage — same contract, same return meaning,
+   * so combatController can hit either kind without caring which it has.
+   *
+   * A building still rising out of the ground takes damage normally: it is a
+   * legitimate target precisely *because* it is vulnerable while unfinished.
+   *
+   * @returns {boolean} true if this blow reduced it to zero.
+   */
+  takeDamage(amount, { floorFraction = 0 } = {}) {
+    if (this.dead || amount <= 0) return false;
+    const floor = this.def.maxHealth * floorFraction;
+    const before = this.health;
+    this.health = Math.max(floor, this.health - amount);
+    return before > 0 && this.health <= 0;
+  }
+
+  /** Where a shot aimed at this building should actually land. */
+  get aimHeight() {
+    return (this.def.dims.height ?? 6) * 0.5;
   }
 
   /** Structures never move; the menu reads this to decide whether to follow. */

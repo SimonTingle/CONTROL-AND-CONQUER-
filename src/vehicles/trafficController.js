@@ -94,8 +94,12 @@ export class TrafficController {
 
     for (let i = 0; i < instances.length; i++) {
       const a = instances[i];
+      // Dead but not yet flushed — a corpse should not be yielded to, bumped
+      // apart, or handed collision damage on its way out.
+      if (a.dead) continue;
       for (let j = i + 1; j < instances.length; j++) {
         const b = instances[j];
+        if (b.dead) continue;
         const dist = Math.hypot(
           a.group.position.x - b.group.position.x,
           a.group.position.z - b.group.position.z
@@ -180,9 +184,14 @@ export class TrafficController {
     return Math.min(MAX_COLLISION_DAMAGE, excess * DAMAGE_PER_SPEED);
   }
 
+  /**
+   * Routed through the vehicle's own takeDamage so every path that lowers
+   * health goes through one place. The floor is what keeps this *wear* rather
+   * than violence: ramming can wreck a vehicle's day but must never destroy
+   * it, or the cheapest way to kill anything would be to drive into it.
+   */
   _applyCollisionDamage(inst, damage) {
-    const floor = inst.def.maxHealth * DAMAGE_FLOOR_FRACTION;
-    inst.health = Math.max(floor, inst.health - damage);
+    inst.takeDamage(damage, { floorFraction: DAMAGE_FLOOR_FRACTION });
   }
 
   /** Push both vehicles apart along the line between their centres, split

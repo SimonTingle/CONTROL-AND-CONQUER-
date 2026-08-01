@@ -52,6 +52,9 @@ export class RepairController {
   update(dt) {
     this._sweepBays();
     for (const inst of this.vehicles.instances) {
+      // Dead but not yet flushed — see harvesterAI's matching guard. Healing a
+      // corpse would also re-claim the bay its onDestroy hook just released.
+      if (inst.dead) continue;
       if (!inst.repair) {
         this._maybeAutoQueue(inst, dt);
         if (!inst.repair) continue;
@@ -232,43 +235,66 @@ export class RepairController {
 
   _startRepairing(inst, r) {
     r.state = 'repairing';
-    r.elapsed = 0;
-    r.cost = null; // computed on the first repairing tick, not at command-click time
+    // Fractional credits owed but not yet billed — see _repairing. Nothing is
+    // struck up front any more: cost accrues with the health actually applied.
+    r.owed = 0;
   }
 
+  /**
+   * Heals at a rate, and pays as it goes.
+   *
+   * This used to precompute a duration and lerp health from a frozen
+   * `startHealth`, which was fine when nothing could hurt a parked vehicle:
+   * once weapons existed it meant a unit being shot inside a bay had its
+   * damage *overwritten* every tick by the lerp — effectively invulnerable
+   * while docked. A rate only ever adds, so incoming damage now competes with
+   * the repair instead of being erased by it.
+   *
+   * Charging per tick rather than up front closes the matching hole on the
+   * economy side: a vehicle destroyed halfway through no longer takes a full
+   * repair's credits with it, and a repair interrupted for any other reason
+   * costs exactly what it delivered.
+   */
   _repairing(inst, r, dt) {
     const bay = r.bay;
 
-    if (r.cost === null) {
-      // Cost and duration are struck now, against health as it actually is —
-      // more blocked-damage could have accrued while queueing. Duration also
-      // reflects the bay's own upgrade tier — tier 0 is the full base rate.
-      const missing = inst.def.maxHealth - inst.health;
-      const speedMultiplier = bay.def.upgradeTiers?.[bay.upgradeLevel - 1]?.repairSpeedMultiplier ?? 1;
-      r.cost = Math.ceil(missing * bay.def.repair.creditsPerHealth);
-      r.duration = Math.max(0.1, missing * bay.def.repair.secondsPerHealth * speedMultiplier);
-      r.startHealth = inst.health;
+    const speedMultiplier = bay.def.upgradeTiers?.[bay.upgradeLevel - 1]?.repairSpeedMultiplier ?? 1;
+    // secondsPerHealth is the tier-0 pace; a better bay divides it down.
+    const healthPerSecond = 1 / Math.max(1e-3, bay.def.repair.secondsPerHealth * speedMultiplier);
+    const wanted = Math.min(healthPerSecond * dt, inst.def.maxHealth - inst.health);
+    if (wanted <= 0) {
+      this._finishRepair(inst, r, bay);
+      return;
+    }
 
-      if (!this.game.teamOf(inst).spend(r.cost)) {
-        // Balance moved while queueing — release the bay without repairing.
+    // Pay for exactly the health about to be applied. Fractional credit debt
+    // carries between ticks rather than rounding up every frame, which at 60fps
+    // would overcharge by orders of magnitude.
+    const team = this.game.teamOf(inst);
+    r.owed = (r.owed ?? 0) + wanted * bay.def.repair.creditsPerHealth;
+    const due = Math.floor(r.owed);
+    if (due > 0) {
+      if (!team.spend(due)) {
+        // Ran dry mid-repair: stop where it got to, keep what it already paid
+        // for. Not a failure state — the vehicle leaves partially repaired and
+        // can come back once the economy recovers.
         this._leaveBay(inst, bay);
         return;
       }
+      r.owed -= due;
     }
 
-    r.elapsed += dt;
-    const progress01 = Math.min(1, r.elapsed / r.duration);
-    // Health and the LED ring share one progress value, so the last segment
-    // lighting and full health land on the same tick.
-    inst.health = r.startHealth + (inst.def.maxHealth - r.startHealth) * progress01;
-    this._setLed(bay, progress01);
+    inst.health += wanted;
+    this._setLed(bay, inst.health / inst.def.maxHealth);
 
-    if (progress01 >= 1) {
-      inst.health = inst.def.maxHealth;
-      r.state = 'ready';
-      r.readyTimer = 0;
-      this._setRingState(bay, 'ready');
-    }
+    if (inst.health >= inst.def.maxHealth) this._finishRepair(inst, r, bay);
+  }
+
+  _finishRepair(inst, r, bay) {
+    inst.health = inst.def.maxHealth;
+    r.state = 'ready';
+    r.readyTimer = 0;
+    this._setRingState(bay, 'ready');
   }
 
   /** Finished, still parked — held briefly so "ready" (green) actually reads

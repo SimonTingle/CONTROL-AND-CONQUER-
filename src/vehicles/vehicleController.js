@@ -36,6 +36,11 @@ function travelScratch(n) {
   return _needed;
 }
 
+/** Shortest signed representation of an angle, wrapped to [-π, π]. */
+function wrapAngle(a) {
+  return Math.atan2(Math.sin(a), Math.cos(a));
+}
+
 /** One spawned, drivable vehicle. */
 class VehicleInstance {
   constructor(def, spawnPoint, facing, teamId = 0) {
@@ -59,6 +64,10 @@ class VehicleInstance {
     // ground under it actually is.
     this.mode = 'mobile';
     this.sweepPhase = 0;
+    // World-space bearing to whatever combatController wants this turret on,
+    // or null to fall back to the idle scan. Written there, read by
+    // updateTurret — the vehicle itself has no opinion about targets.
+    this.turretAim = null;
     this.speed = 0; // magnitude, for HUD
     this.forwardSpeed = 0; // signed, negative in reverse
     this.throttle = 0;
@@ -266,8 +275,27 @@ class VehicleInstance {
    * forever instead of just the moment it's genuinely pushing against terrain.
    */
   _applyBlockedDamage(dt) {
-    const floor = this.def.maxHealth * BLOCKED_DAMAGE_FLOOR;
-    this.health = Math.max(floor, this.health - BLOCKED_DAMAGE_RATE * dt);
+    this.takeDamage(BLOCKED_DAMAGE_RATE * dt, { floorFraction: BLOCKED_DAMAGE_FLOOR });
+  }
+
+  /**
+   * The single place health ever goes down.
+   *
+   * `floorFraction` is what separates wear from violence. Terrain grinding and
+   * collisions floor at 15% — they are attrition the player is meant to notice
+   * and repair, never a way to lose a vehicle to scenery. Weapon damage passes
+   * no floor, so it alone can reach zero and kill.
+   *
+   * @returns {boolean} true if this was the blow that reduced it to zero — the
+   *   caller (never this method) decides what dying means, since only it knows
+   *   whether there's an entities pipeline to queue the destroy on.
+   */
+  takeDamage(amount, { floorFraction = 0 } = {}) {
+    if (this.dead || amount <= 0) return false;
+    const floor = this.def.maxHealth * floorFraction;
+    const before = this.health;
+    this.health = Math.max(floor, this.health - amount);
+    return before > 0 && this.health <= 0;
   }
 
   /**
@@ -445,16 +473,33 @@ class VehicleInstance {
   /**
    * Traverse the turret.
    *
-   * Armed, it ping-pongs across the fire arc rather than spinning continuously:
-   * a sweep reads as *scanning* where a full rotation reads as broken, it never
-   * has to wrap an angle, and it exercises the same `fireArc` the targeting
-   * model will clamp against once there is something to acquire.
+   * Three branches, in priority order: slew onto a live target, ping-pong
+   * scan when armed with nothing to shoot, stow forward when disarmed.
+   *
+   * The scan is a sweep rather than a continuous spin because a sweep reads
+   * as *scanning* where a full rotation reads as broken, and it never has to
+   * wrap an angle. `turretAim` is written by combatController each tick and
+   * is a world-space bearing; converting it to a turret-local angle here (and
+   * not there) keeps every angle this class exposes in its own frame.
    */
   updateTurret(dt) {
     const turret = this.group.userData.turret;
     if (!turret) return;
 
-    if (this.mode === 'armed') {
+    if (this.mode === 'armed' && this.turretAim != null) {
+      // Shortest way round to the target bearing, expressed turret-locally,
+      // then clamped into the arc so a gun can never point through its own
+      // hull to reach something behind it.
+      const half = this.def.turret.fireArc / 2;
+      const local = wrapAngle(this.turretAim - this.heading);
+      const wanted = THREE.MathUtils.clamp(local, -half, half);
+      const delta = wrapAngle(wanted - turret.rotation.y);
+      const maxStep = this.def.turret.rotationRate * dt;
+      turret.rotation.y += THREE.MathUtils.clamp(delta, -maxStep, maxStep);
+      // Resume the scan from where the barrel actually is, not from wherever
+      // the sine happened to be when a target appeared.
+      this.sweepPhase = Math.asin(THREE.MathUtils.clamp(turret.rotation.y / half, -1, 1));
+    } else if (this.mode === 'armed') {
       this.sweepPhase += dt * this.def.turret.sweepRate;
       turret.rotation.y = Math.sin(this.sweepPhase) * (this.def.turret.fireArc / 2);
     } else if (turret.rotation.y !== 0) {
@@ -463,6 +508,12 @@ class VehicleInstance {
       if (Math.abs(turret.rotation.y) < 1e-3) turret.rotation.y = 0;
       this.sweepPhase = 0;
     }
+  }
+
+  /** World-space bearing the barrel is actually pointing right now. */
+  get turretBearing() {
+    const turret = this.group.userData.turret;
+    return this.heading + (turret ? turret.rotation.y : 0);
   }
 
   updateLOD(camera) {
