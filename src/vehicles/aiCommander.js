@@ -48,11 +48,21 @@ const ADVANCE_DETOURS = [0.8, -0.8, 1.5, -1.5, 2.3, -2.3];
 // waits before its first action — the standard skirmish-AI knobs. Keyed by
 // AI_DIFFICULTIES' own id (ui/aiDifficultyScreen.js) rather than duplicating
 // the tier data here.
+// harvesterCap does not scale with difficulty, on purpose: _manageEconomy
+// always tries an economy purchase before ever trying a combat one (see
+// below), so the cap is really "how many harvester purchases happen before
+// combat starts being the regular priority." A higher tier spending its way
+// through a bigger cap at 600cr each just means more pure-economy spend
+// before a gun platform gets a look in — that was most of what made AI
+// matches take 10+ minutes to turn violent, and difficulty already has two
+// knobs built for "scarier at higher tiers" that don't carry that cost:
+// buildInterval (how often it acts at all) and combatCap/attackAt (how big
+// and how eager its army gets once it exists).
 const DIFFICULTY_ECONOMY = {
   easy: { harvesterCap: 2, buildInterval: 20, combatCap: 1, attackAt: 2 },
-  normal: { harvesterCap: 3, buildInterval: 15, combatCap: 3, attackAt: 2 },
-  hard: { harvesterCap: 4, buildInterval: 11, combatCap: 5, attackAt: 3 },
-  expert: { harvesterCap: 5, buildInterval: 8, combatCap: 7, attackAt: 3 },
+  normal: { harvesterCap: 2, buildInterval: 15, combatCap: 3, attackAt: 2 },
+  hard: { harvesterCap: 2, buildInterval: 11, combatCap: 5, attackAt: 3 },
+  expert: { harvesterCap: 2, buildInterval: 8, combatCap: 7, attackAt: 3 },
 };
 const DEFAULT_ECONOMY = DIFFICULTY_ECONOMY.normal;
 

@@ -205,9 +205,15 @@ export const VEHICLE_CATALOG = [
     unlock: null,
     maxHealth: 220,
 
-    capacity: 240, // stock units carried
-    fillRate: 40, // units/second drawn from a field
-    unloadRate: 80, // units/second delivered to a facility
+    // 240→320 as part of the AI-pacing balance pass. Measured directly (a
+    // 120s window against a live AI economy): travel is ~90% of a real round
+    // trip, so fillRate/unloadRate — the other ~10% — have very little room
+    // to move the needle on income rate. Capacity does, directly: more cargo
+    // per trip for the same travel cost. Shared with the player's own
+    // economy, not just AI teams; a bigger haul is a win either way.
+    capacity: 320, // stock units carried
+    fillRate: 48, // units/second drawn from a field
+    unloadRate: 96, // units/second delivered to a facility
 
     sightRadius: 38,
     speed: 14,
@@ -282,7 +288,11 @@ export const VEHICLE_CATALOG = [
     // from the drawer, so it costs what the economy says it costs.
     spawnable: false,
     producedBy: 'harvester-facility',
-    cost: 900,
+    // A real step up from a harvester's 600 (it's a combat asset, priced like
+    // one), but not so far above it that an economy has to run several build
+    // cycles deep before affording one — that gap was most of why an
+    // unattended AI match took 10+ minutes to turn violent.
+    cost: 650,
     unlock: null,
     maxHealth: 400,
 
