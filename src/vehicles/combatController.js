@@ -206,7 +206,10 @@ export class CombatController {
   }
 
   _fire(inst, target) {
-    inst._fireCooldown = inst.def.turret.fireInterval;
+    // Team-wide Weapon Tier upgrade (see core/team.js) — divides the interval,
+    // not the damage, so a fully upgraded team's guns are simply faster, not
+    // individually harder-hitting.
+    inst._fireCooldown = inst.def.turret.fireInterval / this.game.teamOf(inst).fireRateMultiplier;
 
     // Tell the victim it is under fire, and from where. Read by harvesterAI's
     // FLEEING state; anything that ignores these fields simply stands its
@@ -223,7 +226,14 @@ export class CombatController {
       inst.combatTarget = null;
     }
 
-    this.onShot?.(inst.group.position, targetPoint(target), inst.teamId, inst.def.turret.muzzleHeight ?? DEFAULT_TARGET_HEIGHT, targetHeight(target));
+    this.onShot?.(
+      inst.group.position,
+      targetPoint(target),
+      inst.teamId,
+      inst.def.turret.muzzleHeight ?? DEFAULT_TARGET_HEIGHT,
+      targetHeight(target),
+      inst.def.turret
+    );
   }
 }
 

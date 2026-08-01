@@ -19,6 +19,19 @@ const AI_NAMES = ['Crimson', 'Amber', 'Violet', 'Jade'];
 const AI_COLORS = [0xd6455a, 0xd98c2b, 0x9457c9, 0x3fa66b];
 const PLAYER_COLOR = 0x4fd1c5;
 
+/**
+ * Fire-rate upgrade, bought at an Armed Factory — team-scoped rather than
+ * per-building or per-vehicle, because the scout isn't produced by any
+ * structure and still has to benefit. `combatController` divides a shooter's
+ * `fireInterval` by its team's current multiplier; every combat vehicle gets
+ * faster automatically, present and future, with no per-vehicle wiring.
+ */
+export const WEAPON_TIERS = [
+  { cost: 800, fireRateMultiplier: 1.25 },
+  { cost: 1600, fireRateMultiplier: 1.55 },
+  { cost: 2800, fireRateMultiplier: 1.9 },
+];
+
 export class Team {
   /**
    * @param {number} id
@@ -49,6 +62,10 @@ export class Team {
     // its wreckage in the world; it just stops being driven or counted.
     this.defeated = false;
 
+    // Index into WEAPON_TIERS — see there for why this lives on the team
+    // rather than a structure or a vehicle instance.
+    this.weaponTier = 0;
+
     // Match record, for the end-of-match summary. `creditsEarned` is lifetime
     // income rather than the live balance — spending is what a team is *for*,
     // so a balance of zero says nothing about how well its economy ran.
@@ -73,6 +90,11 @@ export class Team {
     if (this.credits < n) return false;
     this.credits -= n;
     return true;
+  }
+
+  /** How much faster this team's combat vehicles fire than the catalog base rate. */
+  get fireRateMultiplier() {
+    return WEAPON_TIERS[this.weaponTier - 1]?.fireRateMultiplier ?? 1;
   }
 }
 

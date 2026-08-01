@@ -864,48 +864,120 @@ structures.onComplete = (instance) => {
   produceUnit(vehicles.defOf(instance.def.produces[0]), instance);
 };
 
-// ---- combat visuals: tracers and wreckage ----
+// ---- combat visuals: projectiles and wreckage ----
 
-// A small fixed pool of reusable line segments. Shots are frequent and short-
-// lived, so building a mesh per shot would allocate (and need disposing)
-// dozens of times a second; the pool caps that at a constant.
-const TRACER_POOL_SIZE = 24;
-const TRACER_LIFETIME = 0.09; // seconds
+// A small fixed pool of reusable projectile bundles. Shots are frequent and
+// short-lived, so building meshes per shot would allocate (and need
+// disposing) dozens of times a second; the pool caps that at a constant.
+// Bumped from the old instant-flash tracer's 24: a real travel time means
+// several shots are genuinely in flight at once during a multi-unit fight,
+// not just lit for a single frame.
+const TRACER_POOL_SIZE = 48;
+const DEFAULT_PROJECTILE_SPEED = 160; // world units/second, when a turret doesn't specify its own
+const IMPACT_FLASH_DURATION = 0.12; // seconds
+
 const tracers = [];
 for (let i = 0; i < TRACER_POOL_SIZE; i++) {
-  const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
-  const mat = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.9 });
-  const line = new THREE.Line(geo, mat);
-  line.visible = false;
-  line.frustumCulled = false; // endpoints move every use; a stale bound would pop
-  world.scene.add(line);
-  tracers.push({ line, mat, timer: 0 });
+  const coreMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1 });
+  const glowMat = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.35,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  const core = new THREE.Mesh(new THREE.SphereGeometry(0.35, 8, 6), coreMat);
+  const glow = new THREE.Mesh(new THREE.SphereGeometry(0.75, 8, 6), glowMat);
+  core.visible = false;
+  glow.visible = false;
+  core.frustumCulled = false; // position moves every frame; a stale bound would pop
+  glow.frustumCulled = false;
+  world.scene.add(core, glow);
+  tracers.push({
+    core,
+    glow,
+    coreMat,
+    glowMat,
+    from: new THREE.Vector3(),
+    to: new THREE.Vector3(),
+    elapsed: 0,
+    duration: 0,
+    phase: 'idle', // 'idle' | 'travel' | 'impact'
+  });
 }
 let nextTracer = 0;
 
-/** Draw a shot that has *already* been resolved — purely cosmetic. */
-function showTracer(from, to, teamId, fromHeight, toHeight) {
+/**
+ * Draw a shot that has *already* been resolved — purely cosmetic. Unlike the
+ * damage it represents, the visual has a real (short) travel time: a small
+ * glowing sphere flies from muzzle to the already-decided impact point, then
+ * flashes white and dissipates. If the shot was lethal, the target's
+ * wreckage can appear slightly before the projectile visually arrives at
+ * where it used to be — the same "purely cosmetic" tradeoff this always
+ * made, just stretched over a longer visible window than the old instant flash.
+ */
+function showTracer(from, to, teamId, fromHeight, toHeight, turretDef) {
   const t = tracers[nextTracer];
   nextTracer = (nextTracer + 1) % TRACER_POOL_SIZE;
-  const pos = t.line.geometry.attributes.position;
-  pos.setXYZ(0, from.x, heightmap.heightAt(from.x, from.z) + fromHeight, from.z);
-  pos.setXYZ(1, to.x, heightmap.heightAt(to.x, to.z) + toHeight, to.z);
-  pos.needsUpdate = true;
-  // Team colour, so an unattended AI-vs-AI fight is readable at a glance.
-  t.mat.color.setHex(game.teams[teamId]?.color ?? 0xffffff);
-  t.line.visible = true;
-  t.timer = TRACER_LIFETIME;
+
+  t.from.set(from.x, heightmap.heightAt(from.x, from.z) + fromHeight, from.z);
+  t.to.set(to.x, heightmap.heightAt(to.x, to.z) + toHeight, to.z);
+
+  const dist = t.from.distanceTo(t.to);
+  const speed = turretDef?.projectileSpeed ?? DEFAULT_PROJECTILE_SPEED;
+  t.duration = Math.max(1e-3, dist / speed);
+  t.elapsed = 0;
+  t.phase = 'travel';
+
+  // Weapon-colored when the turret specifies one; team colour otherwise, so
+  // an unattended AI-vs-AI fight stays readable even for weapons that never
+  // got their own projectileColor.
+  const color = turretDef?.projectileColor ?? game.teams[teamId]?.color ?? 0xffffff;
+  t.coreMat.color.setHex(color);
+  t.coreMat.opacity = 1;
+  t.glowMat.color.setHex(color);
+  t.glowMat.opacity = 0.35;
+  t.core.scale.setScalar(1);
+  t.glow.scale.setScalar(1);
+  t.core.position.copy(t.from);
+  t.glow.position.copy(t.from);
+  t.core.visible = true;
+  t.glow.visible = true;
 }
 
 function updateTracers(dt) {
   for (const t of tracers) {
-    if (!t.line.visible) continue;
-    t.timer -= dt;
-    if (t.timer <= 0) {
-      t.line.visible = false;
+    if (t.phase === 'idle') continue;
+    t.elapsed += dt;
+
+    if (t.phase === 'travel') {
+      const frac = Math.min(1, t.elapsed / t.duration);
+      t.core.position.lerpVectors(t.from, t.to, frac);
+      t.glow.position.copy(t.core.position);
+      if (frac >= 1) {
+        // Arrived: flash white and start dissipating.
+        t.phase = 'impact';
+        t.elapsed = 0;
+        t.coreMat.color.setHex(0xffffff);
+        t.glowMat.color.setHex(0xffffff);
+        t.core.scale.setScalar(1.8);
+        t.glow.scale.setScalar(2.2);
+      }
       continue;
     }
-    t.mat.opacity = Math.max(0, t.timer / TRACER_LIFETIME) * 0.9;
+
+    // phase === 'impact': scale up a little further while fading out.
+    const frac = Math.min(1, t.elapsed / IMPACT_FLASH_DURATION);
+    t.coreMat.opacity = 1 - frac;
+    t.glowMat.opacity = 0.35 * (1 - frac);
+    const scale = 1.8 + frac * 0.6;
+    t.core.scale.setScalar(scale);
+    t.glow.scale.setScalar(scale * 1.2);
+    if (frac >= 1) {
+      t.phase = 'idle';
+      t.core.visible = false;
+      t.glow.visible = false;
+    }
   }
 }
 
@@ -1502,4 +1574,5 @@ Object.assign(window, {
   syncQueueIcons, queueIcons, checkBaseRepositioning,
   updatePlacementPreview, placementPreview, snapToGrid, footprintSize, resizeFootprintOutline,
   entities, pendingRespawns, pickSelectable, combatController, leaveWreckage,
+  showTracer, updateTracers, tracers, tick,
 });
