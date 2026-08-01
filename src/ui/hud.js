@@ -58,6 +58,25 @@ export class Hud {
    * @param {boolean} o.economyActive whether there is an economy to report yet
    * @param {number} o.load cargo aboard the selected vehicle
    */
+  /**
+   * Just the health bar, split out so it can run every frame.
+   *
+   * The rest of `update` is polled twice a second, which is ample for a
+   * percentage or a credit balance but far too slow once something is being
+   * shot: at that cadence a unit can take several hits — or die outright —
+   * between readings, so the bar appears to jump or never move at all. Health
+   * is the one number that has to track the simulation frame for frame.
+   */
+  updateHealth(vehicle) {
+    if (!vehicle) return;
+    const max = vehicle.def.maxHealth;
+    const pct = Math.max(0, Math.min(1, vehicle.health / max));
+    this.healthBar.style.width = `${pct * 100}%`;
+    this.healthLabel.textContent = `${Math.round(vehicle.health)} / ${max}`;
+    // Reads as damage at a glance without needing the number.
+    this.healthBar.classList.toggle('hud-health-critical', pct <= 0.3);
+  }
+
   update({ vehicle, explored, difficulty, unlocked, credits = 0, economyActive = false, load = 0 }) {
     const capacity = vehicle?.def?.capacity ?? 0;
     // Discovery is the scout's job, so it only earns screen space while the
@@ -77,10 +96,7 @@ export class Hud {
 
     if (vehicle) {
       this.name.textContent = vehicle.def.name;
-      const max = vehicle.def.maxHealth;
-      const pct = Math.max(0, Math.min(1, vehicle.health / max));
-      this.healthBar.style.width = `${pct * 100}%`;
-      this.healthLabel.textContent = `${Math.round(vehicle.health)} / ${max}`;
+      this.updateHealth(vehicle);
     }
 
     if (capacity) {

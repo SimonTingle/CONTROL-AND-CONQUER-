@@ -423,7 +423,19 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
     #46e08a 0 5px,
     transparent 5px 8px
   );
-  transition: width 0.25s ease;
+  /* Short enough that a hit reads as immediate — the bar is updated every
+     frame now, so a longer ease would smear several hits into one motion. */
+  transition: width 0.12s linear;
+}
+
+/* Critically damaged: the same 30% threshold at which an unattended vehicle
+   takes itself off to a repair bay, so the colour and the behaviour agree. */
+.hud-health-fill.hud-health-critical {
+  background: repeating-linear-gradient(
+    90deg,
+    #ff5a5a 0 5px,
+    transparent 5px 8px
+  );
 }
 
 .hud-line {
@@ -767,6 +779,60 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
 @media (max-width: 620px) {
   .portal-grid { grid-template-columns: 1fr; }
 }
+
+/* ---- match end (victory / defeat) ---- */
+
+#match-end {
+  position: fixed;
+  inset: 0;
+  z-index: 33; /* above every setup screen — nothing outranks the result */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(5, 8, 12, 0.94);
+  backdrop-filter: blur(6px);
+  transition: opacity 0.35s ease;
+}
+
+#match-end.hidden { opacity: 0; pointer-events: none; }
+
+.match-end-panel { max-width: 620px; }
+
+.match-end-win { color: #39ff6a !important; }
+.match-end-lose { color: #ff5a5a !important; }
+
+.match-summary {
+  width: 100%;
+  margin: 20px 0 24px;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.match-summary th {
+  text-align: right;
+  padding: 6px 10px;
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.match-summary th:first-child,
+.match-summary td:first-child { text-align: left; }
+
+.match-summary td {
+  text-align: right;
+  padding: 7px 10px;
+  color: var(--text);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+/* An eliminated team's row reads as history, not standings. */
+.match-summary tr.defeated td { opacity: 0.45; }
 
 /* ---- AI difficulty select ---- */
 

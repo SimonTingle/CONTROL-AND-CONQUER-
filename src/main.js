@@ -26,6 +26,7 @@ import { RepairController } from './vehicles/repairController.js';
 import { TrafficController } from './vehicles/trafficController.js';
 import { AiCommander } from './vehicles/aiCommander.js';
 import { CombatController } from './vehicles/combatController.js';
+import { MatchEndScreen } from './ui/matchEndScreen.js';
 import { Terraform } from './core/terraform.js';
 import { StructureController } from './structures/structures.js';
 import { Entities } from './core/entities.js';
@@ -717,6 +718,10 @@ const game = {
   // Empty until beginMatch populates it for a Multiplayer AI match — tick()
   // iterates this every frame regardless of mode, so it must never be null.
   aiCommanders: [],
+  matchEndScreen: null,
+  // Latched once a result is decided, so the end screen is shown exactly once
+  // and the world stops being driven behind it.
+  matchOver: false,
   // Sandbox is a one-team match, so this is never empty and nothing has to
   // special-case "no teams". Rebuilt by beginMatch once the mode is known.
   teams: createTeams(0),
@@ -802,6 +807,11 @@ function isSpawnLocationViable(facilityX, facilityZ, spawnX, spawnZ, maxClimbGra
  * the vehicle in terrain it cannot escape from.
  */
 function produceUnit(def, facility) {
+  // The single choke point every produced unit passes through, so the match
+  // record is counted once here rather than at each of the call sites that
+  // can order one.
+  game.teamOf(facility).stats.unitsBuilt++;
+
   const angles = [0, 0.9, -0.9, 1.6, -1.6, 2.4];
   const maxClimbGrade = def.maxClimbGrade ?? 0.62;
   let dockOffset = facility.def.dockOffset;
@@ -844,6 +854,9 @@ function produceUnit(def, facility) {
 // the first harvester could never be afforded — nothing earns credits until one
 // exists.
 structures.onComplete = (instance) => {
+  // Fires once per finished building whoever placed it — the structure
+  // equivalent of produceUnit's single choke point.
+  game.teamOf(instance).stats.structuresBuilt++;
   if (!instance.def.freeUnitOnComplete) return;
   // produces[0] by convention — the economy unit. A facility must never
   // bootstrap a team with a free combat vehicle.
@@ -952,6 +965,14 @@ entities.onDestroy((inst) => {
 // The record of what died here, placed while the instance still knows where
 // it was — vehicles.remove/structures.remove below drop that.
 entities.onDestroy((inst) => leaveWreckage(inst));
+// Match record. Counted here rather than at the kill site so *every* cause of
+// death lands in the tally, not just weapons.
+entities.onDestroy((inst) => {
+  const stats = game.teamOf(inst)?.stats;
+  if (!stats) return;
+  if (inst.kind === 'structure') stats.structuresLost++;
+  else stats.unitsLost++;
+});
 // The radial menu holds a direct reference, not a lookup — nothing else
 // would ever notice it's pointed at a dead instance.
 entities.onDestroy((inst) => {
@@ -1002,6 +1023,47 @@ function handleVehicleLoss(inst) {
   // null, so there is nothing else to arrange for the gap before the respawn.
   vehicles.active = null;
   pendingRespawns.push({ teamId: inst.teamId, timer: RESPAWN_DELAY });
+}
+
+/**
+ * Eliminate any team that has lost its base station, and end the match once
+ * one side is left standing.
+ *
+ * Base-station-destroyed is the whole rule, and the base is a *mobile*
+ * vehicle with a relocate command — so a losing team can genuinely drive its
+ * base out of danger rather than watch it die. That falls out for free and is
+ * worth keeping.
+ *
+ * Only runs for Multiplayer AI: sandbox has one team, and "you have no base"
+ * is a normal state there (you start without one and earn it).
+ */
+function checkMatchEnd() {
+  if (game.mode !== 'multiplayer-ai' || game.matchOver) return;
+
+  for (const team of game.teams) {
+    if (team.defeated) continue;
+    const hasBase = vehicles.instances.some(
+      (v) => !v.dead && v.teamId === team.id && v.def.id === 'base-station'
+    );
+    if (hasBase) continue;
+    team.defeated = true;
+    // A defeated team stops thinking. Its units are left where they are —
+    // wreckage and stragglers are part of the record of the match.
+    const commander = game.aiCommanders.find((c) => c.team.id === team.id);
+    if (commander) commander.team.defeated = true;
+  }
+
+  const alive = game.teams.filter((t) => !t.defeated);
+  // Not over while two or more are still standing.
+  if (alive.length > 1) return;
+
+  game.matchOver = true;
+  const winner = alive[0] ?? null;
+  game.matchEndScreen.show({
+    playerWon: !!winner?.isHuman,
+    winner,
+    teams: game.teams,
+  });
 }
 
 /** Frame-counted, not setTimeout — so it advances correctly under
@@ -1098,6 +1160,7 @@ function updateProgression(explored) {
  * any per-mode extras (like the AI match config) differ. */
 function beginMatch(difficulty) {
   game.difficulty = difficulty;
+  game.matchOver = false;
   // Sandbox is a one-team match; Multiplayer AI adds one team per AI opponent.
   game.teams = createTeams(game.aiMatch?.teamCount ?? 0);
 
@@ -1191,6 +1254,14 @@ game.aiDifficultyScreen = new AiDifficultyScreen(({ difficulty, teamCount, build
   beginMatch(difficulty);
 });
 
+game.matchEndScreen = new MatchEndScreen(() => {
+  // Simplest honest "play again": a full reload puts every system back to a
+  // known-clean state. Rebuilding a match in place would mean unwinding the
+  // world, the fleet, the fog masks, the commanders and the destroy queue
+  // by hand, and any one of those missed is a subtle cross-match bug.
+  location.reload();
+});
+
 game.portalScreen = new PortalScreen((modeId) => {
   if (modeId === 'sandbox') game.difficultyScreen.show();
   else if (modeId === 'multiplayer-ai') game.aiDifficultyScreen.show();
@@ -1236,7 +1307,7 @@ function tick(dt, { render = true } = {}) {
   // decisions need this frame's harvester targets already set (so it isn't
   // second-guessing an order harvesterAI just issued) and have to land before
   // trafficController reads what everyone is driving toward.
-  for (const commander of game.aiCommanders) commander.update(dt);
+  if (!game.matchOver) for (const commander of game.aiCommanders) commander.update(dt);
   // After harvesterAI: a repairing harvester is already paused by the check
   // above, so this is the only thing setting its target this frame.
   repairController.update(dt);
@@ -1295,12 +1366,19 @@ function tick(dt, { render = true } = {}) {
   // view rather than lagging it by one.
   terraform.update(dt);
   checkBaseRepositioning();
+  // After entities.flush() above, so "does this team still have a base" is
+  // asked of a fleet with this tick's deaths already removed rather than one
+  // still holding a corpse.
+  checkMatchEnd();
   updateRespawns(dt);
   radialMenu.update();
 
   if (!render) return;
 
   updateTracers(dt);
+  // Per-frame, unlike the rest of the HUD's half-second poll — see
+  // Hud.updateHealth for why health specifically cannot wait.
+  hud.updateHealth(vehicles.active);
   updateMarker(clock.elapsedTime);
   updateHarvestMarker(clock.elapsedTime);
   updatePlacementPreview(lastX, lastY);

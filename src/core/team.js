@@ -48,10 +48,22 @@ export class Team {
     // Set when this team's base station is destroyed. A defeated team keeps
     // its wreckage in the world; it just stops being driven or counted.
     this.defeated = false;
+
+    // Match record, for the end-of-match summary. `creditsEarned` is lifetime
+    // income rather than the live balance — spending is what a team is *for*,
+    // so a balance of zero says nothing about how well its economy ran.
+    this.stats = {
+      creditsEarned: 0,
+      unitsBuilt: 0,
+      unitsLost: 0,
+      structuresBuilt: 0,
+      structuresLost: 0,
+    };
   }
 
   earn(n) {
     this.credits += n;
+    this.stats.creditsEarned += n;
     if (this.credits >= 50000) this.reachedRelocateThreshold = true;
     return this.credits;
   }
