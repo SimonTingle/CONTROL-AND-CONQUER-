@@ -36,6 +36,10 @@ export class Team {
     this.isHuman = isHuman;
     this.fog = fog;
 
+    // Set by match setup once this team's base is placed. A stable respawn
+    // anchor that survives the base station itself dying.
+    this.homePoint = null;
+
     this.credits = 0;
     // Latched, the same way the vehicle unlock is: relocating spends nothing,
     // so without a latch a team that crossed the threshold could spend back

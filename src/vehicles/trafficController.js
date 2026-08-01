@@ -224,4 +224,16 @@ export class TrafficController {
     this._cooldowns.get(a).set(b, COLLISION_COOLDOWN);
     this._cooldowns.get(b).set(a, COLLISION_COOLDOWN);
   }
+
+  /**
+   * Drop this instance's cooldown bookkeeping immediately, both as an outer
+   * key and as anything another vehicle's inner map still holds against it.
+   * `_tickCooldowns` would eventually self-clean these anyway (every entry
+   * decays to zero within COLLISION_COOLDOWN seconds), but there's no reason
+   * to let a destroyed instance linger as a Map key even that briefly.
+   */
+  onDestroy(inst) {
+    this._cooldowns.delete(inst);
+    for (const others of this._cooldowns.values()) others.delete(inst);
+  }
 }

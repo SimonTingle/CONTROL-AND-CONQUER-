@@ -468,6 +468,28 @@ export class HarvesterAI {
   }
 
   /**
+   * A harvester dying releases whatever dock/queue claim it held, then drops
+   * its state entirely. A facility dying needs no equivalent here: every
+   * state that depends on one — `_atDock`, `_waitingForDock`, `_unload`, and
+   * `_destination`'s TO_BASE case — re-resolves `_facility(inst)` fresh each
+   * tick rather than holding a reference, so once the dead facility is gone
+   * from `structures.instances` those calls simply start returning null and
+   * every harvester that was headed there self-heals to IDLE on its own.
+   */
+  onDestroy(inst) {
+    if (inst.kind !== 'vehicle') return;
+    const s = this.states.get(inst);
+    if (s) {
+      const facility = this._facility(inst);
+      if (facility) {
+        this._releaseDock(facility, inst);
+        this._releaseQueueSlot(facility, s);
+      }
+    }
+    this.states.delete(inst);
+  }
+
+  /**
    * What to resume into once manual driving, an open menu, or a repair trip
    * ends. Docking and queueing hold an exclusive reservation — the dock slot,
    * a queue ring position — that a forced pause can't honestly keep: the

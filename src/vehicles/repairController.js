@@ -322,6 +322,29 @@ export class RepairController {
     r.queuePosition = null;
   }
 
+  /**
+   * Two directions. A vehicle dying releases whatever dock/queue claim it
+   * held on its bay. A repair bay dying releases every vehicle that was
+   * using it — unlike harvesterAI's facility lookup, `_toBay`/`_queued`/
+   * `_repairing` hold a direct `r.bay` reference rather than re-resolving one
+   * each tick, so nothing else would ever notice the bay is gone and a
+   * vehicle could sit forever "repairing" at a structure that no longer
+   * exists.
+   */
+  onDestroy(inst) {
+    if (inst.kind === 'structure') {
+      if (inst.def.id !== 'repair-bay') return;
+      for (const v of this.vehicles.instances) {
+        if (v.repair?.bay === inst) v.repair = null;
+      }
+      return;
+    }
+    const r = inst.repair;
+    if (!r) return;
+    if (r.queuePosition != null) this._releaseQueuePosition(r.bay, r);
+    this._leaveBay(inst, r.bay);
+  }
+
   _setLed(bay, progress01) {
     const cells = bay.group.userData.ledCells;
     if (!cells) return;

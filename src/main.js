@@ -26,6 +26,7 @@ import { RepairController } from './vehicles/repairController.js';
 import { TrafficController } from './vehicles/trafficController.js';
 import { Terraform } from './core/terraform.js';
 import { StructureController } from './structures/structures.js';
+import { Entities } from './core/entities.js';
 
 const canvas = document.getElementById('viewport');
 
@@ -74,7 +75,10 @@ function showMarker(point) {
 function updateMarker(elapsed) {
   if (!marker.visible) return;
 
-  if (vehicles.active && !vehicles.active.hasOrder) {
+  // No active vehicle (it just died, or nothing has spawned) leaves nothing
+  // for the marker to stand for — `active && !active.hasOrder` alone would
+  // never trip on a null active, and the ball would bob forever.
+  if (!vehicles.active || !vehicles.active.hasOrder) {
     marker.visible = false;
     return;
   }
@@ -123,8 +127,11 @@ function updateHarvestMarker(elapsed) {
   if (!harvestMarkerFor) return;
 
   // The driver clears targetField the moment it acts on it, so this covers
-  // "picked up", "superseded by a newer pick" and "wiped by a regenerate" alike.
-  if (harvestMarkerFor.harvester.targetField !== harvestMarkerFor.field) {
+  // "picked up", "superseded by a newer pick" and "wiped by a regenerate"
+  // alike. `.dead` covers the one thing that doesn't touch targetField at
+  // all — the harvester being destroyed outright, which would otherwise
+  // leave this bobbing over an empty field forever.
+  if (harvestMarkerFor.harvester.dead || harvestMarkerFor.harvester.targetField !== harvestMarkerFor.field) {
     hideHarvestMarker();
     return;
   }
@@ -327,6 +334,10 @@ const vehicles = new VehicleController(world.scene);
 
 const terraform = new Terraform(world);
 const structures = new StructureController(world.scene, vehicles);
+// The one destroy pipeline every killable thing routes through — see
+// core/entities.js. Hooks are registered once every system that needs one
+// exists, further down.
+const entities = new Entities();
 
 const chase = new ChaseCamera(camera, heightmap);
 
@@ -493,10 +504,15 @@ canvas.addEventListener('pointerup', (e) => {
       });
       if (field) {
         const { harvester } = commandContext.harvestSelectMode;
-        harvester.targetField = field;
-        // Anchored to the field's centre, not the click: it has to be obvious
-        // *which* field was taken, even when the click landed out at the edge.
-        showHarvestMarker(harvester, field);
+        // The harvester this mode was opened for can have been destroyed
+        // while the player was still aiming the click.
+        if (!harvester.dead) {
+          harvester.targetField = field;
+          // Anchored to the field's centre, not the click: it has to be
+          // obvious *which* field was taken, even when the click landed out
+          // at the edge.
+          showHarvestMarker(harvester, field);
+        }
       }
     }
     commandContext.harvestSelectMode = null;
@@ -608,6 +624,13 @@ addEventListener('keydown', (e) => {
     game.portalScreen?.open || game.difficultyScreen?.open || game.aiDifficultyScreen?.open;
   if (k in driveKeys && !isTextInputFocused() && !overlayOpen) driveKeys[k] = true;
   if (e.key === 'Escape' && commandContext.buildPlacementMode) cancelPlacementMode();
+  // Debug: destroy whatever's under the cursor — 2B's destroy pipeline has
+  // nothing to trigger it yet (combat is 2D), so this is its only way to run
+  // until then.
+  if (k === 'k' && !isTextInputFocused() && !overlayOpen) {
+    const target = pickSelectable(lastX, lastY);
+    if (target) entities.queueDestroy(target);
+  }
 });
 addEventListener('keyup', (e) => {
   const k = e.key.toLowerCase();
@@ -824,6 +847,92 @@ const harvesterAI = new HarvesterAI({ vehicles, world, heightmap, structures, ga
 const repairController = new RepairController({ vehicles, structures, heightmap, game });
 const trafficController = new TrafficController({ vehicles });
 
+// ---- destroy pipeline: every system that owns instance-keyed state
+// registers its own cleanup hook, in the order it needs to run.
+
+// Reservation/state cleanup first, while the instance's own fields (teamId,
+// repair, etc.) are still intact for these to read.
+entities.onDestroy((inst) => harvesterAI.onDestroy(inst));
+entities.onDestroy((inst) => repairController.onDestroy(inst));
+entities.onDestroy((inst) => trafficController.onDestroy(inst));
+// The radial menu holds a direct reference, not a lookup — nothing else
+// would ever notice it's pointed at a dead instance.
+entities.onDestroy((inst) => {
+  if (radialMenu.instance === inst) radialMenu.close();
+});
+// The vehicle the player is driving needs a replacement lined up before
+// anything downstream (queueIcons, the marker fixes above, chase) has to
+// cope with `vehicles.active` going away.
+entities.onDestroy((inst) => handleVehicleLoss(inst));
+// The actual removal — splice out of the owning collection and free the
+// mesh — runs last, once every hook above has had a chance to read the
+// instance's live state.
+entities.onDestroy((inst) => {
+  if (inst.kind === 'vehicle') vehicles.remove(inst);
+  else if (inst.kind === 'structure') structures.remove(inst);
+});
+
+const RESPAWN_DELAY = 3; // seconds before a team with nothing left gets a fresh scout
+const pendingRespawns = []; // { teamId, timer }
+
+/**
+ * The vehicle the player is driving just died. Hand control to another unit
+ * of theirs if one survives; otherwise queue a fresh scout at their home
+ * point after a short delay rather than leaving them locked out mid-match.
+ * A no-op for every AI team and for any vehicle that wasn't the driven one.
+ */
+function handleVehicleLoss(inst) {
+  if (inst.kind !== 'vehicle' || vehicles.active !== inst) return;
+
+  const pos = inst.group.position;
+  let survivor = null;
+  let bestDist = Infinity;
+  for (const v of vehicles.instances) {
+    if (v.teamId !== inst.teamId || v === inst || v.dead) continue;
+    const d = Math.hypot(v.group.position.x - pos.x, v.group.position.z - pos.z);
+    if (d < bestDist) {
+      bestDist = d;
+      survivor = v;
+    }
+  }
+  if (survivor) {
+    vehicles.setActive(survivor);
+    if (chase.enabled) chase.reset(survivor);
+    return;
+  }
+
+  // isChasing() already falls back to free MapControls whenever `active` is
+  // null, so there is nothing else to arrange for the gap before the respawn.
+  vehicles.active = null;
+  pendingRespawns.push({ teamId: inst.teamId, timer: RESPAWN_DELAY });
+}
+
+/** Frame-counted, not setTimeout — so it advances correctly under
+ * window.__step's synthetic ticks too, not just real wall-clock frames. */
+function updateRespawns(dt) {
+  for (let i = pendingRespawns.length - 1; i >= 0; i--) {
+    const r = pendingRespawns[i];
+    r.timer -= dt;
+    if (r.timer > 0) continue;
+    pendingRespawns.splice(i, 1);
+
+    const team = game.teams[r.teamId];
+    // The player already took control of something else in the meantime —
+    // the free scout would be an unwanted extra, not a rescue.
+    if (!team || (team.isHuman && vehicles.active)) continue;
+
+    const scoutDef = vehicles.defOf('scout-buggy');
+    const origin = team.homePoint ?? { x: 0, z: 0 };
+    const spot = findSpawnPointNear(heightmap, origin, { minRadius: 10, maxRadius: 60, camera });
+    spot.point.y += 0.05;
+    const inst = vehicles.spawn(scoutDef, spot.point, spot.heading, {
+      teamId: r.teamId,
+      activate: team.isHuman,
+    });
+    if (team.isHuman && chase.enabled) chase.reset(inst);
+  }
+}
+
 /** Everything a command might need, so commands.js imports no game systems. */
 const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit };
 
@@ -938,6 +1047,10 @@ function deployStartingForces() {
   game.teams.forEach((team, i) => {
     const { point, heading } = starts[i];
     point.y += 0.05; // avoid z-fighting with the ground on the spawn frame
+    // A stable anchor for this team even after the base itself is gone —
+    // the respawn-a-scout fallback (see handleVehicleLoss) needs somewhere
+    // to aim that doesn't depend on the base station surviving.
+    team.homePoint = { x: point.x, z: point.z };
 
     // findEdgeSpawnPointAtAngle faces a vehicle back toward the map centre,
     // which for the base station reads as facing out to sea — the same flip
@@ -1014,6 +1127,13 @@ function tick(dt, { render = true } = {}) {
   vehicles.update(dt, heightmap, headlightsWanted(), camera);
   structures.update(dt, heightmap);
 
+  // Flushed here, and nowhere else — after every system above has taken its
+  // turn iterating vehicles/structures for the frame, before the fog reveal
+  // loop below iterates them again. Never mid-iteration: a system splicing
+  // an array while another system is still walking it would skip or
+  // double-visit an entry.
+  entities.flush();
+
   // Reveal after the vehicles have moved — world.update() runs before them, so
   // committing there would upload a frame stale. Each entity reveals into its
   // own team's mask: an AI scouting the far coast must not chart it for you.
@@ -1042,6 +1162,7 @@ function tick(dt, { render = true } = {}) {
   // view rather than lagging it by one.
   terraform.update(dt);
   checkBaseRepositioning();
+  updateRespawns(dt);
   radialMenu.update();
 
   if (!render) return;
@@ -1161,4 +1282,5 @@ Object.assign(window, {
   structures, harvesterAI, repairController, trafficController, produceUnit,
   syncQueueIcons, queueIcons, checkBaseRepositioning,
   updatePlacementPreview, placementPreview, snapToGrid, footprintSize, resizeFootprintOutline,
+  entities, pendingRespawns, pickSelectable,
 });

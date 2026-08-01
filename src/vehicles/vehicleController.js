@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { buildVehicleMesh } from './vehicleFactory.js';
 import { VEHICLE_CATALOG } from './catalog.js';
+import { disposeObject3D } from '../core/disposeObject3D.js';
 
 const ARRIVE_DISTANCE = 1.5;
 const BRAKE_SPEED = 0.1; // at or below this the vehicle counts as stopped
@@ -39,6 +40,10 @@ function travelScratch(n) {
 class VehicleInstance {
   constructor(def, spawnPoint, facing, teamId = 0) {
     this.def = def;
+    // Discriminates the two destroyable kinds without a fragile array lookup
+    // (an instance mid-destroy may already be spliced from its owner's array
+    // by the time a later hook runs). See core/entities.js.
+    this.kind = 'vehicle';
     // Numeric, not a Team reference — see core/team.js for why.
     this.teamId = teamId;
     this.group = buildVehicleMesh(def);
@@ -630,6 +635,22 @@ export class VehicleController {
     // Through setActive, so a vehicle left with the throttle held does not
     // drive off on its own the moment the player spawns another one.
     return this.setActive(instance);
+  }
+
+  /**
+   * The real removal — take the instance out of the world for good. Called
+   * from entities.js's destroy pipeline, after every other system's own
+   * cleanup hook has had a chance to run, so nothing downstream is still
+   * reading this instance's mesh or position when it disposes.
+   */
+  remove(inst) {
+    const i = this.instances.indexOf(inst);
+    if (i !== -1) this.instances.splice(i, 1);
+    // Defensive: the caller's own onDestroy hook is what normally reassigns
+    // `active` before this runs, so this is only ever a no-op safety net.
+    if (this.active === inst) this.active = null;
+    this.scene.remove(inst.group);
+    disposeObject3D(inst.group);
   }
 
   /** Catalog lookup by id, so commands can price a unit without importing the catalog. */

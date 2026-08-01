@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { disposeObject3D } from '../core/disposeObject3D.js';
 
 /**
  * Buildings, and the controller that owns them.
@@ -380,6 +381,8 @@ function buildSpireMesh(def) {
 class StructureInstance {
   constructor(def, { x, z, hN, angle, pad, slot, buildTimeOverride, teamId = 0 }) {
     this.def = def;
+    // See core/entities.js — the destroy pipeline's kind discriminator.
+    this.kind = 'structure';
     // Numeric, not a Team reference — see core/team.js for why.
     this.teamId = teamId;
     this.group = buildStructureMesh(def);
@@ -602,7 +605,29 @@ export class StructureController {
 
   /** Terrain regenerated: these stand on a heightfield that no longer exists. */
   clear() {
-    for (const instance of this.instances) this.scene.remove(instance.group);
+    for (const instance of this.instances) {
+      this.scene.remove(instance.group);
+      disposeObject3D(instance.group);
+    }
     this.instances.length = 0;
+  }
+
+  /**
+   * The real removal — take a single building out of the world for good.
+   * Called from entities.js's destroy pipeline, after every other system's
+   * own cleanup hook (repairController releasing anyone docked here, etc.)
+   * has already run.
+   */
+  remove(inst) {
+    const i = this.instances.indexOf(inst);
+    if (i !== -1) this.instances.splice(i, 1);
+    // Freestanding buildings (the power spire) have no pad and nothing to
+    // unlist here.
+    if (inst.pad) {
+      const bi = inst.pad.buildings.findIndex((b) => b.instance === inst);
+      if (bi !== -1) inst.pad.buildings.splice(bi, 1);
+    }
+    this.scene.remove(inst.group);
+    disposeObject3D(inst.group);
   }
 }
