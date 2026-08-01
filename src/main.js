@@ -24,6 +24,7 @@ import { commandsFor } from './vehicles/commands.js';
 import { HarvesterAI } from './vehicles/harvesterAI.js';
 import { RepairController } from './vehicles/repairController.js';
 import { TrafficController } from './vehicles/trafficController.js';
+import { AiCommander } from './vehicles/aiCommander.js';
 import { Terraform } from './core/terraform.js';
 import { StructureController } from './structures/structures.js';
 import { Entities } from './core/entities.js';
@@ -712,6 +713,9 @@ const game = {
   difficultyScreen: null,
   aiDifficultyScreen: null,
   aiMatch: null, // { teamCount, buildDelaySeconds } once Multiplayer AI is chosen
+  // Empty until beginMatch populates it for a Multiplayer AI match — tick()
+  // iterates this every frame regardless of mode, so it must never be null.
+  aiCommanders: [],
   // Sandbox is a one-team match, so this is never empty and nothing has to
   // special-case "no teams". Rebuilt by beginMatch once the mode is known.
   teams: createTeams(0),
@@ -1023,6 +1027,19 @@ function beginMatch(difficulty) {
       if (def.unlock === 'exploration') vehiclePicker.setUnlocked(def.id, true);
     }
     deployStartingForces();
+    // One commander per AI team, built after deployStartingForces so
+    // team.homePoint already exists for it to explore outward from.
+    game.aiCommanders = game.teams
+      .filter((team) => !team.isHuman)
+      .map(
+        (team) =>
+          new AiCommander({
+            team,
+            buildDelaySeconds: game.aiMatch?.buildDelaySeconds ?? 0,
+            ctx: commandContext,
+            camera,
+          })
+      );
   }
   // Re-render the lock hint now that the target percentage is known.
   for (const def of VEHICLE_CATALOG) vehiclePicker.applyLockState(def.id);
@@ -1109,6 +1126,11 @@ let fps = 0;
  * @param {object} [opts]
  * @param {boolean} [opts.render] false to skip drawing and the stats readout
  */
+// AI teams' fog reveals are staggered across this many frames — see the
+// reveal loop below for why the player's own mask is exempt.
+const FOG_STAGGER_PERIOD = 3;
+let fogRevealCounter = 0;
+
 function tick(dt, { render = true } = {}) {
   // Vehicles move first so the camera frames where they actually ended up.
   applyDriveInput();
@@ -1117,6 +1139,11 @@ function tick(dt, { render = true } = {}) {
   // deciding (so it never issues an order the player just cancelled) and set
   // its targets before the fleet consumes them.
   harvesterAI.update(dt);
+  // Same reasoning, one level up: each AI team's own deploy/build/scout
+  // decisions need this frame's harvester targets already set (so it isn't
+  // second-guessing an order harvesterAI just issued) and have to land before
+  // trafficController reads what everyone is driving toward.
+  for (const commander of game.aiCommanders) commander.update(dt);
   // After harvesterAI: a repairing harvester is already paused by the check
   // above, so this is the only thing setting its target this frame.
   repairController.update(dt);
@@ -1137,11 +1164,19 @@ function tick(dt, { render = true } = {}) {
   // Reveal after the vehicles have moved — world.update() runs before them, so
   // committing there would upload a frame stale. Each entity reveals into its
   // own team's mask: an AI scouting the far coast must not chart it for you.
+  // The player's own mask still updates every frame (it drives the visible
+  // fog shader and the explored-percentage readout); AI masks are only ever
+  // read on the CPU on their own schedule, so they're staggered one team per
+  // frame — the reveal loop is now an N-times cost with N teams, and nothing
+  // needs an AI's fog fresher than "within the last few frames."
+  fogRevealCounter = (fogRevealCounter + 1) % FOG_STAGGER_PERIOD;
   for (const v of vehicles.instances) {
+    if (v.teamId !== PLAYER_TEAM_ID && v.teamId % FOG_STAGGER_PERIOD !== fogRevealCounter) continue;
     const mask = game.fogFor(v.teamId);
     if (mask) mask.reveal(v.group.position.x, v.group.position.z, v.def.sightRadius, v);
   }
   for (const s of structures.instances) {
+    if (s.teamId !== PLAYER_TEAM_ID && s.teamId % FOG_STAGGER_PERIOD !== fogRevealCounter) continue;
     const mask = game.fogFor(s.teamId);
     if (mask) mask.reveal(s.x, s.z, s.def.sightRadius, s);
   }

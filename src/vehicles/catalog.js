@@ -9,6 +9,9 @@ export const VEHICLE_CATALOG = [
     name: 'Scout Buggy',
     description: 'Fast, light recon vehicle.',
     role: 'unit',
+    // What an AI commander reads to decide what a unit is *for*, generically —
+    // see aiCommander.js. Not read by anything else yet.
+    tags: ['recon', 'combat'],
     // Always available — it is the vehicle that does the unlocking.
     unlock: null,
     maxHealth: 100,
@@ -92,6 +95,7 @@ export const VEHICLE_CATALOG = [
     name: 'Base Station',
     description: 'Eight-wheeled mobile base. Slow, heavy, hard to turn.',
     role: 'unit', // becomes a structure by deploying; the pad and its buildings are structures
+    tags: ['command'],
     // Earned by exploring the island with the scout, not available from the
     // start — see the difficulty thresholds in ui/difficultyScreen.js.
     unlock: 'exploration',
@@ -184,6 +188,7 @@ export const VEHICLE_CATALOG = [
     name: 'Crystal Harvester',
     description: 'Autonomous six-wheel hauler. Fills at a bloom field, unloads at the facility.',
     role: 'unit',
+    tags: ['economy'],
     // Produced by the facility, never conjured from the drawer — a card that
     // handed one over free would contradict the economy it belongs to. It also
     // keeps the picker's per-card WebGL context count down.

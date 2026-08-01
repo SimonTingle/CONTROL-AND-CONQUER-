@@ -18,6 +18,14 @@ export const STRUCTURE_CATALOG = [
     name: 'Harvester Facility',
     description: 'Refines crystal into credits. Ships one harvester on completion.',
     role: 'structure',
+    // What an AI commander reads to decide what to build, generically, rather
+    // than duck-typing on `unloadRate`/`repair`/`produces` — see
+    // aiCommander.js. Not read by anything else yet.
+    tags: ['production', 'economy'],
+    // Free by necessity, not oversight: this is the economy's own bootstrap
+    // (freeUnitOnComplete below), built while a team still has 0 credits.
+    // instanceOf's one-per-team check is what actually caps it, not price.
+    cost: 0,
     maxHealth: 600,
     sightRadius: 34,
     buildTime: 6, // seconds to rise into place
@@ -57,6 +65,7 @@ export const STRUCTURE_CATALOG = [
     name: 'Repair Bay',
     description: 'Restores a damaged vehicle to full health. Vehicles queue outside.',
     role: 'structure',
+    tags: ['repair'],
     maxHealth: 500,
     sightRadius: 30,
     buildTime: 6,
@@ -110,6 +119,7 @@ export const STRUCTURE_CATALOG = [
     name: 'Power Spire',
     description: 'Marks a retired base site. Keeps its structures powered.',
     role: 'decoration', // no dock, no queue, no commands of its own
+    tags: ['decoration'], // an AI commander never chooses to build one of these
     maxHealth: 100000, // inert — nothing currently damages or repairs a structure
     sightRadius: 20,
     buildTime: 4,

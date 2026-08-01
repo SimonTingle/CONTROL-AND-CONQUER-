@@ -96,6 +96,36 @@ export function findEdgeSpawnPoint(heightmap, camera, target = new THREE.Vector3
   return findEdgeSpawnPointAtAngle(heightmap, angle, target);
 }
 
+// Comfortably below the base station's own maxClimbGrade (0.5) — the
+// heaviest, least capable thing this ever has to spawn — not right up against
+// it: a spot that only just clears the limit still reads as "immediately
+// blocked" to the vehicle's own much shorter, sharper probe (2.5 units ahead
+// along its current heading, vehicleController.js's GRADE_PROBE) the instant
+// local terrain noise the wider average below smoothed over pokes through.
+const SPAWN_MAX_GRADE = 0.3;
+// Two ranges in eight directions, not the vehicle's own single 2.5-unit
+// forward probe: this has no heading to be "ahead" of yet, and needs to know
+// whether *some* escape direction exists, not just the one it happens to be
+// facing. The short range catches sharp local bumps the long one averages
+// away; both must clear the limit for the spot to count as gentle.
+const GRADE_PROBE_DISTS = [4, 12];
+const GRADE_PROBE_DIRS = 8;
+
+function localGrade(heightmap, x, z) {
+  let worst = 0;
+  for (let i = 0; i < GRADE_PROBE_DIRS; i++) {
+    const angle = (i / GRADE_PROBE_DIRS) * Math.PI * 2;
+    const dx = Math.cos(angle);
+    const dz = Math.sin(angle);
+    for (const dist of GRADE_PROBE_DISTS) {
+      const h0 = heightmap.heightAt(x, z);
+      const h1 = heightmap.heightAt(x + dx * dist, z + dz * dist);
+      worst = Math.max(worst, Math.abs(h1 - h0) / dist);
+    }
+  }
+  return worst;
+}
+
 /**
  * The same coast-finding march, but along an angle the caller chooses rather
  * than the one the camera happens to face. Multi-team match setup needs to
@@ -109,12 +139,26 @@ export function findEdgeSpawnPointAtAngle(heightmap, angle, target = new THREE.V
   const maxRadius = size * 0.5 - 2;
   const step = size / 400;
 
+  // Two passes: first insist on gentle ground, so a heavy vehicle spawned
+  // here is never stranded on the very first tick. If nothing on this
+  // bearing is ever both dry *and* gentle (a genuinely cliff-bound coastline),
+  // fall back to the first merely-dry point — landing somewhere a slow
+  // vehicle has to fight rather than nowhere at all.
+  let firstDry = null;
   for (let r = maxRadius; r > 0; r -= step) {
     const x = dirX * r;
     const z = dirZ * r;
-    if (heightmap.heightAt(x, z) > heightmap.seaLevelY) {
+    if (heightmap.heightAt(x, z) <= heightmap.seaLevelY) continue;
+    if (!firstDry) firstDry = { x, z };
+    if (localGrade(heightmap, x, z) <= SPAWN_MAX_GRADE) {
       return { point: target.set(x, heightmap.heightAt(x, z), z), heading: Math.atan2(-dirZ, -dirX) };
     }
+  }
+  if (firstDry) {
+    return {
+      point: target.set(firstDry.x, heightmap.heightAt(firstDry.x, firstDry.z), firstDry.z),
+      heading: Math.atan2(-dirZ, -dirX),
+    };
   }
 
   // Degenerate fallback (e.g. a fully-flooded map): spawn at the centre.
@@ -182,10 +226,14 @@ export function findTeamSpawnPoints(heightmap, count, { minSeparation = 260, pha
 export function findSpawnPointNear(
   heightmap,
   origin,
-  { minRadius, maxRadius, camera, target = new THREE.Vector3() }
+  { minRadius, maxRadius, camera, target = new THREE.Vector3(), requireGentleGrade = false, isValid = null }
 ) {
   const radiusStep = Math.max(2, (maxRadius - minRadius) / 6);
   const angleCount = 12;
+  // Same two-tier idea as findEdgeSpawnPointAtAngle: prefer a spot that
+  // passes the real acceptance test, but remember the first merely-dry one
+  // in case nothing in the ring clears it at all.
+  let firstDry = null;
 
   for (let r = minRadius; r <= maxRadius; r += radiusStep) {
     for (let i = 0; i < angleCount; i++) {
@@ -194,14 +242,26 @@ export function findSpawnPointNear(
       const angle = (i / angleCount) * Math.PI * 2 + r * 0.618;
       const x = origin.x + Math.cos(angle) * r;
       const z = origin.z + Math.sin(angle) * r;
-      if (heightmap.heightAt(x, z) > heightmap.seaLevelY) {
-        return {
-          point: target.set(x, heightmap.heightAt(x, z), z),
-          heading: Math.atan2(-Math.sin(angle), -Math.cos(angle)),
-        };
+      if (heightmap.heightAt(x, z) <= heightmap.seaLevelY) continue;
+      const heading = Math.atan2(-Math.sin(angle), -Math.cos(angle));
+      // A caller-supplied predicate is the real acceptance test (e.g.
+      // terraform.canDeployAt, which samples water clearance across a whole
+      // pad radius — a narrow local-grade probe can pass while the actual
+      // pad still doesn't fit). `requireGentleGrade` is the cheaper
+      // approximation for callers with no such test of their own.
+      const accepted = isValid ? isValid(x, z) : !requireGentleGrade || localGrade(heightmap, x, z) <= SPAWN_MAX_GRADE;
+      if (accepted) {
+        return { point: target.set(x, heightmap.heightAt(x, z), z), heading };
       }
+      if (!firstDry) firstDry = { x, z, heading };
     }
   }
 
+  if ((requireGentleGrade || isValid) && firstDry) {
+    return {
+      point: target.set(firstDry.x, heightmap.heightAt(firstDry.x, firstDry.z), firstDry.z),
+      heading: firstDry.heading,
+    };
+  }
   return findEdgeSpawnPoint(heightmap, camera, target);
 }

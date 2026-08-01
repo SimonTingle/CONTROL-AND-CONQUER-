@@ -33,7 +33,7 @@ export function commandsFor(instance, ctx) {
  * vehicleController.js's `immobile`), so "the pad under my current feet"
  * stops being the right question the moment it drives off it.
  */
-function basePad(instance, ctx) {
+export function basePad(instance, ctx) {
   const anchor = instance.deployOrigin ?? instance.group.position;
   const pad = ctx.terraform.padAt(anchor.x, anchor.z);
   // A pad found by position could belong to somebody else if two bases
