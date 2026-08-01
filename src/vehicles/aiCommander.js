@@ -318,16 +318,40 @@ export class AiCommander {
   /**
    * Send one unit toward a point, working around terrain it cannot cross.
    *
-   * Re-issuing the identical straight line every time an order is abandoned
-   * is not a retry, it is a loop: the heading is unchanged, so it fails
-   * exactly the same way and the unit grinds against the same slope until the
-   * blocked-damage floor. (Observed directly — an army left to it arrived at
-   * 100/400 health having never fired a shot.) harvesterAI solves this with
-   * widening alternating detour angles; this is the same idea, kept small
-   * because an army unit has somewhere to be rather than a precise dock to
-   * hit.
+   * Tries the shared NavGrid first — a coarse flow field that actually knows
+   * "go around the mountain," not just "the last heading failed, try
+   * another." Only when it has nothing (no grid yet, or the goal is
+   * unreachable) does this fall back to the local reactive fan below, so a
+   * genuinely unreachable order still degrades the same safe way it always
+   * has rather than stalling with no fallback at all.
    */
   _advanceUnit(unit, target) {
+    const pos = unit.group.position;
+
+    const waypoint = this.ctx.navGrid?.nextWaypoint(pos.x, pos.z, target.x, target.z);
+    if (waypoint && unit.setTarget(waypoint.x, waypoint.z, this.ctx.heightmap)) {
+      unit._advanceAttempt = 0; // a real route exists; forget any stale fan history
+      return;
+    }
+
+    this._advanceUnitByDetour(unit, target);
+  }
+
+  /**
+   * The original local-only fallback: re-issuing the identical straight line
+   * every time an order is abandoned is not a retry, it is a loop — the
+   * heading is unchanged, so it fails exactly the same way and the unit
+   * grinds against the same slope until the blocked-damage floor. (Observed
+   * directly — an army left to it arrived at 100/400 health having never
+   * fired a shot.) harvesterAI solves this with widening alternating detour
+   * angles; this is the same idea, kept small because an army unit has
+   * somewhere to be rather than a precise dock to hit.
+   *
+   * Still reachable whenever the NavGrid has no answer — no grid yet, an
+   * unreachable goal, or a goal cell that reads as impassable — so a route
+   * that used to work at all keeps working at least this well.
+   */
+  _advanceUnitByDetour(unit, target) {
     const pos = unit.group.position;
     const attempt = unit._advanceAttempt ?? 0;
     const bearing = Math.atan2(target.z - pos.z, target.x - pos.x);

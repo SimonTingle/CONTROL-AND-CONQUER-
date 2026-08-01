@@ -30,6 +30,7 @@ import { MatchEndScreen } from './ui/matchEndScreen.js';
 import { Terraform } from './core/terraform.js';
 import { StructureController } from './structures/structures.js';
 import { Entities } from './core/entities.js';
+import { NavGrid } from './core/navGrid.js';
 
 const canvas = document.getElementById('viewport');
 
@@ -1092,8 +1093,13 @@ function updateRespawns(dt) {
   }
 }
 
+// Built once and reused for the whole match — see navGrid.js's own header
+// for why one coarse flow-field cache can serve an entire army. Only
+// aiCommander queries it; nothing here needs its own reference.
+const navGrid = new NavGrid(heightmap);
+
 /** Everything a command might need, so commands.js imports no game systems. */
-const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit };
+const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit, navGrid };
 
 const vehiclePicker = new VehiclePicker(VEHICLE_CATALOG, {
   vehicles,

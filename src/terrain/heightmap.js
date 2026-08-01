@@ -31,6 +31,11 @@ export class Heightmap {
     this.texture = null;
     this.min = 0;
     this.max = 1;
+    // Bumped whenever the heightfield is edited after generation (currently
+    // just Terraform's pad flattening). Consumers that cache something
+    // derived from terrain shape — NavGrid's flow fields — use this to know
+    // their cache is stale, the same way FogTerrain.landVersion works.
+    this.terrainVersion = 0;
     this.generate();
   }
 
