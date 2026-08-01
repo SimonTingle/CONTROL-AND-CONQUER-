@@ -24,6 +24,7 @@ const WAITING_FOR_DOCK = 'waiting-for-dock';
 const UNLOADING = 'unloading';
 const PARKED = 'parked';
 const PAUSED = 'paused';
+const FLEEING = 'fleeing';
 
 // Comfortably larger than a harvester's own turning radius (~19u). Smaller than
 // that and `driveToTarget`'s pure-pursuit steering can overshoot, lose speed —
@@ -39,6 +40,8 @@ const STALL_TIMEOUT = 3; // seconds barely moving in a driving state
 const RETRY_PAUSE = 1.5;
 const REVERSE_DURATION = 1.5; // seconds backing off before trying the next detour angle
 const BAN_SECONDS = 45;
+// How far a cornered harvester runs when it has no facility to run to.
+const FLEE_DISTANCE = 90;
 const TRANSFER_SPEED = 0.5; // must be near enough stopped to load or unload
 
 // A fresh automatic pick prefers to leave a nearly-drained field alone and to
@@ -94,6 +97,11 @@ export class HarvesterAI {
     this._sweepFacilities();
     for (const inst of this.vehicles.instances) {
       if (!inst.def.capacity) continue; // not a hauler
+      // Dead but not yet flushed: it stays in this array until the tick's
+      // single destroy flush, and driving a corpse for those few systems'
+      // worth of ticks would re-create the state its onDestroy hook just
+      // cleared.
+      if (inst.dead) continue;
       this._drive(inst, this._stateFor(inst), dt);
     }
   }
@@ -172,12 +180,45 @@ export class HarvesterAI {
 
     this._updateLoadCells(inst, s);
 
+    // Under fire. Checked after the manual-control gate above (the player
+    // driving still wins) but before the retry brake below, because a
+    // harvester should not stand still waiting out a retry pause while
+    // something shoots it.
+    //
+    // Deliberately *not* while docked: leaving UNLOADING here would strand
+    // `facility.dockedHarvester` — the reservation is only ever released
+    // through _releaseDock, and a state change that skips it orphans the dock
+    // until the self-heal sweep notices. Finishing an unload takes a moment;
+    // corrupting the facility lasts until something catches it.
+    if (inst.threatUntil != null) {
+      if (performance.now() / 1000 < inst.threatUntil) {
+        if (s.state !== FLEEING && s.state !== UNLOADING && s.state !== WAITING_FOR_DOCK) {
+          s.resumeState = this._safeResumeState(inst, s);
+          s.state = FLEEING;
+          s.dest = null;
+          s.waypoint = null;
+          s.detours = 0;
+        }
+      } else {
+        inst.threatUntil = null;
+        if (s.state === FLEEING) {
+          // Home is where it was already heading anyway — resume the run
+          // rather than idling and re-deciding from scratch.
+          s.state = s.load > 0 ? TO_BASE : IDLE;
+          s.dest = null;
+          s.waypoint = null;
+        }
+      }
+    }
+
     if (s.retryTimer > 0) {
       s.retryTimer -= dt;
       return;
     }
 
     switch (s.state) {
+      case FLEEING:
+        return this._flee(inst, s, dt);
       case IDLE:
         return this._idle(inst, s);
       case TO_FIELD:
@@ -350,7 +391,7 @@ export class HarvesterAI {
     }
     s.unloadWaitTimer = 0;
 
-    const facility = this._facility();
+    const facility = this._facility(inst);
     if (!facility) {
       s.state = IDLE;
       return;
@@ -372,7 +413,9 @@ export class HarvesterAI {
     const rate = Math.min(facility.def.unloadRate * unloadMultiplier, inst.def.unloadRate);
     const moved = Math.min(rate * dt, s.load);
     s.load -= moved;
-    this.game.earn(moved);
+    // Credited to the harvester's own team. `_facility()` only ever returns a
+    // same-team facility, so the two can never disagree.
+    this.game.teamOf(inst).earn(moved);
 
     if (s.load <= 1e-6) {
       s.load = 0;
@@ -393,7 +436,7 @@ export class HarvesterAI {
   }
 
   _atDock(inst, s) {
-    const facility = this._facility();
+    const facility = this._facility(inst);
     if (!facility) {
       s.state = IDLE;
       return;
@@ -411,7 +454,7 @@ export class HarvesterAI {
   }
 
   _waitingForDock(inst, s) {
-    const facility = this._facility();
+    const facility = this._facility(inst);
     if (!facility) {
       s.state = IDLE;
       return;
@@ -442,6 +485,43 @@ export class HarvesterAI {
     }
   }
 
+  /**
+   * Run for the facility — or, failing that, directly away from whatever is
+   * shooting.
+   *
+   * A harvester has no weapon and no business fighting, so "flee" is the whole
+   * of its combat behaviour. Heading for its own facility rather than simply
+   * away is the better instinct: it is where any repair bay and any defending
+   * units are, so it runs *toward* help rather than into open ground.
+   */
+  _flee(inst, s, dt) {
+    const facility = this._facility(inst);
+    if (facility) {
+      return this._travel(inst, s, dt, DOCK_DISTANCE, () => {
+        // Arrived home while still being shot at — hold here rather than
+        // bouncing back out. The threat timer expiring is what releases it.
+        inst.arrive('reached');
+        s.dest = null;
+      });
+    }
+
+    // Nowhere to run to: put distance between itself and the last known
+    // threat direction instead. Recomputed rather than cached so it keeps
+    // fleeing the *current* danger, not where it started.
+    const away = inst.threatFrom;
+    if (!away) {
+      s.state = IDLE;
+      return;
+    }
+    const pos = inst.group.position;
+    const bearing = Math.atan2(pos.z - away.z, pos.x - away.x);
+    const dest = {
+      x: pos.x + Math.cos(bearing) * FLEE_DISTANCE,
+      z: pos.z + Math.sin(bearing) * FLEE_DISTANCE,
+    };
+    if (!this._order(inst, s, dest)) s.retryTimer = RETRY_PAUSE;
+  }
+
   /** Release `facility.dockedHarvester` — the single place this ever happens,
    * so every exit from UNLOADING/WAITING_FOR_DOCK goes through the same door. */
   _releaseDock(facility, inst) {
@@ -466,6 +546,28 @@ export class HarvesterAI {
   }
 
   /**
+   * A harvester dying releases whatever dock/queue claim it held, then drops
+   * its state entirely. A facility dying needs no equivalent here: every
+   * state that depends on one — `_atDock`, `_waitingForDock`, `_unload`, and
+   * `_destination`'s TO_BASE case — re-resolves `_facility(inst)` fresh each
+   * tick rather than holding a reference, so once the dead facility is gone
+   * from `structures.instances` those calls simply start returning null and
+   * every harvester that was headed there self-heals to IDLE on its own.
+   */
+  onDestroy(inst) {
+    if (inst.kind !== 'vehicle') return;
+    const s = this.states.get(inst);
+    if (s) {
+      const facility = this._facility(inst);
+      if (facility) {
+        this._releaseDock(facility, inst);
+        this._releaseQueueSlot(facility, s);
+      }
+    }
+    this.states.delete(inst);
+  }
+
+  /**
    * What to resume into once manual driving, an open menu, or a repair trip
    * ends. Docking and queueing hold an exclusive reservation — the dock slot,
    * a queue ring position — that a forced pause can't honestly keep: the
@@ -476,11 +578,11 @@ export class HarvesterAI {
    */
   _safeResumeState(inst, s) {
     if (s.state === UNLOADING) {
-      this._releaseDock(this._facility(), inst);
+      this._releaseDock(this._facility(inst), inst);
       return TO_BASE;
     }
     if (s.state === WAITING_FOR_DOCK) {
-      this._releaseQueueSlot(this._facility(), s);
+      this._releaseQueueSlot(this._facility(inst), s);
       return TO_BASE;
     }
     return s.state;
@@ -499,7 +601,7 @@ export class HarvesterAI {
       return;
     }
 
-    const facility = this._facility();
+    const facility = this._facility(inst);
     if (!facility) {
       s.state = IDLE;
       inst.shouldPark = false;
@@ -538,15 +640,29 @@ export class HarvesterAI {
 
   // ---- driving ----
 
-  _facility() {
-    return this.structures.instances.find((i) => i.mode === 'idle' && i.def.unloadRate) ?? null;
+  /**
+   * A refinery this harvester can actually deliver to: same team, finished,
+   * and able to accept cargo. Team-scoping is not cosmetic — without it a
+   * harvester hauls its load to whichever refinery happens to be first in the
+   * array and pays an opponent for it.
+   */
+  _facility(inst) {
+    return (
+      this.structures.instances.find(
+        (i) => i.mode === 'idle' && i.def.unloadRate && i.teamId === inst.teamId
+      ) ?? null
+    );
   }
 
   /** Where this state is trying to get to, recomputed so it can never go stale. */
   _destination(inst, s) {
     if (s.state === TO_FIELD) return s.field ? { x: s.field.x, z: s.field.z } : null;
-    if (s.state === TO_BASE) {
-      const f = this._facility();
+    // TO_BASE and FLEEING share a destination — the facility dock. `_travel`
+    // resolves this fresh every tick and treats a null as "nowhere to go, give
+    // up and idle", so a state that drives via `_travel` and is missing here
+    // silently falls back to IDLE instead of moving.
+    if (s.state === TO_BASE || s.state === FLEEING) {
+      const f = this._facility(inst);
       return f ? { x: f.dock.x, z: f.dock.z } : null;
     }
     return null;
@@ -603,7 +719,11 @@ export class HarvesterAI {
     // design — counting either as a stall diagnoses a polite wait as a blockage
     // and drives the vehicle off with a detour, which is exactly how a loaded
     // harvester ends up circling a busy dock forever instead of unloading.
-    const holding = inst.yielding || inst.reverseTimer != null;
+    //
+    // Fleeing joins them for the same reason: a harvester that has run home and
+    // is deliberately holding station under its facility's protection is doing
+    // precisely what it should, and a detour would send it back out into fire.
+    const holding = inst.yielding || inst.reverseTimer != null || s.state === FLEEING;
     s.stallTimer = !holding && inst.speed < STALL_SPEED ? s.stallTimer + dt : 0;
     if (s.stallTimer > STALL_TIMEOUT) {
       s.stallTimer = 0;

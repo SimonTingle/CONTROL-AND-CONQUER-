@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { disposeObject3D } from '../core/disposeObject3D.js';
 
 /**
  * Buildings, and the controller that owns them.
@@ -17,12 +18,24 @@ export const STRUCTURE_CATALOG = [
     name: 'Harvester Facility',
     description: 'Refines crystal into credits. Ships one harvester on completion.',
     role: 'structure',
+    // What an AI commander reads to decide what to build, generically, rather
+    // than duck-typing on `unloadRate`/`repair`/`produces` — see
+    // aiCommander.js. Not read by anything else yet.
+    tags: ['production', 'economy'],
+    // Free by necessity, not oversight: this is the economy's own bootstrap
+    // (freeUnitOnComplete below), built while a team still has 0 credits.
+    // instanceOf's one-per-team check is what actually caps it, not price.
+    cost: 0,
     maxHealth: 600,
     sightRadius: 34,
     buildTime: 6, // seconds to rise into place
     footprint: 13, // radius it claims when checking overlap with neighbours
-    produces: 'crystal-harvester',
-    /** The bootstrap: without this the first harvester could never be afforded. */
+    // A list, not one id: commands.js turns each entry into its own build
+    // command, so adding a unit here is the whole change — no new command, no
+    // AI change (aiCommander picks by tag off the produced defs).
+    produces: ['crystal-harvester', 'gun-platform'],
+    /** The bootstrap: without this the first harvester could never be afforded.
+     * Ships `produces[0]` — the economy unit, never a combat one. */
     freeUnitOnComplete: true,
     unloadRate: 80, // stock units/second it will accept from a docked harvester
     dockOffset: 12, // how far out from the building a harvester parks
@@ -56,6 +69,7 @@ export const STRUCTURE_CATALOG = [
     name: 'Repair Bay',
     description: 'Restores a damaged vehicle to full health. Vehicles queue outside.',
     role: 'structure',
+    tags: ['repair'],
     maxHealth: 500,
     sightRadius: 30,
     buildTime: 6,
@@ -109,6 +123,7 @@ export const STRUCTURE_CATALOG = [
     name: 'Power Spire',
     description: 'Marks a retired base site. Keeps its structures powered.',
     role: 'decoration', // no dock, no queue, no commands of its own
+    tags: ['decoration'], // an AI commander never chooses to build one of these
     maxHealth: 100000, // inert — nothing currently damages or repairs a structure
     sightRadius: 20,
     buildTime: 4,
@@ -378,8 +393,12 @@ function buildSpireMesh(def) {
 
 /** One placed building. */
 class StructureInstance {
-  constructor(def, { x, z, hN, angle, pad, slot, buildTimeOverride }) {
+  constructor(def, { x, z, hN, angle, pad, slot, buildTimeOverride, teamId = 0 }) {
     this.def = def;
+    // See core/entities.js — the destroy pipeline's kind discriminator.
+    this.kind = 'structure';
+    // Numeric, not a Team reference — see core/team.js for why.
+    this.teamId = teamId;
     this.group = buildStructureMesh(def);
     this.x = x;
     this.z = z;
@@ -423,6 +442,28 @@ class StructureInstance {
   /** Screen-space anchor for the radial menu. */
   get menuAnchorHeight() {
     return this.def.dims.height + (this.def.dims.roofHeight ?? 0) + 2;
+  }
+
+  /**
+   * Mirrors VehicleInstance.takeDamage — same contract, same return meaning,
+   * so combatController can hit either kind without caring which it has.
+   *
+   * A building still rising out of the ground takes damage normally: it is a
+   * legitimate target precisely *because* it is vulnerable while unfinished.
+   *
+   * @returns {boolean} true if this blow reduced it to zero.
+   */
+  takeDamage(amount, { floorFraction = 0 } = {}) {
+    if (this.dead || amount <= 0) return false;
+    const floor = this.def.maxHealth * floorFraction;
+    const before = this.health;
+    this.health = Math.max(floor, this.health - amount);
+    return before > 0 && this.health <= 0;
+  }
+
+  /** Where a shot aimed at this building should actually land. */
+  get aimHeight() {
+    return (this.def.dims.height ?? 6) * 0.5;
   }
 
   /** Structures never move; the menu reads this to decide whether to follow. */
@@ -478,8 +519,10 @@ export class StructureController {
     return STRUCTURE_CATALOG.find((d) => d.id === id) ?? null;
   }
 
-  instanceOf(id) {
-    return this.instances.find((i) => i.def.id === id) ?? null;
+  /** Team-scoped: "have *I* built one of these?" is never a question about
+   * somebody else's base. */
+  instanceOf(id, teamId = 0) {
+    return this.instances.find((i) => i.def.id === id && i.teamId === teamId) ?? null;
   }
 
   /**
@@ -508,23 +551,31 @@ export class StructureController {
    * the player commits) and by `place()` itself, as a final guard against a
    * stale click landing after the pad or its neighbours changed underneath it.
    */
-  canPlaceAt(pad, def, x, z) {
+  canPlaceAt(pad, def, x, z, teamId = pad.teamId ?? 0) {
+    // You can only build on ground your own base flattened. Defaults to the
+    // pad's own owner so callers that have no actor in hand (the placement
+    // preview) keep their existing behaviour.
+    if ((pad.teamId ?? 0) !== teamId) return false;
     if (Math.hypot(x - pad.x, z - pad.z) + def.footprint > pad.radius) return false;
     // Same overlap rule freeSlot used to enforce on its fixed ring positions,
     // now evaluated at an arbitrary point instead of one of six angles.
     if (pad.buildings.some((b) => Math.hypot(b.x - x, b.z - z) < def.footprint * 1.6)) return false;
 
     // A deployed base station sitting on this pad is an obstacle too, even
-    // though it's a vehicle, not a `pad.buildings` entry — pads have no
-    // ownership link back to it (see terraform.js), so this is a proximity
-    // check against whichever base is actually parked here right now, not a
-    // stored reference. Deliberately just the vehicle's own hull plus a small
-    // fixed clearance, not scaled by the new building's footprint the way the
-    // building-overlap check above is — a footprint-sized buffer swallowed
-    // most or all of a pad this size when footprint values were inflated for
-    // visual reasons (see the repair bay's own footprint comment).
+    // though it's a vehicle, not a `pad.buildings` entry. The pad now records
+    // its owner, so this is scoped to that team's own base — otherwise an
+    // enemy base parked nearby would silently veto legitimate placements.
+    // Deliberately just the vehicle's own hull plus a small fixed clearance,
+    // not scaled by the new building's footprint the way the building-overlap
+    // check above is — a footprint-sized buffer swallowed most or all of a pad
+    // this size when footprint values were inflated for visual reasons (see
+    // the repair bay's own footprint comment).
     const base = this.vehicles?.instances.find(
-      (v) => v.def.id === 'base-station' && v.mode === 'deployed' && Math.hypot(v.group.position.x - pad.x, v.group.position.z - pad.z) <= pad.radius
+      (v) =>
+        v.def.id === 'base-station' &&
+        v.mode === 'deployed' &&
+        v.teamId === (pad.teamId ?? 0) &&
+        Math.hypot(v.group.position.x - pad.x, v.group.position.z - pad.z) <= pad.radius
     );
     if (base && Math.hypot(base.group.position.x - x, base.group.position.z - z) < base.def.dims.hullLength / 2 + 3) {
       return false;
@@ -545,6 +596,10 @@ export class StructureController {
       // ring slots used, just derived from wherever the player actually clicked.
       angle: Math.atan2(pos.z - pad.z, pos.x - pad.x),
       pad,
+      // Ownership comes from the pad, never from the caller: whoever's base
+      // flattened this ground owns what goes on it, so a building can never
+      // disagree with the pad it stands on.
+      teamId: pad.teamId ?? 0,
     });
 
     instance.group.userData.selectable = instance;
@@ -560,13 +615,14 @@ export class StructureController {
    * from the heightmap rather than a pad's flattened target, since nothing
    * flattens the ground here.
    */
-  placeAt(def, x, z, heightmap, { buildTimeOverride } = {}) {
+  placeAt(def, x, z, heightmap, { buildTimeOverride, teamId = 0 } = {}) {
     const instance = new StructureInstance(def, {
       x,
       z,
       hN: heightmap.sampleNormalized(x, z),
       angle: 0,
       buildTimeOverride,
+      teamId,
     });
 
     instance.group.userData.selectable = instance;
@@ -585,7 +641,29 @@ export class StructureController {
 
   /** Terrain regenerated: these stand on a heightfield that no longer exists. */
   clear() {
-    for (const instance of this.instances) this.scene.remove(instance.group);
+    for (const instance of this.instances) {
+      this.scene.remove(instance.group);
+      disposeObject3D(instance.group);
+    }
     this.instances.length = 0;
+  }
+
+  /**
+   * The real removal — take a single building out of the world for good.
+   * Called from entities.js's destroy pipeline, after every other system's
+   * own cleanup hook (repairController releasing anyone docked here, etc.)
+   * has already run.
+   */
+  remove(inst) {
+    const i = this.instances.indexOf(inst);
+    if (i !== -1) this.instances.splice(i, 1);
+    // Freestanding buildings (the power spire) have no pad and nothing to
+    // unlist here.
+    if (inst.pad) {
+      const bi = inst.pad.buildings.findIndex((b) => b.instance === inst);
+      if (bi !== -1) inst.pad.buildings.splice(bi, 1);
+    }
+    this.scene.remove(inst.group);
+    disposeObject3D(inst.group);
   }
 }

@@ -9,6 +9,9 @@ export const VEHICLE_CATALOG = [
     name: 'Scout Buggy',
     description: 'Fast, light recon vehicle.',
     role: 'unit',
+    // What an AI commander reads to decide what a unit is *for*, generically —
+    // see aiCommander.js. Not read by anything else yet.
+    tags: ['recon', 'combat'],
     // Always available — it is the vehicle that does the unlocking.
     unlock: null,
     maxHealth: 100,
@@ -23,6 +26,13 @@ export const VEHICLE_CATALOG = [
       // much lazier steer, so arming somewhere is a commitment.
       armedSpeedFactor: 0.35,
       armedSteerFactor: 0.4,
+      // A scout's gun is real but light: it wins a skirmish against another
+      // scout, and loses badly to anything built to fight. 8 dps against the
+      // gun platform's 400 hp is fifty seconds — it cannot brute-force a
+      // fight it shouldn't be in.
+      damage: 6,
+      fireInterval: 0.75, // seconds between shots
+      muzzleHeight: 1.9, // world units above the hull origin, for LOS and tracers
     },
     // World units of fog it clears. Tuned against the island's actual land area:
     // at 22 u/s a straight run sweeps ~2r per unit travelled, so 55 puts Easy
@@ -92,6 +102,7 @@ export const VEHICLE_CATALOG = [
     name: 'Base Station',
     description: 'Eight-wheeled mobile base. Slow, heavy, hard to turn.',
     role: 'unit', // becomes a structure by deploying; the pad and its buildings are structures
+    tags: ['command'],
     // Earned by exploring the island with the scout, not available from the
     // start — see the difficulty thresholds in ui/difficultyScreen.js.
     unlock: 'exploration',
@@ -184,6 +195,7 @@ export const VEHICLE_CATALOG = [
     name: 'Crystal Harvester',
     description: 'Autonomous six-wheel hauler. Fills at a bloom field, unloads at the facility.',
     role: 'unit',
+    tags: ['economy'],
     // Produced by the facility, never conjured from the drawer — a card that
     // handed one over free would contradict the economy it belongs to. It also
     // keeps the picker's per-card WebGL context count down.
@@ -258,5 +270,88 @@ export const VEHICLE_CATALOG = [
     },
     colors: { hull: '#4a4335', cabin: '#2a271f', wheel: '#161616', trim: '#c8a24a' },
     previewDistance: 20,
+  },
+
+  {
+    id: 'gun-platform',
+    name: 'Gun Platform',
+    description: 'Six-wheel weapons carrier. Slow, tough, and the only thing built to win a fight.',
+    role: 'unit',
+    tags: ['combat'],
+    // Same reasoning as the harvester: produced by a facility, not conjured
+    // from the drawer, so it costs what the economy says it costs.
+    spawnable: false,
+    producedBy: 'harvester-facility',
+    cost: 900,
+    unlock: null,
+    maxHealth: 400,
+
+    turret: {
+      // Outranges the scout by half again — a scout that picks this fight
+      // gets shot for a while before it can answer.
+      range: 90,
+      fireArc: Math.PI * 2, // full traverse: a turret, not a fixed gun
+      sweepRate: 0.7, // a slow, deliberate idle scan
+      rotationRate: 1.6, // heavier turret, slower to bring onto a target
+      armedSpeedFactor: 0.5,
+      armedSteerFactor: 0.6,
+      damage: 22,
+      fireInterval: 1.4,
+      muzzleHeight: 2.4,
+    },
+
+    sightRadius: 46,
+    speed: 11,
+    reverseSpeed: 5,
+    acceleration: 5,
+    braking: 14,
+    rollingResistance: 3.4,
+    maxSteerAngle: 0.4,
+    steerRate: 1.5,
+    maxClimbGrade: 0.58,
+
+    axles: 3,
+    axleFractions: [1.0, -0.3, -1.0],
+    steerRatios: [1.0, 0.25, 0],
+    shape: {
+      nose: false,
+      turret: true,
+      tank: false,
+      cabinLength: 0.2,
+      cabinX: 0.3,
+    },
+    lights: {
+      style: 'bar',
+      headlampInset: 0.3,
+      headlampDrop: 0.26,
+      beamAngle: 0.46,
+      beamDistance: 140,
+      beamIntensity: 980,
+      beamColor: '#f6fbff',
+      tailColor: '#ff2b18',
+      reverseColor: '#f4f8ff',
+      reverseBeamIntensity: 380,
+      reverseBeamDistance: 55,
+      reverseBeamAngle: 0.68,
+      tailBeamIntensity: 130,
+      tailBeamDistance: 24,
+      tailBeamAngle: 0.8,
+      duskElevation: 8,
+    },
+    dims: {
+      hullLength: 9.4,
+      hullWidth: 3.2,
+      hullHeight: 1.5,
+      cabinHeight: 1.0,
+      wheelRadius: 0.9,
+      wheelWidth: 0.7,
+      suspensionTravel: 1.2,
+      turretRadius: 1.15,
+      turretHeight: 0.85,
+      barrelRadius: 0.18,
+      barrelLength: 3.4,
+    },
+    colors: { hull: '#4b4f46', cabin: '#292d28', wheel: '#161616', trim: '#8f9a86' },
+    previewDistance: 17,
   },
 ];

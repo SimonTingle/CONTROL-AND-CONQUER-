@@ -2,13 +2,20 @@ import * as THREE from 'three';
 import { World } from './core/world.js';
 import { createCameraControls } from './core/controls.js';
 import { ChaseCamera } from './core/chaseCamera.js';
-import { pickTerrain, findEdgeSpawnPoint, findSpawnPointNear } from './core/pick.js';
+import {
+  pickTerrain,
+  findEdgeSpawnPoint,
+  findSpawnPointNear,
+  findTeamSpawnPoints,
+} from './core/pick.js';
 import { Menu } from './ui/menu.js';
 import { buildSchema } from './ui/controlSchema.js';
 import { VehiclePicker } from './ui/vehiclePicker.js';
 import { DifficultyScreen, DIFFICULTIES } from './ui/difficultyScreen.js';
 import { PortalScreen } from './ui/portalScreen.js';
 import { AiDifficultyScreen } from './ui/aiDifficultyScreen.js';
+import { createTeams, PLAYER_TEAM_ID } from './core/team.js';
+import { FogMask } from './core/fogOfWar.js';
 import { Hud } from './ui/hud.js';
 import { RadialMenu } from './ui/radialMenu.js';
 import { VehicleController } from './vehicles/vehicleController.js';
@@ -17,8 +24,12 @@ import { commandsFor } from './vehicles/commands.js';
 import { HarvesterAI } from './vehicles/harvesterAI.js';
 import { RepairController } from './vehicles/repairController.js';
 import { TrafficController } from './vehicles/trafficController.js';
+import { AiCommander } from './vehicles/aiCommander.js';
+import { CombatController } from './vehicles/combatController.js';
+import { MatchEndScreen } from './ui/matchEndScreen.js';
 import { Terraform } from './core/terraform.js';
 import { StructureController } from './structures/structures.js';
+import { Entities } from './core/entities.js';
 
 const canvas = document.getElementById('viewport');
 
@@ -67,7 +78,10 @@ function showMarker(point) {
 function updateMarker(elapsed) {
   if (!marker.visible) return;
 
-  if (vehicles.active && !vehicles.active.hasOrder) {
+  // No active vehicle (it just died, or nothing has spawned) leaves nothing
+  // for the marker to stand for — `active && !active.hasOrder` alone would
+  // never trip on a null active, and the ball would bob forever.
+  if (!vehicles.active || !vehicles.active.hasOrder) {
     marker.visible = false;
     return;
   }
@@ -116,8 +130,11 @@ function updateHarvestMarker(elapsed) {
   if (!harvestMarkerFor) return;
 
   // The driver clears targetField the moment it acts on it, so this covers
-  // "picked up", "superseded by a newer pick" and "wiped by a regenerate" alike.
-  if (harvestMarkerFor.harvester.targetField !== harvestMarkerFor.field) {
+  // "picked up", "superseded by a newer pick" and "wiped by a regenerate"
+  // alike. `.dead` covers the one thing that doesn't touch targetField at
+  // all — the harvester being destroyed outright, which would otherwise
+  // leave this bobbing over an empty field forever.
+  if (harvestMarkerFor.harvester.dead || harvestMarkerFor.harvester.targetField !== harvestMarkerFor.field) {
     hideHarvestMarker();
     return;
   }
@@ -310,6 +327,7 @@ function checkBaseRepositioning() {
     if (dist < BASE_MOVE_THRESHOLD) continue;
     structures.placeAt(structures.defOf('power-spire'), inst.deployOrigin.x, inst.deployOrigin.z, heightmap, {
       buildTimeOverride: SPIRE_GROW_TIME,
+      teamId: inst.teamId,
     });
     inst.spireGrown = true;
   }
@@ -319,6 +337,10 @@ const vehicles = new VehicleController(world.scene);
 
 const terraform = new Terraform(world);
 const structures = new StructureController(world.scene, vehicles);
+// The one destroy pipeline every killable thing routes through — see
+// core/entities.js. Hooks are registered once every system that needs one
+// exists, further down.
+const entities = new Entities();
 
 const chase = new ChaseCamera(camera, heightmap);
 
@@ -485,10 +507,15 @@ canvas.addEventListener('pointerup', (e) => {
       });
       if (field) {
         const { harvester } = commandContext.harvestSelectMode;
-        harvester.targetField = field;
-        // Anchored to the field's centre, not the click: it has to be obvious
-        // *which* field was taken, even when the click landed out at the edge.
-        showHarvestMarker(harvester, field);
+        // The harvester this mode was opened for can have been destroyed
+        // while the player was still aiming the click.
+        if (!harvester.dead) {
+          harvester.targetField = field;
+          // Anchored to the field's centre, not the click: it has to be
+          // obvious *which* field was taken, even when the click landed out
+          // at the edge.
+          showHarvestMarker(harvester, field);
+        }
       }
     }
     commandContext.harvestSelectMode = null;
@@ -600,6 +627,13 @@ addEventListener('keydown', (e) => {
     game.portalScreen?.open || game.difficultyScreen?.open || game.aiDifficultyScreen?.open;
   if (k in driveKeys && !isTextInputFocused() && !overlayOpen) driveKeys[k] = true;
   if (e.key === 'Escape' && commandContext.buildPlacementMode) cancelPlacementMode();
+  // Debug: destroy whatever's under the cursor — 2B's destroy pipeline has
+  // nothing to trigger it yet (combat is 2D), so this is its only way to run
+  // until then.
+  if (k === 'k' && !isTextInputFocused() && !overlayOpen) {
+    const target = pickSelectable(lastX, lastY);
+    if (target) entities.queueDestroy(target);
+  }
 });
 addEventListener('keyup', (e) => {
   const k = e.key.toLowerCase();
@@ -680,22 +714,34 @@ const game = {
   portalScreen: null,
   difficultyScreen: null,
   aiDifficultyScreen: null,
-  aiMatch: null, // { teamCount, buildDelaySeconds } once Multiplayer AI is chosen — unused until the AI-opponent system exists
-  credits: 0,
-  // Latched the same way `unlocked` is: relocating spends nothing, so without
-  // a latch a base built just past 50k could spend back below it and lose the
-  // option it already earned.
-  reachedRelocateThreshold: false,
-  earn(n) {
-    this.credits += n;
-    if (this.credits >= 50000) this.reachedRelocateThreshold = true;
-    return this.credits;
+  aiMatch: null, // { teamCount, buildDelaySeconds } once Multiplayer AI is chosen
+  // Empty until beginMatch populates it for a Multiplayer AI match — tick()
+  // iterates this every frame regardless of mode, so it must never be null.
+  aiCommanders: [],
+  matchEndScreen: null,
+  // Latched once a result is decided, so the end screen is shown exactly once
+  // and the world stops being driven behind it.
+  matchOver: false,
+  // Sandbox is a one-team match, so this is never empty and nothing has to
+  // special-case "no teams". Rebuilt by beginMatch once the mode is known.
+  teams: createTeams(0),
+  get playerTeam() {
+    return this.teams[PLAYER_TEAM_ID];
   },
-  /** @returns {boolean} false when short, so the caller can explain why. */
-  spend(n) {
-    if (this.credits < n) return false;
-    this.credits -= n;
-    return true;
+  /**
+   * The owning team of any vehicle, structure or pad.
+   *
+   * Falls back to the player's team rather than null: everything placed before
+   * teams existed (and everything in sandbox) is the player's, and a null here
+   * would turn every economy call site into a null check for a case that
+   * cannot happen.
+   */
+  teamOf(entity) {
+    return this.teams[entity?.teamId ?? PLAYER_TEAM_ID] ?? this.playerTeam;
+  },
+  /** The fog mask a team reveals into. */
+  fogFor(teamId) {
+    return this.teams[teamId ?? PLAYER_TEAM_ID]?.fog ?? this.playerTeam.fog;
   },
   // Placeholder persistence: a tiny progress snapshot in localStorage, not the
   // full world state. Real save/load (terrain, vehicles, structures, fog) is
@@ -704,7 +750,7 @@ const game = {
     const snapshot = {
       mode: this.mode,
       difficultyId: this.difficulty?.id,
-      credits: this.credits,
+      credits: this.playerTeam.credits,
       savedAt: Date.now(),
     };
     localStorage.setItem('ptg-save', JSON.stringify(snapshot));
@@ -761,6 +807,11 @@ function isSpawnLocationViable(facilityX, facilityZ, spawnX, spawnZ, maxClimbGra
  * the vehicle in terrain it cannot escape from.
  */
 function produceUnit(def, facility) {
+  // The single choke point every produced unit passes through, so the match
+  // record is counted once here rather than at each of the call sites that
+  // can order one.
+  game.teamOf(facility).stats.unitsBuilt++;
+
   const angles = [0, 0.9, -0.9, 1.6, -1.6, 2.4];
   const maxClimbGrade = def.maxClimbGrade ?? 0.62;
   let dockOffset = facility.def.dockOffset;
@@ -777,7 +828,11 @@ function produceUnit(def, facility) {
 
       if (isSpawnLocationViable(facility.x, facility.z, dock.x, dock.z, maxClimbGrade)) {
         const point = new THREE.Vector3(dock.x, heightmap.heightAt(dock.x, dock.z) + 0.05, dock.z);
-        return vehicles.spawn(def, point, facility.angle, { activate: false });
+        return vehicles.spawn(def, point, facility.angle, {
+          activate: false,
+          // A factory's output belongs to whoever owns the factory.
+          teamId: facility.teamId,
+        });
       }
     }
 
@@ -789,20 +844,253 @@ function produceUnit(def, facility) {
   // Fallback: spawn at original dock position even if not ideal
   const dock = facility.dock;
   const point = new THREE.Vector3(dock.x, heightmap.heightAt(dock.x, dock.z) + 0.05, dock.z);
-  return vehicles.spawn(def, point, facility.angle, { activate: false });
+  return vehicles.spawn(def, point, facility.angle, {
+    activate: false,
+    teamId: facility.teamId,
+  });
 }
 
 // A facility ships one harvester the moment it finishes. Without that bootstrap
 // the first harvester could never be afforded — nothing earns credits until one
 // exists.
 structures.onComplete = (instance) => {
+  // Fires once per finished building whoever placed it — the structure
+  // equivalent of produceUnit's single choke point.
+  game.teamOf(instance).stats.structuresBuilt++;
   if (!instance.def.freeUnitOnComplete) return;
-  produceUnit(vehicles.defOf(instance.def.produces), instance);
+  // produces[0] by convention — the economy unit. A facility must never
+  // bootstrap a team with a free combat vehicle.
+  produceUnit(vehicles.defOf(instance.def.produces[0]), instance);
 };
+
+// ---- combat visuals: tracers and wreckage ----
+
+// A small fixed pool of reusable line segments. Shots are frequent and short-
+// lived, so building a mesh per shot would allocate (and need disposing)
+// dozens of times a second; the pool caps that at a constant.
+const TRACER_POOL_SIZE = 24;
+const TRACER_LIFETIME = 0.09; // seconds
+const tracers = [];
+for (let i = 0; i < TRACER_POOL_SIZE; i++) {
+  const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+  const mat = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.9 });
+  const line = new THREE.Line(geo, mat);
+  line.visible = false;
+  line.frustumCulled = false; // endpoints move every use; a stale bound would pop
+  world.scene.add(line);
+  tracers.push({ line, mat, timer: 0 });
+}
+let nextTracer = 0;
+
+/** Draw a shot that has *already* been resolved — purely cosmetic. */
+function showTracer(from, to, teamId, fromHeight, toHeight) {
+  const t = tracers[nextTracer];
+  nextTracer = (nextTracer + 1) % TRACER_POOL_SIZE;
+  const pos = t.line.geometry.attributes.position;
+  pos.setXYZ(0, from.x, heightmap.heightAt(from.x, from.z) + fromHeight, from.z);
+  pos.setXYZ(1, to.x, heightmap.heightAt(to.x, to.z) + toHeight, to.z);
+  pos.needsUpdate = true;
+  // Team colour, so an unattended AI-vs-AI fight is readable at a glance.
+  t.mat.color.setHex(game.teams[teamId]?.color ?? 0xffffff);
+  t.line.visible = true;
+  t.timer = TRACER_LIFETIME;
+}
+
+function updateTracers(dt) {
+  for (const t of tracers) {
+    if (!t.line.visible) continue;
+    t.timer -= dt;
+    if (t.timer <= 0) {
+      t.line.visible = false;
+      continue;
+    }
+    t.mat.opacity = Math.max(0, t.timer / TRACER_LIFETIME) * 0.9;
+  }
+}
+
+/**
+ * A scorched, half-collapsed marker left where something died.
+ *
+ * Deliberately not the unit's own mesh tipped over: the wreck has to read as
+ * *not a unit* at a glance, or a battlefield of corpses becomes unparseable.
+ * Left permanently — this is the record of what happened here.
+ */
+function leaveWreckage(inst) {
+  const scale = inst.kind === 'structure' ? 3 : Math.max(1.2, (inst.def.dims?.hullLength ?? 5) * 0.28);
+  const group = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ color: 0x1a1613, roughness: 0.95, metalness: 0.1 });
+  for (let i = 0; i < 3; i++) {
+    const chunk = new THREE.Mesh(
+      new THREE.BoxGeometry(scale * (0.5 + Math.random() * 0.6), scale * 0.3, scale * (0.4 + Math.random() * 0.5)),
+      mat
+    );
+    chunk.rotation.set(Math.random() * 0.5, Math.random() * Math.PI, Math.random() * 0.4);
+    chunk.position.set((Math.random() - 0.5) * scale, scale * 0.12, (Math.random() - 0.5) * scale);
+    chunk.castShadow = true;
+    group.add(chunk);
+  }
+  const p = inst.x !== undefined ? { x: inst.x, z: inst.z } : inst.group.position;
+  group.position.set(p.x, heightmap.heightAt(p.x, p.z), p.z);
+  world.scene.add(group);
+}
 
 const harvesterAI = new HarvesterAI({ vehicles, world, heightmap, structures, game });
 const repairController = new RepairController({ vehicles, structures, heightmap, game });
 const trafficController = new TrafficController({ vehicles });
+const combatController = new CombatController({
+  vehicles,
+  structures,
+  heightmap,
+  entities,
+  game,
+  onShot: showTracer,
+});
+
+// ---- destroy pipeline: every system that owns instance-keyed state
+// registers its own cleanup hook, in the order it needs to run.
+
+// Reservation/state cleanup first, while the instance's own fields (teamId,
+// repair, etc.) are still intact for these to read.
+entities.onDestroy((inst) => harvesterAI.onDestroy(inst));
+entities.onDestroy((inst) => repairController.onDestroy(inst));
+entities.onDestroy((inst) => trafficController.onDestroy(inst));
+// Anyone aiming at the deceased. combatController revalidates targets every
+// tick anyway, so this is belt-and-braces rather than load-bearing — but it
+// means a turret never spends even one frame tracking a corpse.
+entities.onDestroy((inst) => {
+  for (const v of vehicles.instances) {
+    if (v.combatTarget === inst) v.combatTarget = null;
+  }
+});
+// The record of what died here, placed while the instance still knows where
+// it was — vehicles.remove/structures.remove below drop that.
+entities.onDestroy((inst) => leaveWreckage(inst));
+// Match record. Counted here rather than at the kill site so *every* cause of
+// death lands in the tally, not just weapons.
+entities.onDestroy((inst) => {
+  const stats = game.teamOf(inst)?.stats;
+  if (!stats) return;
+  if (inst.kind === 'structure') stats.structuresLost++;
+  else stats.unitsLost++;
+});
+// The radial menu holds a direct reference, not a lookup — nothing else
+// would ever notice it's pointed at a dead instance.
+entities.onDestroy((inst) => {
+  if (radialMenu.instance === inst) radialMenu.close();
+});
+// The vehicle the player is driving needs a replacement lined up before
+// anything downstream (queueIcons, the marker fixes above, chase) has to
+// cope with `vehicles.active` going away.
+entities.onDestroy((inst) => handleVehicleLoss(inst));
+// The actual removal — splice out of the owning collection and free the
+// mesh — runs last, once every hook above has had a chance to read the
+// instance's live state.
+entities.onDestroy((inst) => {
+  if (inst.kind === 'vehicle') vehicles.remove(inst);
+  else if (inst.kind === 'structure') structures.remove(inst);
+});
+
+const RESPAWN_DELAY = 3; // seconds before a team with nothing left gets a fresh scout
+const pendingRespawns = []; // { teamId, timer }
+
+/**
+ * The vehicle the player is driving just died. Hand control to another unit
+ * of theirs if one survives; otherwise queue a fresh scout at their home
+ * point after a short delay rather than leaving them locked out mid-match.
+ * A no-op for every AI team and for any vehicle that wasn't the driven one.
+ */
+function handleVehicleLoss(inst) {
+  if (inst.kind !== 'vehicle' || vehicles.active !== inst) return;
+
+  const pos = inst.group.position;
+  let survivor = null;
+  let bestDist = Infinity;
+  for (const v of vehicles.instances) {
+    if (v.teamId !== inst.teamId || v === inst || v.dead) continue;
+    const d = Math.hypot(v.group.position.x - pos.x, v.group.position.z - pos.z);
+    if (d < bestDist) {
+      bestDist = d;
+      survivor = v;
+    }
+  }
+  if (survivor) {
+    vehicles.setActive(survivor);
+    if (chase.enabled) chase.reset(survivor);
+    return;
+  }
+
+  // isChasing() already falls back to free MapControls whenever `active` is
+  // null, so there is nothing else to arrange for the gap before the respawn.
+  vehicles.active = null;
+  pendingRespawns.push({ teamId: inst.teamId, timer: RESPAWN_DELAY });
+}
+
+/**
+ * Eliminate any team that has lost its base station, and end the match once
+ * one side is left standing.
+ *
+ * Base-station-destroyed is the whole rule, and the base is a *mobile*
+ * vehicle with a relocate command — so a losing team can genuinely drive its
+ * base out of danger rather than watch it die. That falls out for free and is
+ * worth keeping.
+ *
+ * Only runs for Multiplayer AI: sandbox has one team, and "you have no base"
+ * is a normal state there (you start without one and earn it).
+ */
+function checkMatchEnd() {
+  if (game.mode !== 'multiplayer-ai' || game.matchOver) return;
+
+  for (const team of game.teams) {
+    if (team.defeated) continue;
+    const hasBase = vehicles.instances.some(
+      (v) => !v.dead && v.teamId === team.id && v.def.id === 'base-station'
+    );
+    if (hasBase) continue;
+    team.defeated = true;
+    // A defeated team stops thinking. Its units are left where they are —
+    // wreckage and stragglers are part of the record of the match.
+    const commander = game.aiCommanders.find((c) => c.team.id === team.id);
+    if (commander) commander.team.defeated = true;
+  }
+
+  const alive = game.teams.filter((t) => !t.defeated);
+  // Not over while two or more are still standing.
+  if (alive.length > 1) return;
+
+  game.matchOver = true;
+  const winner = alive[0] ?? null;
+  game.matchEndScreen.show({
+    playerWon: !!winner?.isHuman,
+    winner,
+    teams: game.teams,
+  });
+}
+
+/** Frame-counted, not setTimeout — so it advances correctly under
+ * window.__step's synthetic ticks too, not just real wall-clock frames. */
+function updateRespawns(dt) {
+  for (let i = pendingRespawns.length - 1; i >= 0; i--) {
+    const r = pendingRespawns[i];
+    r.timer -= dt;
+    if (r.timer > 0) continue;
+    pendingRespawns.splice(i, 1);
+
+    const team = game.teams[r.teamId];
+    // The player already took control of something else in the meantime —
+    // the free scout would be an unwanted extra, not a rescue.
+    if (!team || (team.isHuman && vehicles.active)) continue;
+
+    const scoutDef = vehicles.defOf('scout-buggy');
+    const origin = team.homePoint ?? { x: 0, z: 0 };
+    const spot = findSpawnPointNear(heightmap, origin, { minRadius: 10, maxRadius: 60, camera });
+    spot.point.y += 0.05;
+    const inst = vehicles.spawn(scoutDef, spot.point, spot.heading, {
+      teamId: r.teamId,
+      activate: team.isHuman,
+    });
+    if (team.isHuman && chase.enabled) chase.reset(inst);
+  }
+}
 
 /** Everything a command might need, so commands.js imports no game systems. */
 const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit };
@@ -872,10 +1160,87 @@ function updateProgression(explored) {
  * any per-mode extras (like the AI match config) differ. */
 function beginMatch(difficulty) {
   game.difficulty = difficulty;
+  game.matchOver = false;
+  // Sandbox is a one-team match; Multiplayer AI adds one team per AI opponent.
+  game.teams = createTeams(game.aiMatch?.teamCount ?? 0);
+
+  // The player keeps the mask the world already built (the shaders point at
+  // its texture and must not be re-pointed). Every AI team gets a CPU-only
+  // one — they scout for themselves and nothing draws their view.
+  game.playerTeam.fog = world.fog;
+  world.fogMasks.length = 1;
+  for (const team of game.teams) {
+    if (team.isHuman) continue;
+    team.fog = new FogMask(world.fogTerrain);
+    world.fogMasks.push(team.fog);
+  }
+  // Sandbox keeps the explore-to-unlock pacing untouched. An AI match starts
+  // every team on equal footing — making the human scout first while AI
+  // teams build from tick one would not be a fair opening.
+  if (game.mode === 'multiplayer-ai') {
+    game.unlocked = true;
+    for (const def of VEHICLE_CATALOG) {
+      if (def.unlock === 'exploration') vehiclePicker.setUnlocked(def.id, true);
+    }
+    deployStartingForces();
+    // One commander per AI team, built after deployStartingForces so
+    // team.homePoint already exists for it to explore outward from.
+    game.aiCommanders = game.teams
+      .filter((team) => !team.isHuman)
+      .map(
+        (team) =>
+          new AiCommander({
+            team,
+            buildDelaySeconds: game.aiMatch?.buildDelaySeconds ?? 0,
+            ctx: commandContext,
+            camera,
+          })
+      );
+  }
   // Re-render the lock hint now that the target percentage is known.
   for (const def of VEHICLE_CATALOG) vehiclePicker.applyLockState(def.id);
-  // Nothing is spawned yet, so open the drawer on the one vehicle available.
-  vehiclePicker.setOpen(true);
+  // The drawer is only the opening move in sandbox; an AI match has already
+  // put everyone on the board.
+  if (game.mode !== 'multiplayer-ai') vehiclePicker.setOpen(true);
+}
+
+/**
+ * Put every team on the island at once, evenly spaced around the coast.
+ *
+ * Each gets the same opening — a base station to deploy and a scout to look
+ * around with — so "all versus all" starts genuinely symmetric. Only the
+ * player's scout takes the keys; the rest are somebody else's problem until
+ * the AI commander exists to drive them.
+ */
+function deployStartingForces() {
+  const baseDef = vehicles.defOf('base-station');
+  const scoutDef = vehicles.defOf('scout-buggy');
+  const starts = findTeamSpawnPoints(heightmap, game.teams.length);
+
+  game.teams.forEach((team, i) => {
+    const { point, heading } = starts[i];
+    point.y += 0.05; // avoid z-fighting with the ground on the spawn frame
+    // A stable anchor for this team even after the base itself is gone —
+    // the respawn-a-scout fallback (see handleVehicleLoss) needs somewhere
+    // to aim that doesn't depend on the base station surviving.
+    team.homePoint = { x: point.x, z: point.z };
+
+    // findEdgeSpawnPointAtAngle faces a vehicle back toward the map centre,
+    // which for the base station reads as facing out to sea — the same flip
+    // the picker's own base spawn applies.
+    vehicles.spawn(baseDef, point, heading + Math.PI, { activate: false, teamId: team.id });
+
+    const beside = findSpawnPointNear(heightmap, point, {
+      minRadius: baseDef.dims.hullLength / 2 + scoutDef.dims.hullLength / 2 + 4,
+      maxRadius: baseDef.sightRadius * 0.8,
+      camera,
+    });
+    beside.point.y += 0.05;
+    vehicles.spawn(scoutDef, beside.point, beside.heading, {
+      activate: team.isHuman,
+      teamId: team.id,
+    });
+  });
 }
 
 game.difficultyScreen = new DifficultyScreen((difficulty) => {
@@ -887,6 +1252,14 @@ game.aiDifficultyScreen = new AiDifficultyScreen(({ difficulty, teamCount, build
   game.mode = 'multiplayer-ai';
   game.aiMatch = { teamCount, buildDelaySeconds };
   beginMatch(difficulty);
+});
+
+game.matchEndScreen = new MatchEndScreen(() => {
+  // Simplest honest "play again": a full reload puts every system back to a
+  // known-clean state. Rebuilding a match in place would mean unwinding the
+  // world, the fleet, the fog masks, the commanders and the destroy queue
+  // by hand, and any one of those missed is a subtle cross-match bug.
+  location.reload();
 });
 
 game.portalScreen = new PortalScreen((modeId) => {
@@ -917,6 +1290,11 @@ let fps = 0;
  * @param {object} [opts]
  * @param {boolean} [opts.render] false to skip drawing and the stats readout
  */
+// AI teams' fog reveals are staggered across this many frames — see the
+// reveal loop below for why the player's own mask is exempt.
+const FOG_STAGGER_PERIOD = 3;
+let fogRevealCounter = 0;
+
 function tick(dt, { render = true } = {}) {
   // Vehicles move first so the camera frames where they actually ended up.
   applyDriveInput();
@@ -925,6 +1303,11 @@ function tick(dt, { render = true } = {}) {
   // deciding (so it never issues an order the player just cancelled) and set
   // its targets before the fleet consumes them.
   harvesterAI.update(dt);
+  // Same reasoning, one level up: each AI team's own deploy/build/scout
+  // decisions need this frame's harvester targets already set (so it isn't
+  // second-guessing an order harvesterAI just issued) and have to land before
+  // trafficController reads what everyone is driving toward.
+  if (!game.matchOver) for (const commander of game.aiCommanders) commander.update(dt);
   // After harvesterAI: a repairing harvester is already paused by the check
   // above, so this is the only thing setting its target this frame.
   repairController.update(dt);
@@ -932,17 +1315,42 @@ function tick(dt, { render = true } = {}) {
   // them: this is what actually decides `yielding` and hands out collision
   // damage for the frame about to run.
   trafficController.update(dt);
+  // After every driver has had its say and before the fleet moves: a shot is
+  // resolved against where things are *this* frame, and any resulting death is
+  // queued for the single flush below rather than removed underneath the
+  // movement step that is about to run.
+  combatController.update(dt);
   vehicles.update(dt, heightmap, headlightsWanted(), camera);
   structures.update(dt, heightmap);
 
+  // Flushed here, and nowhere else — after every system above has taken its
+  // turn iterating vehicles/structures for the frame, before the fog reveal
+  // loop below iterates them again. Never mid-iteration: a system splicing
+  // an array while another system is still walking it would skip or
+  // double-visit an entry.
+  entities.flush();
+
   // Reveal after the vehicles have moved — world.update() runs before them, so
-  // committing there would upload a frame stale.
+  // committing there would upload a frame stale. Each entity reveals into its
+  // own team's mask: an AI scouting the far coast must not chart it for you.
+  // The player's own mask still updates every frame (it drives the visible
+  // fog shader and the explored-percentage readout); AI masks are only ever
+  // read on the CPU on their own schedule, so they're staggered one team per
+  // frame — the reveal loop is now an N-times cost with N teams, and nothing
+  // needs an AI's fog fresher than "within the last few frames."
+  fogRevealCounter = (fogRevealCounter + 1) % FOG_STAGGER_PERIOD;
   for (const v of vehicles.instances) {
-    world.fog.reveal(v.group.position.x, v.group.position.z, v.def.sightRadius, v);
+    if (v.teamId !== PLAYER_TEAM_ID && v.teamId % FOG_STAGGER_PERIOD !== fogRevealCounter) continue;
+    const mask = game.fogFor(v.teamId);
+    if (mask) mask.reveal(v.group.position.x, v.group.position.z, v.def.sightRadius, v);
   }
   for (const s of structures.instances) {
-    world.fog.reveal(s.x, s.z, s.def.sightRadius, s);
+    if (s.teamId !== PLAYER_TEAM_ID && s.teamId % FOG_STAGGER_PERIOD !== fogRevealCounter) continue;
+    const mask = game.fogFor(s.teamId);
+    if (mask) mask.reveal(s.x, s.z, s.def.sightRadius, s);
   }
+  // Only the player's mask is drawn, so only it needs uploading; the AI masks
+  // are read on the CPU and have no texture to commit.
   world.fog.commit();
 
   if (isChasing()) {
@@ -958,10 +1366,19 @@ function tick(dt, { render = true } = {}) {
   // view rather than lagging it by one.
   terraform.update(dt);
   checkBaseRepositioning();
+  // After entities.flush() above, so "does this team still have a base" is
+  // asked of a fleet with this tick's deaths already removed rather than one
+  // still holding a corpse.
+  checkMatchEnd();
+  updateRespawns(dt);
   radialMenu.update();
 
   if (!render) return;
 
+  updateTracers(dt);
+  // Per-frame, unlike the rest of the HUD's half-second poll — see
+  // Hud.updateHealth for why health specifically cannot wait.
+  hud.updateHealth(vehicles.active);
   updateMarker(clock.elapsedTime);
   updateHarvestMarker(clock.elapsedTime);
   updatePlacementPreview(lastX, lastY);
@@ -990,10 +1407,10 @@ function tick(dt, { render = true } = {}) {
       explored,
       difficulty: game.difficulty,
       unlocked: game.unlocked,
-      credits: game.credits,
+      credits: game.playerTeam.credits,
       // Nothing to report before there is an economy — a permanent "0 cr"
       // during the scouting game is just noise.
-      economyActive: game.credits > 0 || structures.instances.length > 0,
+      economyActive: game.playerTeam.credits > 0 || structures.instances.length > 0,
       load: harvesterAI.stateOf(vehicles.active)?.load ?? 0,
     });
 
@@ -1077,4 +1494,5 @@ Object.assign(window, {
   structures, harvesterAI, repairController, trafficController, produceUnit,
   syncQueueIcons, queueIcons, checkBaseRepositioning,
   updatePlacementPreview, placementPreview, snapToGrid, footprintSize, resizeFootprintOutline,
+  entities, pendingRespawns, pickSelectable, combatController, leaveWreckage,
 });

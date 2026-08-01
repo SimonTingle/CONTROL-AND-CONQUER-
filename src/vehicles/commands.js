@@ -11,6 +11,9 @@
  * what is wrong instead of silently doing nothing.
  */
 
+import { STRUCTURE_CATALOG } from '../structures/structures.js';
+import { VEHICLE_CATALOG } from './catalog.js';
+
 /**
  * @param {object} instance the VehicleInstance the menu was opened on
  * @param {object} ctx { vehicles, world, heightmap, terraform, game }
@@ -33,9 +36,12 @@ export function commandsFor(instance, ctx) {
  * vehicleController.js's `immobile`), so "the pad under my current feet"
  * stops being the right question the moment it drives off it.
  */
-function basePad(instance, ctx) {
+export function basePad(instance, ctx) {
   const anchor = instance.deployOrigin ?? instance.group.position;
-  return ctx.terraform.padAt(anchor.x, anchor.z);
+  const pad = ctx.terraform.padAt(anchor.x, anchor.z);
+  // A pad found by position could belong to somebody else if two bases
+  // deployed close together; only your own is yours to build on.
+  return pad && (pad.teamId ?? 0) === instance.teamId ? pad : null;
 }
 
 /**
@@ -49,6 +55,7 @@ function nearestRepairBay(instance, ctx) {
   let bestD = Infinity;
   for (const s of ctx.structures.instances) {
     if (s.def.id !== 'repair-bay' || s.mode !== 'idle') continue;
+    if (s.teamId !== instance.teamId) continue; // never queue at an enemy bay
     const d = Math.hypot(s.x - pos.x, s.z - pos.z);
     if (d < bestD) {
       bestD = d;
@@ -111,16 +118,47 @@ const UPGRADE_COMMAND = {
     const tiers = instance.def.upgradeTiers;
     if (!tiers || instance.upgradeLevel >= tiers.length) return 'Already at max tier';
     const tier = tiers[instance.upgradeLevel];
-    if (ctx.game.credits < tier.cost) return `Needs ${tier.cost} cr (have ${Math.floor(ctx.game.credits)})`;
+    const team = ctx.game.teamOf(instance);
+    if (team.credits < tier.cost) return `Needs ${tier.cost} cr (have ${Math.floor(team.credits)})`;
     return true;
   },
   execute(instance, ctx) {
     const tier = instance.def.upgradeTiers?.[instance.upgradeLevel];
     if (!tier) return;
     // spend() is the real gate — balance may have moved since the menu opened.
-    if (ctx.game.spend(tier.cost)) instance.upgradeLevel++;
+    if (ctx.game.teamOf(instance).spend(tier.cost)) instance.upgradeLevel++;
   },
 };
+
+/**
+ * One "Build X" command per unit a structure produces, generated from the
+ * catalog rather than written out. Adding a unit to a structure's `produces`
+ * list is then the entire change — no command to write, and nothing here to
+ * keep in sync with the catalog.
+ */
+function producedByCommands(structureId) {
+  const def = STRUCTURE_CATALOG.find((d) => d.id === structureId);
+  const produces = def?.produces ?? [];
+  return produces.map((unitId) => ({
+    id: `build-${unitId}`,
+    label: `Build ${VEHICLE_CATALOG.find((v) => v.id === unitId)?.name ?? unitId}`,
+    hint: (instance, ctx) => `${ctx.vehicles.defOf(unitId).cost} cr`,
+    enabled(instance, ctx) {
+      const unitDef = ctx.vehicles.defOf(unitId);
+      const team = ctx.game.teamOf(instance);
+      if (team.credits < unitDef.cost) {
+        return `Needs ${unitDef.cost} cr (have ${Math.floor(team.credits)})`;
+      }
+      return true;
+    },
+    execute(instance, ctx) {
+      const unitDef = ctx.vehicles.defOf(unitId);
+      // spend() is the gate, not the enabled() check — that ran when the
+      // menu opened and the balance can have moved since.
+      if (ctx.game.teamOf(instance).spend(unitDef.cost)) ctx.produceUnit(unitDef, instance);
+    },
+  }));
+}
 
 const COMMANDS = {
   'scout-buggy': {
@@ -159,7 +197,7 @@ const COMMANDS = {
         hint: 'Flattens a construction pad',
         enabled(instance, ctx) {
           const pos = instance.group.position;
-          return ctx.terraform.canDeployAt(pos.x, pos.z, instance.def.deploy);
+          return ctx.terraform.canDeployAt(pos.x, pos.z, instance.def.deploy, instance.teamId);
         },
         execute(instance, ctx) {
           const pos = instance.group.position;
@@ -168,6 +206,8 @@ const COMMANDS = {
           instance.target = null;
           ctx.terraform.deployPad(pos.x, pos.z, {
             ...instance.def.deploy,
+            // The pad belongs to whoever's base flattened it.
+            teamId: instance.teamId,
             // The vehicle only calls itself deployed once the ground actually is.
             onComplete: () => {
               instance.mode = 'deployed';
@@ -191,7 +231,9 @@ const COMMANDS = {
           const pad = basePad(instance, ctx);
           if (!pad || !pad.complete) return 'Needs a finished pad';
           const def = ctx.structures.defOf('harvester-facility');
-          if (ctx.structures.instanceOf('harvester-facility')) return 'Already built';
+          if (ctx.structures.instanceOf('harvester-facility', instance.teamId)) {
+            return 'Already built';
+          }
           if (!ctx.structures.freeSlot(pad, def.footprint)) return 'No free slot on the pad';
           return true;
         },
@@ -213,8 +255,9 @@ const COMMANDS = {
           // Per-pad, not global — a base built after relocating gets its own
           // fresh allowance rather than being blocked by one built earlier.
           if (pad.buildings.some((b) => b.id === 'repair-bay')) return 'Already built here';
-          if (ctx.game.credits < def.cost) {
-            return `Needs ${def.cost} cr (have ${Math.floor(ctx.game.credits)})`;
+          const team = ctx.game.teamOf(instance);
+          if (team.credits < def.cost) {
+            return `Needs ${def.cost} cr (have ${Math.floor(team.credits)})`;
           }
           if (!ctx.structures.freeSlot(pad, def.footprint)) return 'No free slot on the pad';
           return true;
@@ -224,7 +267,7 @@ const COMMANDS = {
           const def = ctx.structures.defOf('repair-bay');
           // spend() is the real gate — balance can have moved since the menu
           // opened — so only enter placement mode once it actually clears.
-          if (!pad || !ctx.game.spend(def.cost)) return;
+          if (!pad || !ctx.game.teamOf(instance).spend(def.cost)) return;
           ctx.buildPlacementMode = { def, pad };
         },
       },
@@ -233,12 +276,16 @@ const COMMANDS = {
         label: 'Relocate Base',
         hint: 'Leaves a power spire behind',
         enabled(instance, ctx) {
-          if (!ctx.game.reachedRelocateThreshold) return 'Needs 50000 cr lifetime earned';
+          if (!ctx.game.teamOf(instance).reachedRelocateThreshold) {
+            return 'Needs 50000 cr lifetime earned';
+          }
           return true;
         },
         execute(instance, ctx) {
           const pos = instance.group.position;
-          ctx.structures.placeAt(ctx.structures.defOf('power-spire'), pos.x, pos.z, ctx.heightmap);
+          ctx.structures.placeAt(ctx.structures.defOf('power-spire'), pos.x, pos.z, ctx.heightmap, {
+            teamId: instance.teamId,
+          });
           // Free to drive off and redeploy elsewhere via the existing 'deploy'
           // command, completely unchanged.
           instance.mode = 'mobile';
@@ -249,27 +296,7 @@ const COMMANDS = {
 
   'harvester-facility': {
     building: [],
-    idle: [
-      {
-        id: 'build-harvester',
-        label: 'Build Harvester',
-        hint: (instance, ctx) => `${ctx.vehicles.defOf(instance.def.produces).cost} cr`,
-        enabled(instance, ctx) {
-          const def = ctx.vehicles.defOf(instance.def.produces);
-          if (ctx.game.credits < def.cost) {
-            return `Needs ${def.cost} cr (have ${Math.floor(ctx.game.credits)})`;
-          }
-          return true;
-        },
-        execute(instance, ctx) {
-          const def = ctx.vehicles.defOf(instance.def.produces);
-          // spend() is the gate, not the enabled() check — that ran when the
-          // menu opened and the balance can have moved since.
-          if (ctx.game.spend(def.cost)) ctx.produceUnit(def, instance);
-        },
-      },
-      UPGRADE_COMMAND,
-    ],
+    idle: [...producedByCommands('harvester-facility'), UPGRADE_COMMAND],
   },
 
   'repair-bay': {
