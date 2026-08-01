@@ -289,16 +289,21 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
 }
 
 #vehicle-grid {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Uniform square cells, reflowing on their own: 1 column on a narrow panel,
+   2, 3, etc. as it widens — no hardcoded breakpoint per column count. */
+.vehicle-section-grid {
   display: grid;
-  grid-template-columns: 1fr;
-  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 10px;
 }
 
 .vehicle-card {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 0;
+  position: relative;
+  aspect-ratio: 1;
   padding: 0;
   border: 1px solid var(--panel-border);
   border-radius: 10px;
@@ -313,26 +318,53 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
   background: rgba(79, 209, 197, 0.08);
 }
 
+/* Fills the square so the preview centers inside it rather than being framed
+   for a wide rectangle and then squashed by CSS — createPreview() renders at
+   a matching square resolution. */
 .vehicle-card canvas {
   display: block;
   width: 100%;
-  height: 108px;
+  height: 100%;
+}
+
+/* Name (and, on hover, stats/lock reason) live inside the square as a bottom
+   overlay rather than pushing the card taller — the square shape is the
+   point, so text has to fit inside it, not stack below it. */
+.vehicle-card-caption {
+  position: absolute;
+  inset: auto 0 0 0;
+  padding: 3px 5px 4px;
+  background: linear-gradient(to top, rgba(5, 8, 12, 0.88), rgba(5, 8, 12, 0));
+  pointer-events: none;
 }
 
 .vehicle-card-label {
-  padding: 8px 10px 2px;
-  font-size: 12px;
+  display: block;
+  font-size: 9px;
   font-weight: 600;
+  line-height: 1.2;
   color: var(--text);
-  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .vehicle-card-stats {
-  padding: 0 10px 8px;
-  font-size: 10px;
+  display: block;
+  font-size: 8px;
   font-variant-numeric: tabular-nums;
   color: var(--text-dim);
-  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-height: 0;
+  opacity: 0;
+  transition: max-height 0.15s ease, opacity 0.15s ease;
+}
+
+.vehicle-card:hover .vehicle-card-stats {
+  max-height: 12px;
+  opacity: 1;
 }
 
 /* ---- locked vehicle cards ---- */
@@ -350,10 +382,12 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
 }
 
 .vehicle-card-lock {
-  padding: 0 10px 8px;
-  font-size: 10px;
+  display: block;
+  font-size: 8px;
   color: var(--accent);
-  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .vehicle-section {

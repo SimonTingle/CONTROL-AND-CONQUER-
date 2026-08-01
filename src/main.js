@@ -1103,6 +1103,7 @@ const commandContext = { vehicles, world, heightmap, terraform, structures, game
 
 const vehiclePicker = new VehiclePicker(VEHICLE_CATALOG, {
   vehicles,
+  playerTeamId: PLAYER_TEAM_ID,
   onSelect(def) {
     vehiclePicker.setOpen(false);
     // Selecting a vehicle that is already out there takes the keys back rather

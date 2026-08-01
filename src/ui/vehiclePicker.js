@@ -14,14 +14,21 @@ const SPIN_SPEED = 0.5; // radians / second
  * Rendering only happens while the drawer is open: update() is a no-op
  * otherwise, so hidden canvases cost nothing per frame.
  */
-const PREVIEW_WIDTH = 150;
-const PREVIEW_HEIGHT = 108;
+// Square, matching the card's aspect-ratio: 1 — a preview framed for a wide
+// rectangle and then squashed into a square by CSS would off-center the mesh.
+const PREVIEW_WIDTH = 128;
+const PREVIEW_HEIGHT = 128;
 
 export class VehiclePicker {
-  constructor(catalog, { onSelect, vehicles } = {}) {
+  constructor(catalog, { onSelect, vehicles, playerTeamId = 0 } = {}) {
     this.catalog = catalog;
     this.onSelect = onSelect;
     this.vehicles = vehicles;
+    // Only the player's own vehicles ever populate "Active Vehicles" — see
+    // buildPreviews() and update()'s rebuild check below. Without this, every
+    // AI opponent's units would appear as clickable cards in the player's own
+    // drawer, and clicking one hands the player driving control of it.
+    this.playerTeamId = playerTeamId;
     this.open = false;
     this.previews = [];
 
@@ -55,8 +62,13 @@ export class VehiclePicker {
     this.previews = [];
     this.cards = new Map();
 
-    // Section 1: Active spawned vehicles
-    const instances = this.vehicles?.instances ?? [];
+    // Section 1: Active spawned vehicles — the player's own only. `vehicles`
+    // is one flat array across every team (human and every AI opponent), so
+    // without this filter every enemy unit would show up here too, and
+    // clicking one would hand the player driving control of it.
+    const instances = (this.vehicles?.instances ?? []).filter(
+      (i) => i.teamId === this.playerTeamId
+    );
     if (instances.length > 0) {
       const section = document.createElement('div');
       section.className = 'vehicle-section';
@@ -66,13 +78,17 @@ export class VehiclePicker {
       heading.textContent = 'Active Vehicles';
       section.appendChild(heading);
 
+      const grid = document.createElement('div');
+      grid.className = 'vehicle-section-grid';
+
       // Sort by creation time (oldest first)
       const sortedInstances = [...instances].sort((a, b) => a.createdAt - b.createdAt);
 
       for (const instance of sortedInstances) {
         const card = this._buildInstanceCard(instance);
-        section.appendChild(card);
+        grid.appendChild(card);
       }
+      section.appendChild(grid);
       this.grid.appendChild(section);
     }
 
@@ -85,6 +101,9 @@ export class VehiclePicker {
     heading.textContent = 'Available to Spawn';
     section.appendChild(heading);
 
+    const grid = document.createElement('div');
+    grid.className = 'vehicle-section-grid';
+
     // Produced units are not spawnable from the drawer.
     for (const def of this.catalog.filter((d) => d.spawnable !== false)) {
       const card = document.createElement('button');
@@ -95,10 +114,13 @@ export class VehiclePicker {
       const canvas = document.createElement('canvas');
       card.appendChild(canvas);
 
+      const caption = document.createElement('div');
+      caption.className = 'vehicle-card-caption';
+
       const label = document.createElement('span');
       label.className = 'vehicle-card-label';
       label.textContent = def.name;
-      card.appendChild(label);
+      caption.appendChild(label);
 
       // Turning circle comes from the built mesh's real wheelbase, not a
       // number typed into the catalog, so it can never drift from the model.
@@ -109,22 +131,25 @@ export class VehiclePicker {
       stats.textContent =
         `${def.speed} u/s · turning circle ` +
         (Number.isFinite(circle) ? `${circle.toFixed(1)} u` : 'none');
-      card.appendChild(stats);
+      caption.appendChild(stats);
 
       const lock = document.createElement('span');
       lock.className = 'vehicle-card-lock';
-      card.appendChild(lock);
+      caption.appendChild(lock);
+
+      card.appendChild(caption);
 
       card.addEventListener('click', () => {
         if (!this.unlocked.has(def.id)) return;
         this.onSelect?.(def);
       });
-      section.appendChild(card);
+      grid.appendChild(card);
       this.cards.set(def.id, { card, lock, def });
       this.applyLockState(def.id);
 
       this.previews.push(this.createPreview(def, canvas));
     }
+    section.appendChild(grid);
     this.grid.appendChild(section);
   }
 
@@ -137,10 +162,15 @@ export class VehiclePicker {
     const canvas = document.createElement('canvas');
     card.appendChild(canvas);
 
+    const caption = document.createElement('div');
+    caption.className = 'vehicle-card-caption';
+
     const label = document.createElement('span');
     label.className = 'vehicle-card-label';
     label.textContent = instance.def.name;
-    card.appendChild(label);
+    caption.appendChild(label);
+
+    card.appendChild(caption);
 
     card.addEventListener('click', () => {
       this.vehicles?.setActive(instance);
@@ -217,8 +247,13 @@ export class VehiclePicker {
   update(dt) {
     if (!this.open) return;
 
-    // Rebuild active vehicles section if instances have changed
-    const currentInstanceCount = this.vehicles?.instances?.length ?? 0;
+    // Rebuild active vehicles section if the player's own instances have
+    // changed. Counting only the player's own — not the raw total — so an AI
+    // opponent spawning or losing a unit doesn't spuriously rebuild the
+    // player's drawer every time.
+    const currentInstanceCount = (this.vehicles?.instances ?? []).filter(
+      (i) => i.teamId === this.playerTeamId
+    ).length;
     if (currentInstanceCount !== this.lastInstanceCount) {
       this.buildPreviews();
       this.lastInstanceCount = currentInstanceCount;
