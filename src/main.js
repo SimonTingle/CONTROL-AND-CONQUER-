@@ -34,6 +34,15 @@ import { NavGrid } from './core/navGrid.js';
 import { PerfHud } from './core/perfHud.js';
 import { IS_MOBILE } from './core/platform.js';
 
+// __APP_VERSION__/__BUILD_TIME__ are literal strings substituted at build
+// time by vite.config.js's `define` — not runtime values, so they describe
+// exactly what was actually built, including a `-dirty` suffix if the build
+// was made from uncommitted changes. Logged before any game setup runs, so
+// "which version is this" is answerable even from a broken load — and
+// stamped onto `game` (once it exists, see `beginMatch`'s neighbourhood)
+// for console access without scrolling back through the log.
+console.log(`[Procedural Terrain] ${__APP_VERSION__} · built ${__BUILD_TIME__}`);
+
 const canvas = document.getElementById('viewport');
 
 // docs/performance-optimization-plan.md Phase 1 — mobile was measured at
@@ -825,6 +834,8 @@ const game = {
   // settings drawer's "Performance" group (controlSchema.js).
   shadowQuality,
   setShadowQuality: applyShadowQuality,
+  version: __APP_VERSION__,
+  buildTime: __BUILD_TIME__,
 };
 
 const menu = new Menu(buildSchema(world, view, game));
