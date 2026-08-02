@@ -32,8 +32,9 @@ export const STRUCTURE_CATALOG = [
     footprint: 13, // radius it claims when checking overlap with neighbours
     // A list, not one id: commands.js turns each entry into its own build
     // command, so adding a unit here is the whole change — no new command, no
-    // AI change (aiCommander picks by tag off the produced defs).
-    produces: ['crystal-harvester', 'gun-platform'],
+    // AI change (aiCommander picks by tag off the produced defs). Economy
+    // only — military production moved to armed-factory, below.
+    produces: ['crystal-harvester'],
     /** The bootstrap: without this the first harvester could never be afforded.
      * Ships `produces[0]` — the economy unit, never a combat one. */
     freeUnitOnComplete: true,
@@ -63,6 +64,39 @@ export const STRUCTURE_CATALOG = [
       { cost: 8500, unloadRateMultiplier: 2.6 },
       { cost: 11000, unloadRateMultiplier: 2.85 },
     ],
+  },
+  {
+    id: 'armed-factory',
+    name: 'Armed Factory',
+    description: 'Produces military vehicles. Units wait outside the base once built.',
+    role: 'structure',
+    tags: ['production', 'combat'],
+    // A real building, not a bootstrap — by the time a team can afford one it
+    // already has an economy running, unlike harvester-facility's free-by-
+    // necessity price.
+    cost: 1200,
+    maxHealth: 600,
+    sightRadius: 34,
+    buildTime: 8, // a beat slower than the harvester facility — heavier build
+    footprint: 13, // same as harvester-facility, the pattern this is modelled on
+    // Light Tank checked first: while under its own cap, aiCommander's
+    // per-structure produce scan (_tryBuildUnit) prefers it over topping up
+    // scouts, since produces order is the tie-break within one structure.
+    produces: ['gun-platform', 'scout-buggy'],
+    // Deliberately no freeUnitOnComplete — unlike the harvester facility this
+    // isn't bootstrapping a team from zero credits, so it ships nothing free.
+    // Spawn location is handled entirely by commands.js's armed-factory build
+    // commands, which anchor produceUnit() on the team's base station instead
+    // of this building — see buildNearBaseCommands there for why.
+    dockOffset: 12,
+    dims: {
+      width: 18,
+      depth: 14,
+      height: 7,
+      roofHeight: 2.2,
+      doorWidth: 7,
+    },
+    colors: { shell: '#463228', trim: '#b2860a', accent: '#ff5a2a', dark: '#20140f' },
   },
   {
     id: 'repair-bay',

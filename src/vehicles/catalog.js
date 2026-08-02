@@ -14,6 +14,12 @@ export const VEHICLE_CATALOG = [
     tags: ['recon', 'combat'],
     // Always available — it is the vehicle that does the unlocking.
     unlock: null,
+    // Only spent when *produced* (armed-factory's build command, below) — the
+    // free starting scout and any picked from the sandbox drawer bypass this
+    // entirely, so it costs nothing to keep exploring with the one you start
+    // with. Cheaper than a harvester: it's a light recon/harassment unit, not
+    // economic infrastructure, and shouldn't compete with it on priority.
+    cost: 350,
     maxHealth: 100,
     // Gun. The range/arc/slew numbers drive the scan sweep today and are the
     // same ones target acquisition will read once there is anything to shoot.
@@ -27,12 +33,15 @@ export const VEHICLE_CATALOG = [
       armedSpeedFactor: 0.35,
       armedSteerFactor: 0.4,
       // A scout's gun is real but light: it wins a skirmish against another
-      // scout, and loses badly to anything built to fight. 8 dps against the
-      // gun platform's 400 hp is fifty seconds — it cannot brute-force a
-      // fight it shouldn't be in.
-      damage: 6,
-      fireInterval: 0.75, // seconds between shots
+      // scout (a duel takes ~75s), and loses badly to anything built to
+      // fight — 1.33 dps against the Light Tank's 400 hp is five minutes,
+      // so it cannot brute-force a fight it shouldn't be in. Still fires
+      // often enough to matter, unlike a purely symbolic once-every-5s tick.
+      damage: 2,
+      fireInterval: 1.5, // seconds between shots — the slowest gun in the game
       muzzleHeight: 1.9, // world units above the hull origin, for LOS and tracers
+      projectileColor: 0xff2a1a, // red, distinguishes the scout's popgun on screen
+      projectileSpeed: 130, // world units/second the cosmetic shot travels at
     },
     // World units of fog it clears. Tuned against the island's actual land area:
     // at 22 u/s a straight run sweeps ~2r per unit travelled, so 55 puts Easy
@@ -279,15 +288,19 @@ export const VEHICLE_CATALOG = [
   },
 
   {
+    // Internal id stays 'gun-platform' — only the display name changed.
+    // Nothing keys off the name: catalog lookups, aiCommander's range
+    // read, cap tracking, and the auto-generated `build-gun-platform`
+    // command id all key off this id and are untouched by the rename.
     id: 'gun-platform',
-    name: 'Gun Platform',
+    name: 'Light Tank',
     description: 'Six-wheel weapons carrier. Slow, tough, and the only thing built to win a fight.',
     role: 'unit',
     tags: ['combat'],
-    // Same reasoning as the harvester: produced by a facility, not conjured
+    // Same reasoning as the harvester: produced by a building, not conjured
     // from the drawer, so it costs what the economy says it costs.
     spawnable: false,
-    producedBy: 'harvester-facility',
+    producedBy: 'armed-factory',
     // A real step up from a harvester's 600 (it's a combat asset, priced like
     // one), but not so far above it that an economy has to run several build
     // cycles deep before affording one — that gap was most of why an
@@ -308,6 +321,8 @@ export const VEHICLE_CATALOG = [
       damage: 22,
       fireInterval: 1.4,
       muzzleHeight: 2.4,
+      projectileColor: 0xffa018, // amber — reads distinctly from the scout's red
+      projectileSpeed: 190, // heavier gun, faster shot — closes its longer range quicker
     },
 
     sightRadius: 46,

@@ -13,6 +13,7 @@
 
 import { STRUCTURE_CATALOG } from '../structures/structures.js';
 import { VEHICLE_CATALOG } from './catalog.js';
+import { WEAPON_TIERS } from '../core/team.js';
 
 /**
  * @param {object} instance the VehicleInstance the menu was opened on
@@ -131,6 +132,37 @@ const UPGRADE_COMMAND = {
 };
 
 /**
+ * Team-scoped counterpart to UPGRADE_COMMAND — same hint/enabled/execute
+ * shape, but reads and writes `team.weaponTier`/`WEAPON_TIERS` instead of a
+ * building's own `instance.upgradeLevel`/`def.upgradeTiers`. One purchase
+ * speeds up every combat vehicle the team owns, present and future — see
+ * core/team.js's WEAPON_TIERS doc comment for why.
+ */
+const TEAM_WEAPON_UPGRADE_COMMAND = {
+  id: 'upgrade-weapons',
+  label: 'Upgrade Weapons',
+  hint(instance, ctx) {
+    const team = ctx.game.teamOf(instance);
+    const tier = WEAPON_TIERS[team.weaponTier];
+    if (!tier) return 'Max tier';
+    return `${tier.cost} cr — tier ${team.weaponTier + 1}/${WEAPON_TIERS.length}`;
+  },
+  enabled(instance, ctx) {
+    const team = ctx.game.teamOf(instance);
+    if (team.weaponTier >= WEAPON_TIERS.length) return 'Already at max tier';
+    const tier = WEAPON_TIERS[team.weaponTier];
+    if (team.credits < tier.cost) return `Needs ${tier.cost} cr (have ${Math.floor(team.credits)})`;
+    return true;
+  },
+  execute(instance, ctx) {
+    const team = ctx.game.teamOf(instance);
+    const tier = WEAPON_TIERS[team.weaponTier];
+    if (!tier) return;
+    if (team.spend(tier.cost)) team.weaponTier++;
+  },
+};
+
+/**
  * One "Build X" command per unit a structure produces, generated from the
  * catalog rather than written out. Adding a unit to a structure's `produces`
  * list is then the entire change — no command to write, and nothing here to
@@ -156,6 +188,67 @@ function producedByCommands(structureId) {
       // spend() is the gate, not the enabled() check — that ran when the
       // menu opened and the balance can have moved since.
       if (ctx.game.teamOf(instance).spend(unitDef.cost)) ctx.produceUnit(unitDef, instance);
+    },
+  }));
+}
+
+/**
+ * The spot a newly produced military vehicle waits: near the team's base
+ * station, just outside its pad — not next to the Armed Factory that built
+ * it. produceUnit() only ever reads `.x`/`.z`/`.angle`/`.def.dockOffset`/
+ * `.dock` off whatever "facility" it's handed, so this builds a small
+ * stand-in shaped like one instead of passing the Armed Factory itself.
+ */
+function baseSpawnAnchor(instance, ctx) {
+  const base = ctx.vehicles.instanceOf(ctx.vehicles.defOf('base-station'), instance.teamId);
+  if (!base) return instance; // no base to anchor on — fall back to the factory's own spot
+  const pad = basePad(base, ctx);
+  const pos = base.group.position;
+  return {
+    x: pos.x,
+    z: pos.z,
+    angle: base.heading,
+    dock: pos,
+    // Clears the pad's flattened disc (and whatever else is built on it) —
+    // sized off the pad's own radius, not a guessed constant, since a base
+    // that relocated could sit on a differently-sized pad than the default.
+    def: { dockOffset: (pad?.radius ?? base.def.deploy.padRadius) + 8 },
+    // produceUnit reads this straight off the anchor it's handed — omitting
+    // it silently defaulted every produced unit to team 0's vehicles.spawn
+    // default, confirmed live: three AI teams' Light Tanks all turned up
+    // owned by team 0. instance.teamId (the Armed Factory's own) is correct
+    // here, not base.teamId — the two only differ if a base is ever captured
+    // independently of its buildings, which cannot happen today, but reading
+    // the producing structure's own team is the honest source of truth.
+    teamId: instance.teamId,
+  };
+}
+
+/**
+ * producedByCommands' counterpart for a structure whose units should spawn
+ * at the team's base rather than at the structure itself — currently just
+ * the Armed Factory. Same shape, only `execute`'s spawn anchor differs.
+ */
+function producedNearBaseCommands(structureId) {
+  const def = STRUCTURE_CATALOG.find((d) => d.id === structureId);
+  const produces = def?.produces ?? [];
+  return produces.map((unitId) => ({
+    id: `build-${unitId}`,
+    label: `Build ${VEHICLE_CATALOG.find((v) => v.id === unitId)?.name ?? unitId}`,
+    hint: (instance, ctx) => `${ctx.vehicles.defOf(unitId).cost} cr`,
+    enabled(instance, ctx) {
+      const unitDef = ctx.vehicles.defOf(unitId);
+      const team = ctx.game.teamOf(instance);
+      if (team.credits < unitDef.cost) {
+        return `Needs ${unitDef.cost} cr (have ${Math.floor(team.credits)})`;
+      }
+      return true;
+    },
+    execute(instance, ctx) {
+      const unitDef = ctx.vehicles.defOf(unitId);
+      if (ctx.game.teamOf(instance).spend(unitDef.cost)) {
+        ctx.produceUnit(unitDef, baseSpawnAnchor(instance, ctx));
+      }
     },
   }));
 }
@@ -272,6 +365,31 @@ const COMMANDS = {
         },
       },
       {
+        id: 'build-armed-factory',
+        label: 'Armed Factory',
+        hint: (instance, ctx) => `${ctx.structures.defOf('armed-factory').cost} cr`,
+        enabled(instance, ctx) {
+          const pad = basePad(instance, ctx);
+          if (!pad || !pad.complete) return 'Needs a finished pad';
+          const def = ctx.structures.defOf('armed-factory');
+          if (ctx.structures.instanceOf('armed-factory', instance.teamId)) return 'Already built';
+          const team = ctx.game.teamOf(instance);
+          if (team.credits < def.cost) {
+            return `Needs ${def.cost} cr (have ${Math.floor(team.credits)})`;
+          }
+          if (!ctx.structures.freeSlot(pad, def.footprint)) return 'No free slot on the pad';
+          return true;
+        },
+        execute(instance, ctx) {
+          const pad = basePad(instance, ctx);
+          const def = ctx.structures.defOf('armed-factory');
+          // spend() is the real gate — balance can have moved since the menu
+          // opened — so only enter placement mode once it actually clears.
+          if (!pad || !ctx.game.teamOf(instance).spend(def.cost)) return;
+          ctx.buildPlacementMode = { def, pad };
+        },
+      },
+      {
         id: 'relocate-base',
         label: 'Relocate Base',
         hint: 'Leaves a power spire behind',
@@ -297,6 +415,11 @@ const COMMANDS = {
   'harvester-facility': {
     building: [],
     idle: [...producedByCommands('harvester-facility'), UPGRADE_COMMAND],
+  },
+
+  'armed-factory': {
+    building: [],
+    idle: [...producedNearBaseCommands('armed-factory'), TEAM_WEAPON_UPGRADE_COMMAND],
   },
 
   'repair-bay': {
