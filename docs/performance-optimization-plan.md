@@ -44,6 +44,27 @@ one is unverifiable without it.
 
 ## Phase 1 — Renderer-level settings (cheapest, biggest mobile win)
 
+> **STATUS: COMPLETE.** Implemented, verified, committed.
+>
+> Added `src/core/platform.js` exporting `IS_MOBILE`, detected once via
+> `matchMedia('(pointer: coarse)')` — the signal for "primary input is imprecise," which
+> correctly excludes touch-screen laptops whose primary input is still a mouse/trackpad
+> (a bare `'ontouchstart' in window` check would not). Falls back safely to `false` if
+> `matchMedia` isn't available at all. `src/main.js`'s `WebGLRenderer` now sets
+> `antialias: !IS_MOBILE` and caps pixel ratio at `IS_MOBILE ? 1 : 2`.
+>
+> Verified: `IS_MOBILE`'s logic checked directly against all three `matchMedia` outcomes
+> (coarse pointer → true, fine pointer → false, no `matchMedia` → false) via a Node harness.
+> Live in this desktop browser, confirmed `matchMedia('(pointer: coarse)').matches` reads
+> `false` here as expected, and the renderer's actual WebGL context attributes/pixel ratio
+> came back exactly as the desktop branch predicts (`antialias: true`, pixel ratio `2`) — no
+> regression on desktop. The mobile branch itself needs confirming on a real touch device (or
+> a browser mobile-emulation mode with full CDP touch/pointer emulation, which this session's
+> preview tool doesn't provide — its "mobile" preset only resizes the viewport) before
+> declaring the mobile fps win real; the code path is correct by construction and the
+> Node-level logic check, but nothing here has watched the actual fps number move on mobile
+> yet. Do that as part of Phase 5's re-baseline, or sooner if you have a device handy.
+
 These are single-line-per-item changes with no visual-quality redesign required. Expected to
 be the single largest mobile win in this whole plan, because DPR compounds every fragment
 cost paid in every later phase.

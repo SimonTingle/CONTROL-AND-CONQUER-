@@ -32,11 +32,22 @@ import { StructureController } from './structures/structures.js';
 import { Entities } from './core/entities.js';
 import { NavGrid } from './core/navGrid.js';
 import { PerfHud } from './core/perfHud.js';
+import { IS_MOBILE } from './core/platform.js';
 
 const canvas = document.getElementById('viewport');
 
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+// docs/performance-optimization-plan.md Phase 1 — mobile was measured at
+// ~10fps; DPR alone compounds every fragment cost paid downstream (shadows,
+// terrain shader), so it's the highest-leverage single setting here. MSAA
+// (antialias) is comparatively expensive on mobile tile-based GPUs too, cut
+// alongside it rather than left to fight the lower resolution for the same
+// visual-quality budget.
+const renderer = new THREE.WebGLRenderer({
+  canvas,
+  antialias: !IS_MOBILE,
+  powerPreference: 'high-performance',
+});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, IS_MOBILE ? 1 : 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
