@@ -50,7 +50,6 @@ const renderer = new THREE.WebGLRenderer({
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, IS_MOBILE ? 1 : 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.5, 6000);
@@ -64,6 +63,41 @@ document.addEventListener('keydown', (e) => {
 
 const world = new World(renderer);
 const { heightmap } = world;
+
+// docs/performance-optimization-plan.md Phase 2 — shadows were identified as
+// the likely single biggest mobile GPU cost: PCFSoftShadowMap (multi-tap
+// per fragment) at a 2048² map. Mobile now defaults to a cheap, unfiltered
+// map at half the resolution; desktop keeps the soft/high-res look. Exposed
+// as a settings-drawer toggle (controlSchema.js's "Performance" group) so
+// either platform can opt into the other's setting — a phone that turns out
+// to handle it fine, or a desktop user who'd rather have the fps.
+const shadowQuality = { high: !IS_MOBILE };
+function applyShadowQuality(high) {
+  shadowQuality.high = high;
+  renderer.shadowMap.type = high ? THREE.PCFSoftShadowMap : THREE.BasicShadowMap;
+  const size = high ? 2048 : 1024;
+  const sun = world.atmosphere.sunLight;
+  sun.shadow.mapSize.set(size, size);
+  // Three.js only allocates the shadow render target at this size on next
+  // use; disposing the old one (if any) forces that reallocation instead of
+  // silently keeping the previous resolution.
+  sun.shadow.map?.dispose();
+  sun.shadow.map = null;
+  renderer.shadowMap.needsUpdate = true;
+  // The shadow filter algorithm is baked into each material's compiled
+  // shader program at first use, not read live from renderer.shadowMap.type
+  // on every frame — so without this, the settings-drawer toggle would only
+  // affect meshes created *after* it's flipped, not the ones already on
+  // screen. Forcing every current material to recompile makes it apply
+  // immediately, matching what the toggle visibly promises.
+  world.scene.traverse((obj) => {
+    if (!obj.material) return;
+    for (const mat of Array.isArray(obj.material) ? obj.material : [obj.material]) {
+      mat.needsUpdate = true;
+    }
+  });
+}
+applyShadowQuality(shadowQuality.high);
 
 camera.position.set(240, heightmap.params.amplitude * 1.5, 320);
 const controls = createCameraControls(camera, canvas, heightmap);
@@ -787,6 +821,10 @@ const game = {
     alert(`Found a save from ${new Date(snapshot.savedAt).toLocaleString()} (placeholder — restoring it isn't implemented yet).`);
     return snapshot;
   },
+  // docs/performance-optimization-plan.md Phase 2 — read/written by the
+  // settings drawer's "Performance" group (controlSchema.js).
+  shadowQuality,
+  setShadowQuality: applyShadowQuality,
 };
 
 const menu = new Menu(buildSchema(world, view, game));

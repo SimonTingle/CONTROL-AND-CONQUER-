@@ -89,6 +89,36 @@ smaller (or no) desktop change, since desktop wasn't DPR-constrained the same wa
 
 ## Phase 2 — Shadows (second-biggest expected win, mobile especially)
 
+> **STATUS: PARTIALLY COMPLETE.** Filter/resolution split + settings toggle implemented,
+> committed. Caster-set trimming (this phase's third bullet, below) deliberately deferred —
+> out of scope for this pass, tracked as follow-up.
+>
+> Mobile now defaults to `THREE.BasicShadowMap` (no filtering) at 1024², desktop keeps
+> `PCFSoftShadowMap` at 2048² — both driven off Phase 1's `IS_MOBILE`. Exposed live in the
+> settings drawer as a "High-quality shadows" toggle (new "Performance" group,
+> `controlSchema.js`) reading/writing `game.shadowQuality.high` via `game.setShadowQuality()`
+> — either platform can override its default in either direction.
+>
+> One correctness subtlety caught and fixed during implementation, not obvious from the Three.js
+> API surface: the shadow-filter algorithm (`SHADOWMAP_TYPE_*`) is a compile-time define baked
+> into each material's shader program the first time it's used, not read live from
+> `renderer.shadowMap.type` every frame. Setting the renderer property alone would only affect
+> materials compiled *after* the toggle fires — every vehicle/structure already on screen would
+> silently keep whatever filter was active at their own first render, making the toggle a no-op
+> for anything already in the scene. Fixed by walking `world.scene` and setting
+> `material.needsUpdate = true` on every current material inside `applyShadowQuality()`, forcing
+> an immediate recompile so the toggle actually takes visible effect rather than only applying
+> to future meshes.
+>
+> **Verification gap, flagged honestly**: syntax-checked and reasoned through carefully (the
+> `needsUpdate` fix above came from that review, not from observing a bug live), but not
+> confirmed with a running frame — this session hit the same live-preview infrastructure
+> flakiness noted in earlier phases, and stopped retrying to stay within the session's token
+> budget rather than burn further cycles fighting it. Live confirmation (toggle actually
+> changes shadow softness/resolution on screen, no console errors, initial mobile/desktop
+> defaults render correctly) is the natural first thing to check before trusting this further —
+> worth doing before or as part of Phase 5's re-baseline.
+
 The shadow pass was identified as the likely single biggest GPU cost on mobile: `PCFSoftShadowMap`
 (multi-tap-per-fragment, the most expensive of Three's shadow filters) at 2048×2048, with
 `castShadow` enabled broadly across nearly every vehicle sub-mesh, structure sub-mesh,

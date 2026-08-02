@@ -32,6 +32,18 @@ export function buildSchema(world, view, game) {
       ],
     },
     {
+      title: 'Performance',
+      controls: [
+        // Defaults to off on mobile, on on desktop — see
+        // docs/performance-optimization-plan.md Phase 2. Soft shadows are
+        // several times more expensive per fragment than the alternative;
+        // this just lets either platform override the default in either
+        // direction rather than being stuck with it.
+        toggle('High-quality shadows',
+          () => game.shadowQuality.high, (v) => game.setShadowQuality(v)),
+      ],
+    },
+    {
       title: 'Atmosphere',
       open: true,
       controls: [
