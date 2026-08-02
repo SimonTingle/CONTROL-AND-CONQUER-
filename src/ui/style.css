@@ -430,6 +430,28 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
 
 #hud.hidden { display: none; }
 
+/* ---- perf HUD — docs/performance-optimization-plan.md Phase 0 ---- */
+
+#perf-hud {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 50;
+  margin: 0;
+  padding: 6px 9px;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  color: #7fffb0;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 6px;
+  white-space: pre;
+  pointer-events: none;
+}
+
+#perf-hud.hidden { display: none; }
+
 .hud-name {
   font-size: 12px;
   font-weight: 600;

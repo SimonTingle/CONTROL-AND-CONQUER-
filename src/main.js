@@ -31,6 +31,7 @@ import { Terraform } from './core/terraform.js';
 import { StructureController } from './structures/structures.js';
 import { Entities } from './core/entities.js';
 import { NavGrid } from './core/navGrid.js';
+import { PerfHud } from './core/perfHud.js';
 
 const canvas = document.getElementById('viewport');
 
@@ -42,6 +43,13 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.5, 6000);
+
+// docs/performance-optimization-plan.md Phase 0 — on by default via ?perf=1,
+// toggleable at runtime with the 'p' key (mirrors the settings drawer's 'm').
+const perfHud = new PerfHud();
+document.addEventListener('keydown', (e) => {
+  if (e.key.toLowerCase() === 'p' && e.target === document.body) perfHud.toggle();
+});
 
 const world = new World(renderer);
 const { heightmap } = world;
@@ -1468,6 +1476,8 @@ function tick(dt, { render = true } = {}) {
   );
   vehiclePicker.update(dt);
   renderer.render(world.scene, camera);
+  perfHud.record(dt);
+  perfHud.render(renderer);
 
   frames++;
   statsTimer += dt;
@@ -1532,6 +1542,45 @@ window.__step = (seconds, dt = 1 / 60) => {
   return { steps, simulated: +(steps * dt).toFixed(2) };
 };
 
+/**
+ * Fixed, repeatable scene for A/B testing performance changes —
+ * docs/performance-optimization-plan.md Phase 0. Same terrain seed (the
+ * heightmap's untouched default), same camera framing, same vehicle count
+ * and layout every call, so a before/after fps comparison actually measures
+ * the code change and not scene variance. Only meaningful once a match has
+ * started (sandbox or Multiplayer AI) — call after choosing a mode, or use
+ * the `?benchmark=<n>` URL param to skip the portal entirely.
+ *
+ * Run from the console: `__benchmark()`, or `__benchmark({ vehicleCount: 40 })`
+ * for the denser scene Phase 4 (draw-call reduction) is measured against.
+ *
+ * @param {object} [opts]
+ * @param {number} [opts.vehicleCount] armed vehicles spawned in a fixed grid
+ *   in front of the camera.
+ */
+window.__benchmark = ({ vehicleCount = 20 } = {}) => {
+  controls.enabled = false;
+  camera.position.set(0, 140, 220);
+  camera.lookAt(0, 0, 0);
+
+  const gunDef = vehicles.defOf('gun-platform');
+  const cols = Math.ceil(Math.sqrt(vehicleCount));
+  const spacing = 14;
+  for (let i = 0; i < vehicleCount; i++) {
+    const x = (i % cols) * spacing - (cols * spacing) / 2;
+    const z = Math.floor(i / cols) * spacing + 40;
+    const y = heightmap.heightAt(x, z) + 0.05;
+    const v = vehicles.spawn(gunDef, { x, y, z }, 0, { activate: false, teamId: i % 2 });
+    v.mode = 'armed';
+  }
+
+  perfHud.setVisible(true);
+  console.log(
+    `[benchmark] ${vehicleCount} vehicles spawned, camera fixed, perf HUD on. ` +
+    `Let it settle a few seconds, then read the overlay (top-left) or window.perfHud.samples.`
+  );
+};
+
 // Wait for the first frame before revealing, so the terrain never flashes in.
 requestAnimationFrame(() => {
   requestAnimationFrame(() => document.getElementById('loading').classList.add('hidden'));
@@ -1574,5 +1623,21 @@ Object.assign(window, {
   syncQueueIcons, queueIcons, checkBaseRepositioning,
   updatePlacementPreview, placementPreview, snapToGrid, footprintSize, resizeFootprintOutline,
   entities, pendingRespawns, pickSelectable, combatController, leaveWreckage,
-  showTracer, updateTracers, tracers, tick,
+  showTracer, updateTracers, tracers, tick, perfHud,
 });
+
+// docs/performance-optimization-plan.md Phase 0 — `?perf=1` shows the HUD
+// immediately; `?benchmark=<n>` additionally skips the portal straight into
+// a fixed sandbox scene with `<n>` vehicles, for platforms (mobile) where
+// typing into a console isn't practical.
+{
+  const params = new URLSearchParams(location.search);
+  if (params.has('perf') || params.has('benchmark')) perfHud.setVisible(true);
+  if (params.has('benchmark')) {
+    const vehicleCount = parseInt(params.get('benchmark'), 10) || 20;
+    game.portalScreen.choose('sandbox');
+    game.difficultyScreen.choose(DIFFICULTIES.find((d) => d.id === 'normal') ?? DIFFICULTIES[1]);
+    // One frame so the world/heightmap actually exist before spawning into it.
+    requestAnimationFrame(() => window.__benchmark({ vehicleCount }));
+  }
+}
