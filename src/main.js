@@ -609,6 +609,21 @@ canvas.addEventListener('pointerup', (e) => {
     return;
   }
 
+  // Handle sustained-fire target selection mode
+  if (commandContext.targetSelectMode) {
+    const { unit } = commandContext.targetSelectMode;
+    const hit = pickSelectable(e.clientX, e.clientY);
+    // A miss, a friendly, or the unit's own self cancels the mode without
+    // ordering anything — same "invalid click has no other effect" shape as
+    // harvest targeting, just filtered to "a live enemy" instead of "a field".
+    if (unit && !unit.dead && hit && hit !== unit && !hit.dead && hit.teamId !== unit.teamId) {
+      unit.mode = 'armed';
+      unit.combatTarget = hit;
+    }
+    commandContext.targetSelectMode = null;
+    return;
+  }
+
   if (!input.tapToMove || dragged || e.button !== 0) return;
 
   const point = pickTerrain(e.clientX, e.clientY, canvas, camera, heightmap, hit);
@@ -714,6 +729,7 @@ addEventListener('keydown', (e) => {
     game.portalScreen?.open || game.difficultyScreen?.open || game.aiDifficultyScreen?.open;
   if (k in driveKeys && !isTextInputFocused() && !overlayOpen) driveKeys[k] = true;
   if (e.key === 'Escape' && commandContext.buildPlacementMode) cancelPlacementMode();
+  if (e.key === 'Escape' && commandContext.targetSelectMode) commandContext.targetSelectMode = null;
   // Debug: destroy whatever's under the cursor — 2B's destroy pipeline has
   // nothing to trigger it yet (combat is 2D), so this is its only way to run
   // until then.
@@ -984,6 +1000,10 @@ for (let i = 0; i < TRACER_POOL_SIZE; i++) {
   glow.visible = false;
   core.frustumCulled = false; // position moves every frame; a stale bound would pop
   glow.frustumCulled = false;
+  // Only the solid core casts — the additive halo isn't meant to read as a
+  // real object, and shadowing from both would just double up on a target
+  // this small.
+  core.castShadow = true;
   world.scene.add(core, glow);
   tracers.push({
     core,
@@ -1556,7 +1576,9 @@ function tick(dt, { render = true } = {}) {
   syncQueueIcons();
   canvas.classList.toggle(
     'crosshair-mode',
-    !!commandContext.harvestSelectMode || !!commandContext.buildPlacementMode
+    !!commandContext.harvestSelectMode ||
+      !!commandContext.buildPlacementMode ||
+      !!commandContext.targetSelectMode
   );
   vehiclePicker.update(dt);
   renderer.render(world.scene, camera);

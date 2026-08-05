@@ -101,6 +101,24 @@ const REPAIR_COMMAND = {
 };
 
 /**
+ * Opens click-to-target mode (resolved in main.js's pointerup handler, same
+ * shape as harvestSelectMode): the next click on an enemy vehicle locks
+ * sustained fire onto it. Auto-arms rather than requiring a separate
+ * Arm/Disarm step first — the point of this command is "fight that one",
+ * not "prepare to fight". combatController's own _validTarget gate (range/
+ * LoS/team/dead) does the rest: the lock clears itself once the target dies
+ * or breaks contact, at which point normal automatic acquisition resumes.
+ */
+const SELECT_TARGET_COMMAND = {
+  id: 'select-target',
+  label: 'Select target',
+  hint: 'Click an enemy to lock fire on it',
+  execute(instance, ctx) {
+    ctx.targetSelectMode = { unit: instance };
+  },
+};
+
+/**
  * Shared by every building def that carries an `upgradeTiers` array —
  * currently the repair bay and the harvester facility. Per-instance: each
  * building tracks its own `upgradeLevel`, so upgrading one never touches
@@ -268,9 +286,28 @@ const COMMANDS = {
           instance.target = null;
         },
       },
+      SELECT_TARGET_COMMAND,
       REPAIR_COMMAND,
     ],
     armed: [
+      SELECT_TARGET_COMMAND,
+      {
+        id: 'disarm',
+        label: 'Disarm',
+        hint: 'Full speed restored',
+        execute(instance) {
+          instance.mode = 'mobile';
+        },
+      },
+    ],
+  },
+
+  'gun-platform': {
+    // No separate arm step — select-target itself arms (see the command's own
+    // comment). This mode list only needs a way back out.
+    mobile: [SELECT_TARGET_COMMAND],
+    armed: [
+      SELECT_TARGET_COMMAND,
       {
         id: 'disarm',
         label: 'Disarm',
