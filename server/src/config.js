@@ -35,4 +35,10 @@ export const config = {
   isProduction: process.env.NODE_ENV === 'production',
 
   sessionTtlDays: Number(process.env.SESSION_TTL_DAYS ?? 30),
+
+  // 'lax' is right for the normal CapRover layout, where the frontend and the
+  // API are subdomains of one registrable domain and so count as same-site.
+  // Only a genuinely cross-site deploy needs 'none', which also requires
+  // Secure (and therefore HTTPS) or browsers will drop the cookie entirely.
+  cookieSameSite: process.env.COOKIE_SAMESITE ?? 'lax',
 };

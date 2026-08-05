@@ -13,6 +13,8 @@ import rateLimit from '@fastify/rate-limit';
 import { config } from './config.js';
 import { pool } from './db/pool.js';
 import { migrate } from './db/migrate.js';
+import authPlugin from './auth/plugin.js';
+import { authRoutes } from './routes/auth.js';
 
 export async function build() {
   const app = Fastify({
@@ -60,6 +62,11 @@ export async function build() {
       return reply.code(503).send({ status: 'not-ready', database: 'down' });
     }
   });
+
+  // Resolves req.user from the session cookie; must be registered before any
+  // route that reads it.
+  await app.register(authPlugin);
+  await app.register(authRoutes);
 
   return app;
 }

@@ -7,7 +7,15 @@
 const REBUILD_DEBOUNCE_MS = 90;
 
 export class Menu {
+  /**
+   * @param {Array|Function} schema the control groups, or a function returning
+   *   them. Pass a function when some control's *label* (not just its value)
+   *   depends on state that changes at runtime — signing in and out rewrites
+   *   the Account row's text, which refreshValues() cannot do because it only
+   *   re-reads getters into existing widgets.
+   */
   constructor(schema) {
+    this.buildSchema = typeof schema === 'function' ? schema : () => schema;
     this.toggleButton = document.getElementById('menu-toggle');
     this.panel = document.getElementById('panel');
     this.body = document.getElementById('panel-body');
@@ -21,7 +29,12 @@ export class Menu {
       if (e.key.toLowerCase() === 'm' && e.target === document.body) this.setOpen(!this.open);
     });
 
-    this.render(schema);
+    this.render(this.buildSchema());
+  }
+
+  /** Re-render from scratch. For value-only updates prefer refreshValues(). */
+  rebuild() {
+    this.render(this.buildSchema());
   }
 
   setOpen(open) {
