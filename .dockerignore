@@ -3,3 +3,7 @@ dist
 .git
 .claude
 *.md
+
+# The API server is its own CapRover app with its own Dockerfile; it has no
+# business in the static frontend image's build context.
+server

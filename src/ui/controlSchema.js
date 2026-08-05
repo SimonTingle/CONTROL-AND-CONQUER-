@@ -9,6 +9,8 @@
  * therefore needs a (debounced) CPU regeneration. Everything else is a uniform
  * write and applies on the next frame.
  */
+import { api } from '../net/api.js';
+
 export function buildSchema(world, view, game) {
   const atmo = world.atmosphere;
   const terrain = world.heightmap.params;
@@ -21,7 +23,34 @@ export function buildSchema(world, view, game) {
   const toggle = (label, get, set) => ({ type: 'toggle', label, get, set });
   const color = (label, get, set) => ({ type: 'color', label, get, set });
 
+  // Accounts are entirely optional — this group hides itself in a build with
+  // no API server (__API_URL__ empty), so an offline build shows no sign-in
+  // affordance it cannot honour.
+  const accountGroup = api.isConfigured
+    ? [
+        {
+          title: 'Account',
+          controls: game.account
+            ? [
+                {
+                  type: 'button',
+                  label: `Sign out (${game.account.displayName})`,
+                  action: () => game.signOut(),
+                },
+              ]
+            : [
+                {
+                  type: 'button',
+                  label: 'Sign in / create account',
+                  action: () => game.signIn(),
+                },
+              ],
+        },
+      ]
+    : [];
+
   return [
+    ...accountGroup,
     {
       title: 'Save / Load',
       controls: [

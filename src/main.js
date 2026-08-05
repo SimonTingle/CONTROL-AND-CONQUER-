@@ -13,6 +13,8 @@ import { buildSchema } from './ui/controlSchema.js';
 import { VehiclePicker } from './ui/vehiclePicker.js';
 import { DifficultyScreen, DIFFICULTIES } from './ui/difficultyScreen.js';
 import { PortalScreen } from './ui/portalScreen.js';
+import { AuthScreen } from './ui/authScreen.js';
+import { api } from './net/api.js';
 import { AiDifficultyScreen } from './ui/aiDifficultyScreen.js';
 import { createTeams, PLAYER_TEAM_ID } from './core/team.js';
 import { FogMask } from './core/fogOfWar.js';
@@ -878,7 +880,7 @@ const game = {
   buildTime: __BUILD_TIME__,
 };
 
-const menu = new Menu(buildSchema(world, view, game));
+const menu = new Menu(() => buildSchema(world, view, game));
 
 const hud = new Hud();
 
@@ -1456,6 +1458,36 @@ game.matchEndScreen = new MatchEndScreen(() => {
 game.portalScreen = new PortalScreen((modeId) => {
   if (modeId === 'sandbox') game.difficultyScreen.show();
   else if (modeId === 'multiplayer-ai') game.aiDifficultyScreen.show();
+});
+
+// Accounts are optional and additive: `game.account` stays null when there's
+// no API server configured, when the server is unreachable, or when the player
+// simply hasn't signed in — and every one of those is a normal state the game
+// plays fine in. Only cloud saves and online multiplayer consult it.
+game.account = null;
+game.authScreen = new AuthScreen((user) => {
+  game.account = user;
+  menu.rebuild();
+});
+game.signIn = () => game.authScreen.show();
+game.signOut = async () => {
+  try {
+    await api.logout();
+  } catch {
+    // A failed logout request still means the player wants to be signed out
+    // locally; the session expires server-side on its own.
+  }
+  game.account = null;
+  menu.rebuild();
+};
+
+// Restores an existing session on load. Never throws and never blocks startup:
+// `api.me()` resolves to null for signed-out, no-backend, and unreachable
+// alike, because none of those should stop the game from starting.
+api.me().then((user) => {
+  if (!user) return;
+  game.account = user;
+  menu.rebuild();
 });
 
 addEventListener('resize', () => {

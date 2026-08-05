@@ -958,3 +958,104 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
 }
 
 #loading.hidden { opacity: 0; pointer-events: none; }
+
+/* ---- auth screen ---------------------------------------------------- */
+/* Same full-screen overlay treatment as #portal, so signing in reads as
+   part of the same flow rather than a separate dialog system. */
+
+#auth-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 33; /* above #portal, since it can be opened from in front of it */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(5, 8, 12, 0.94);
+  backdrop-filter: blur(6px);
+  transition: opacity 0.35s ease;
+}
+
+#auth-screen.hidden { opacity: 0; pointer-events: none; }
+
+.auth-panel { max-width: 380px; }
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  text-align: left;
+}
+
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.auth-field[hidden] { display: none; }
+
+.auth-field input {
+  padding: 9px 11px;
+  font: inherit;
+  font-size: 13px;
+  text-transform: none;
+  letter-spacing: normal;
+  color: #dce8f2;
+  background: rgba(8, 12, 17, 0.9);
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+}
+
+.auth-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.auth-error {
+  margin: 0;
+  font-size: 12px;
+  color: #ff8a7a;
+}
+
+.auth-error[hidden] { display: none; }
+
+.auth-submit {
+  margin-top: 4px;
+  padding: 10px;
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #04231f;
+  background: var(--accent);
+  border: 0;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.auth-submit:disabled { opacity: 0.55; cursor: default; }
+
+.auth-toggle,
+.auth-skip {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  padding: 4px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.auth-toggle:hover,
+.auth-skip:hover { color: var(--accent); }
+
+/* Visually quieter than the toggle — it's the way out, not a second action. */
+.auth-skip { font-size: 11px; opacity: 0.75; }
