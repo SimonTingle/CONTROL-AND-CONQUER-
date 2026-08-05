@@ -19,6 +19,12 @@ export class PerfHud {
     this.el = document.getElementById('perf-hud');
     this.samples = []; // frame times in ms, oldest first
     this.visible = false;
+    this.deviceLine = ''; // set once via setDeviceLine — mobile-branch readout, Phase 1 verification
+  }
+
+  /** One-line summary of the renderer settings IS_MOBILE actually produced, for on-device checks without devtools. */
+  setDeviceLine(text) {
+    this.deviceLine = text;
   }
 
   setVisible(visible) {
@@ -56,6 +62,7 @@ export class PerfHud {
     this.el.textContent =
       `${(1000 / avgMs).toFixed(0)} fps avg  ${(1000 / onePercentLowMs).toFixed(0)} fps 1% low  ${(1000 / worstMs).toFixed(0)} fps worst\n` +
       `${avgMs.toFixed(1)}ms avg  ${worstMs.toFixed(1)}ms worst\n` +
-      `${info.calls} draws  ${(info.triangles / 1000).toFixed(0)}k tris`;
+      `${info.calls} draws  ${(info.triangles / 1000).toFixed(0)}k tris` +
+      (this.deviceLine ? `\n${this.deviceLine}` : '');
   }
 }

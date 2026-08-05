@@ -299,6 +299,13 @@ export function buildVehicleMesh(def) {
   }
   group.userData.contactFit = { cx, cz, dxx, dzz };
 
+  // Priority-ordered for Phase 2's caster-set trimming (main.js's
+  // applyShadowQuality): the hull is the primary silhouette, the turret (if
+  // any) the next-most load-bearing shape. Everything else (wheels, cabin,
+  // nose, tank, barrel) keeps castShadow=true at build time but drops out
+  // first on mobile.
+  group.userData.shadowCasters = [hull, group.userData.turret].filter(Boolean);
+
   return group;
 }
 
