@@ -89,9 +89,16 @@ smaller (or no) desktop change, since desktop wasn't DPR-constrained the same wa
 
 ## Phase 2 — Shadows (second-biggest expected win, mobile especially)
 
-> **STATUS: PARTIALLY COMPLETE.** Filter/resolution split + settings toggle implemented,
-> committed. Caster-set trimming (this phase's third bullet, below) deliberately deferred —
-> out of scope for this pass, tracked as follow-up.
+> **STATUS: COMPLETE.** Filter/resolution split, settings toggle, and caster-set trimming
+> (this phase's third bullet) all implemented and verified live.
+>
+> **Caster-set trimming.** Each vehicle/structure's `group.userData.shadowCasters` array
+> (already used by `structures.js` for the under-construction hide/reveal toggle) is now
+> priority-ordered — primary silhouette first — and `applyShadowQuality()` (`main.js`) keeps
+> only the head of the array casting shadows when quality is low, dropping the rest. Added
+> the equivalent array to `vehicleFactory.js` (`[hull, turret]`), which had none before.
+> Verified live: toggling shadow quality off took a scout buggy from 2/2 active casters down
+> to 1/2 and back, exactly as designed.
 >
 > Mobile now defaults to `THREE.BasicShadowMap` (no filtering) at 1024², desktop keeps
 > `PCFSoftShadowMap` at 2048² — both driven off Phase 1's `IS_MOBILE`. Exposed live in the
@@ -148,6 +155,17 @@ looks too harsh, PCFShadowMap is the middle ground before reaching back for soft
 
 ## Phase 3 — Terrain fragment shader (fixed per-frame cost, independent of scene complexity)
 
+> **STATUS: COMPLETE** (octave reduction only — the other three bullets below are
+> unimplemented, deliberately left for a future pass if Phase 5's re-baseline still shows a
+> gap after this and Phase 4).
+>
+> `tg_fbm`'s octave counts are literal integers baked into the compiled GLSL at JS build
+> time (`terrainMaterial.js`), not uniforms — so branching on `IS_MOBILE` when building the
+> shader-string template produces a genuinely shorter compiled shader per platform (the
+> compiler dead-code-eliminates the unrolled loop iterations), not a runtime branch. Detail
+> 4→2 octaves, macro 3→2, strata 3→2 on mobile; desktop keeps 4/3/3. Verified live that
+> terrain still renders correctly (no visual corruption) on the desktop (unchanged) branch.
+
 This shader runs full-screen every frame regardless of camera angle or how many
 vehicles/structures are on screen — it's a cost you pay unconditionally, which makes it a
 priority even though it's more invasive to touch than Phases 1-2. It's also the likely
@@ -180,6 +198,16 @@ likely to need a quality/perf trade-off judgment call rather than being a free w
 ---
 
 ## Phase 4 — Vehicle/structure draw-call and mesh reduction
+
+> **STATUS: PARTIALLY COMPLETE** (third bullet only — LOD tiers now do something real;
+> instancing/merging/frustum-culling below are unimplemented, deferred pending Phase 5's
+> re-baseline).
+>
+> `updateLOD` (`vehicleController.js`) now drops a vehicle's shadow casters entirely at the
+> LOW tier (>100 units from camera), independent of the global shadow-quality setting — on
+> top of, not instead of, Phase 2's quality-driven trim. Verified live via direct tier
+> simulation: casters read `[true, true]` near the camera and `[false, false]` once placed
+> beyond the LOW threshold.
 
 Lower expected fps-per-effort than Phases 1-3, but addresses a real structural gap: vehicles
 and structures build from many separate, non-merged `THREE.Mesh` objects (15-25+ per

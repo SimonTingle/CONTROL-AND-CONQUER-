@@ -42,6 +42,12 @@ import { IS_MOBILE } from './core/platform.js';
 // stamped onto `game` (once it exists, see `beginMatch`'s neighbourhood)
 // for console access without scrolling back through the log.
 console.log(`[Procedural Terrain] ${__APP_VERSION__} · built ${__BUILD_TIME__}`);
+// Phase 1 verification gap: this environment's browser tooling has no real
+// touch/pointer CDP emulation, so IS_MOBILE can never actually read true
+// here. Logged plainly so a real device can confirm it without devtools —
+// see also the perf HUD's device line, set once the renderer/shadow settings
+// below are known.
+console.log(`[Procedural Terrain] IS_MOBILE=${IS_MOBILE}`);
 
 const canvas = document.getElementById('viewport');
 
@@ -105,8 +111,26 @@ function applyShadowQuality(high) {
       mat.needsUpdate = true;
     }
   });
+  // Caster-set trimming (Phase 2, second half): the filter/resolution change
+  // above cuts per-fragment cost; this cuts how many objects draw into the
+  // shadow pass at all. Each group's shadowCasters array (structures.js,
+  // vehicleFactory.js) is ordered primary-silhouette-first, so keeping only
+  // the head of the array on low quality drops secondary detail (masts,
+  // gantry rings, wheels, barrels) while the shape that actually reads as
+  // "this thing has a shadow" stays.
+  world.scene.traverse((obj) => {
+    const casters = obj.userData?.shadowCasters;
+    if (!casters) return;
+    const keep = high ? casters.length : 1;
+    casters.forEach((mesh, i) => {
+      mesh.castShadow = i < keep;
+    });
+  });
 }
 applyShadowQuality(shadowQuality.high);
+perfHud.setDeviceLine(
+  `mobile=${IS_MOBILE} aa=${!IS_MOBILE} px=${renderer.getPixelRatio()} shadows=${shadowQuality.high ? 'soft/2048' : 'basic/1024'}`
+);
 
 camera.position.set(240, heightmap.params.amplitude * 1.5, 320);
 const controls = createCameraControls(camera, canvas, heightmap);

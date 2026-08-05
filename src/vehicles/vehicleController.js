@@ -525,6 +525,15 @@ class VehicleInstance {
     if (newTier === this.lodTier) return;
     this.lodTier = newTier;
 
+    // Phase 4 draw-call/LOD reduction: a vehicle far enough away that its
+    // shadow wouldn't be missed loses it entirely, regardless of the global
+    // shadow-quality setting — this is on top of that setting's own
+    // caster-priority trim (main.js's applyShadowQuality), not instead of it.
+    const casters = this.group.userData.shadowCasters;
+    if (casters) {
+      for (const mesh of casters) mesh.castShadow = newTier !== LOD_TIERS.LOW;
+    }
+
     const lights = this.group.userData.lights;
     if (!lights) return;
 

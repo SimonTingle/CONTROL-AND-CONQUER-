@@ -1,4 +1,15 @@
 import * as THREE from 'three';
+import { IS_MOBILE } from '../core/platform.js';
+
+// Phase 3 of docs/performance-optimization-plan.md: octave counts below are
+// literal integers baked into the compiled GLSL at JS build time (not
+// uniforms), so branching here on IS_MOBILE produces a genuinely shorter
+// shader per platform — the compiler dead-code-eliminates the unrolled loop
+// iterations tg_fbm's `if (i >= octaves) break;` guard would otherwise skip
+// at runtime.
+const DETAIL_OCTAVES = IS_MOBILE ? 2 : 4;
+const MACRO_OCTAVES = IS_MOBILE ? 2 : 3;
+const STRATA_OCTAVES = IS_MOBILE ? 2 : 3;
 
 /**
  * Terrain material built by *extending* MeshStandardMaterial rather than writing
@@ -228,15 +239,15 @@ export function createTerrainMaterial(heightmap, uniforms = createTerrainUniform
         /* glsl */ `#include <color_fragment>
         {
           // Fine grain, close up. Two scales so it holds together at any zoom.
-          float detail = tg_fbm(vWorldPos.xz * 0.35, 4) * uDetail;
-          float macro  = tg_fbm(vWorldPos.xz * 0.012, 3) * uMacro;
+          float detail = tg_fbm(vWorldPos.xz * 0.35, ${DETAIL_OCTAVES}) * uDetail;
+          float macro  = tg_fbm(vWorldPos.xz * 0.012, ${MACRO_OCTAVES}) * uMacro;
 
           // Grass varies between lush and dry across the map so large flat
           // areas don't read as a single flat colour.
           vec3 grass = mix(uColorGrass, uColorGrassDry, clamp(macro * 1.5 + 0.5, 0.0, 1.0));
 
           // Rock gets its own stratified banding from the vertical coordinate.
-          float strata = tg_fbm(vec2(vWorldPos.y * 0.6, vWorldPos.x * 0.05), 3);
+          float strata = tg_fbm(vec2(vWorldPos.y * 0.6, vWorldPos.x * 0.05), ${STRATA_OCTAVES});
           vec3 rock = uColorRock * (0.82 + 0.28 * (strata + detail * 0.5));
 
           // 1. beach band just above the waterline
