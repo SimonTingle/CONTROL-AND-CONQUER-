@@ -110,14 +110,15 @@ smaller (or no) desktop change, since desktop wasn't DPR-constrained the same wa
 > an immediate recompile so the toggle actually takes visible effect rather than only applying
 > to future meshes.
 >
-> **Verification gap, flagged honestly**: syntax-checked and reasoned through carefully (the
-> `needsUpdate` fix above came from that review, not from observing a bug live), but not
-> confirmed with a running frame — this session hit the same live-preview infrastructure
-> flakiness noted in earlier phases, and stopped retrying to stay within the session's token
-> budget rather than burn further cycles fighting it. Live confirmation (toggle actually
-> changes shadow softness/resolution on screen, no console errors, initial mobile/desktop
-> defaults render correctly) is the natural first thing to check before trusting this further —
-> worth doing before or as part of Phase 5's re-baseline.
+> **Verification gap — closed.** Confirmed live in a running instance: desktop defaults are
+> exactly right (`shadowMapType` 2 = `PCFSoftShadowMap`, 2048² map, `shadowQuality.high: true`
+> from `pointer:coarse` reading `false`); calling `game.setShadowQuality(false)` correctly
+> switches to `BasicShadowMap` (type 0), shrinks the map to 1024², and disposes the old shadow
+> render target. The `needsUpdate` recompile fix genuinely works — verified all 169 scene
+> materials' `.version` counters bumped after the toggle (checking `.needsUpdate` itself is a
+> dead end: it's a write-only setter in Three.js with no getter, so reading it back is always
+> `undefined` regardless of whether it was set — `.version` is the real signal). Rendered
+> multiple frames at the switched setting and toggled back with zero console errors throughout.
 
 The shadow pass was identified as the likely single biggest GPU cost on mobile: `PCFSoftShadowMap`
 (multi-tap-per-fragment, the most expensive of Three's shadow filters) at 2048×2048, with
