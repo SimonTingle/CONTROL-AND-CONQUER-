@@ -15,6 +15,7 @@ import { DifficultyScreen, DIFFICULTIES } from './ui/difficultyScreen.js';
 import { PortalScreen } from './ui/portalScreen.js';
 import { AuthScreen } from './ui/authScreen.js';
 import { api } from './net/api.js';
+import { serialize, deserialize } from './core/snapshot.js';
 import { AiDifficultyScreen } from './ui/aiDifficultyScreen.js';
 import { createTeams, PLAYER_TEAM_ID } from './core/team.js';
 import { FogMask } from './core/fogOfWar.js';
@@ -848,29 +849,54 @@ const game = {
   fogFor(teamId) {
     return this.teams[teamId ?? PLAYER_TEAM_ID]?.fog ?? this.playerTeam.fog;
   },
-  // Placeholder persistence: a tiny progress snapshot in localStorage, not the
-  // full world state. Real save/load (terrain, vehicles, structures, fog) is
-  // its own backend-backed design — see the roadmap's Phase 3.
-  saveGame() {
-    const snapshot = {
-      mode: this.mode,
-      difficultyId: this.difficulty?.id,
-      credits: this.playerTeam.credits,
-      savedAt: Date.now(),
-    };
-    localStorage.setItem('ptg-save', JSON.stringify(snapshot));
-    alert('Progress saved (placeholder — full save/load is coming in a future update).');
-    return snapshot;
+  /**
+   * The full world state — terrain params, pads, teams, every vehicle and
+   * structure, fog, and the cross-references between them. See
+   * core/snapshot.js for what is stored versus recomputed.
+   */
+  snapshot() {
+    return serialize(snapshotContext());
   },
-  loadGame() {
-    const raw = localStorage.getItem('ptg-save');
-    if (!raw) {
-      alert('No saved game found.');
-      return null;
-    }
-    const snapshot = JSON.parse(raw);
-    alert(`Found a save from ${new Date(snapshot.savedAt).toLocaleString()} (placeholder — restoring it isn't implemented yet).`);
-    return snapshot;
+
+  /**
+   * Save locally. Works signed out and with no backend at all, which is the
+   * whole point: cloud saves are an addition to this, not a replacement.
+   */
+  saveGame(slot = 'default') {
+    const snap = this.snapshot();
+    localStorage.setItem(`ptg-save:${slot}`, JSON.stringify(snap));
+    return snap;
+  },
+
+  loadGame(slot = 'default') {
+    const raw = localStorage.getItem(`ptg-save:${slot}`);
+    if (!raw) return null;
+    return this.applySnapshot(JSON.parse(raw));
+  },
+
+  /** Rebuild the world from a snapshot, from any source (local or cloud). */
+  applySnapshot(snap) {
+    const result = deserialize(snapshotContext(), snap);
+    // The nav grid caches flow fields against the old heightfield, and the
+    // menu shows per-team credits that have just been replaced wholesale.
+    heightmap.terrainVersion++;
+    menu.rebuild();
+    return result;
+  },
+
+  /** Cloud save under the signed-in account. Requires game.account. */
+  async saveToCloud(name) {
+    const snap = this.snapshot();
+    return api.putSave(name, snap.mode, snap.schemaVersion, snap);
+  },
+
+  listCloudSaves() {
+    return api.listSaves();
+  },
+
+  async loadFromCloud(id) {
+    const { payload } = await api.getSave(id);
+    return this.applySnapshot(payload);
   },
   // docs/performance-optimization-plan.md Phase 2 — read/written by the
   // settings drawer's "Performance" group (controlSchema.js).
@@ -1286,6 +1312,18 @@ const navGrid = new NavGrid(heightmap);
 
 /** Everything a command might need, so commands.js imports no game systems. */
 const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit, navGrid };
+
+/**
+ * Everything core/snapshot.js needs to read or rebuild a world.
+ *
+ * A function rather than an object literal because `game.saveGame` is defined
+ * above several of these bindings; resolving them at call time keeps the
+ * declaration order of this file free of a dependency it does not otherwise
+ * have.
+ */
+function snapshotContext() {
+  return { world, heightmap, terraform, vehicles, structures, game, harvesterAI };
+}
 
 const vehiclePicker = new VehiclePicker(VEHICLE_CATALOG, {
   vehicles,

@@ -82,4 +82,13 @@ export const api = {
       return null;
     }
   },
+
+  // Cloud saves — each throws ApiError on failure; callers decide how to
+  // surface that, since "no backend" and "not signed in" and "save too big"
+  // all want different messages.
+  listSaves: () => request('/saves').then((r) => r.saves),
+  getSave: (id) => request(`/saves/${id}`).then((r) => r.save),
+  putSave: (name, mode, schemaVersion, payload) =>
+    request('/saves', { method: 'POST', body: { name, mode, schemaVersion, payload } }),
+  deleteSave: (id) => request(`/saves/${id}`, { method: 'DELETE' }),
 };

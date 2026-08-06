@@ -547,6 +547,17 @@ export class StructureController {
     this.instances = [];
     /** Called with (instance) when a building finishes. */
     this.onComplete = null;
+    // Stable per-instance identity for save/load cross-references — see
+    // VehicleController.spawn for the reasoning. Kept in a separate number
+    // space from vehicle ids; snapshots always say which kind an id refers to.
+    this.nextId = 1;
+  }
+
+  /** Assigns a stable id, honouring one restored from a save. */
+  _assignId(instance, id = null) {
+    instance.id = id ?? this.nextId++;
+    if (id !== null && id >= this.nextId) this.nextId = id + 1;
+    return instance;
   }
 
   defOf(id) {
@@ -636,10 +647,60 @@ export class StructureController {
       teamId: pad.teamId ?? 0,
     });
 
+    this._assignId(instance);
     instance.group.userData.selectable = instance;
     this.instances.push(instance);
     this.scene.add(instance.group);
     pad.buildings.push({ id: def.id, x: pos.x, z: pos.z, instance });
+    return instance;
+  }
+
+  /**
+   * Rebuild a saved building, bypassing placement validation.
+   *
+   * A snapshot records a world that was already legal when it was saved, and
+   * re-running `canPlaceAt` here would be actively wrong: it rejects spots
+   * occupied by *existing* buildings, so restoring a pad's second building
+   * would fail against the first one already put back. Position, angle and
+   * height all come from the save rather than being recomputed, so a restored
+   * building lands exactly where it stood.
+   *
+   * @param {object} def catalog entry
+   * @param {object} saved the serialized structure record
+   * @param {object|null} pad the restored pad this stood on, if any
+   */
+  restore(def, saved, pad = null) {
+    const instance = new StructureInstance(def, {
+      x: saved.x,
+      z: saved.z,
+      hN: saved.hN,
+      angle: saved.angle,
+      pad,
+      teamId: saved.teamId,
+      buildTimeOverride: saved.buildTimeOverride ?? undefined,
+    });
+
+    instance.health = saved.health;
+    instance.mode = saved.mode;
+    instance.progress = saved.progress;
+    instance.upgradeLevel = saved.upgradeLevel ?? 0;
+
+    // A finished building must not be left wearing its under-construction
+    // presentation: the constructor hides its shadow casters and shows the
+    // build ring on the assumption that it is still rising out of the ground.
+    if (instance.mode !== 'building') {
+      const ring = instance.group.userData.buildRing;
+      if (ring) ring.visible = false;
+      for (const m of instance.group.userData.shadowCasters ?? []) m.castShadow = true;
+    }
+
+    this._assignId(instance, saved.id);
+    instance.group.userData.selectable = instance;
+    this.instances.push(instance);
+    this.scene.add(instance.group);
+    // Keep the pad's own registry consistent with what actually stands on it,
+    // so placement checks for anything built later see the restored buildings.
+    pad?.buildings.push({ id: def.id, x: saved.x, z: saved.z, instance });
     return instance;
   }
 
@@ -659,6 +720,7 @@ export class StructureController {
       teamId,
     });
 
+    this._assignId(instance);
     instance.group.userData.selectable = instance;
     this.instances.push(instance);
     this.scene.add(instance.group);

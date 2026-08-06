@@ -54,10 +54,79 @@ export function buildSchema(world, view, game) {
     {
       title: 'Save / Load',
       controls: [
-        // Placeholder persistence (localStorage, a tiny snapshot) until the
-        // real save/load backend lands — see the roadmap's Phase 3.
-        { type: 'button', label: 'Save game', action: () => game.saveGame() },
-        { type: 'button', label: 'Load game', action: () => game.loadGame() },
+        // Local saves work fully offline — no account, no backend. A native
+        // prompt() for the slot name keeps this to one control each rather
+        // than introducing a text-field control type for a single use.
+        {
+          type: 'button',
+          label: 'Save game (local)',
+          action: () => {
+            const slot = window.prompt('Save slot name:', 'default');
+            if (slot === null) return; // cancelled
+            game.saveGame(slot || 'default');
+            window.alert(`Saved to "${slot || 'default'}".`);
+          },
+        },
+        {
+          type: 'button',
+          label: 'Load game (local)',
+          action: () => {
+            const slot = window.prompt('Load which slot?', 'default');
+            if (slot === null) return;
+            const result = game.loadGame(slot || 'default');
+            if (!result) window.alert(`No save found in slot "${slot || 'default'}".`);
+          },
+        },
+        // Cloud saves need both a backend build and a signed-in account —
+        // hidden rather than shown-disabled, since an offline build has no
+        // sensible "sign in" action to point the player at.
+        ...(api.isConfigured && game.account
+          ? [
+              {
+                type: 'button',
+                label: 'Save to cloud',
+                action: async () => {
+                  const name = window.prompt('Cloud save name:', 'default');
+                  if (name === null) return;
+                  try {
+                    await game.saveToCloud(name || 'default');
+                    window.alert(`Saved "${name || 'default'}" to your account.`);
+                  } catch (err) {
+                    window.alert(`Could not save: ${err.message ?? err}`);
+                  }
+                },
+              },
+              {
+                type: 'button',
+                label: 'Load from cloud',
+                action: async () => {
+                  let saves;
+                  try {
+                    saves = await game.listCloudSaves();
+                  } catch (err) {
+                    window.alert(`Could not reach the server: ${err.message ?? err}`);
+                    return;
+                  }
+                  if (!saves.length) {
+                    window.alert('No cloud saves yet.');
+                    return;
+                  }
+                  const listing = saves
+                    .map((s, i) => `${i + 1}. ${s.name} — ${new Date(s.updatedAt).toLocaleString()}`)
+                    .join('\n');
+                  const pick = window.prompt(`${listing}\n\nEnter a number to load:`, '1');
+                  if (pick === null) return;
+                  const chosen = saves[Number(pick) - 1];
+                  if (!chosen) return;
+                  try {
+                    await game.loadFromCloud(chosen.id);
+                  } catch (err) {
+                    window.alert(`Could not load: ${err.message ?? err}`);
+                  }
+                },
+              },
+            ]
+          : []),
       ],
     },
     {

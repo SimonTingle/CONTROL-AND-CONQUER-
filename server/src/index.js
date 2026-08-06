@@ -15,6 +15,7 @@ import { pool } from './db/pool.js';
 import { migrate } from './db/migrate.js';
 import authPlugin from './auth/plugin.js';
 import { authRoutes } from './routes/auth.js';
+import { saveRoutes } from './routes/saves.js';
 
 export async function build() {
   const app = Fastify({
@@ -67,6 +68,7 @@ export async function build() {
   // route that reads it.
   await app.register(authPlugin);
   await app.register(authRoutes);
+  await app.register(saveRoutes);
 
   return app;
 }

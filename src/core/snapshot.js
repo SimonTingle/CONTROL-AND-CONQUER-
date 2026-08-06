@@ -1,0 +1,386 @@
+/**
+ * The single source of truth for "what is a game".
+ *
+ * Used by local saves, cloud saves, and — once online multiplayer lands — the
+ * desync-recovery and late-join path, which need exactly the same thing: take
+ * a running world, turn it into plain JSON, and rebuild it identically
+ * somewhere else.
+ *
+ * Three rules shape everything here:
+ *
+ * 1. **Store what cannot be recomputed.** Terrain regenerates exactly from its
+ *    seed, so the heightfield is never stored — only the params, plus the pad
+ *    records needed to replay the flattening on top (see terraform.restorePad).
+ *    Meshes, LOD tiers, quaternions and GPU textures are all derived and are
+ *    rebuilt by the normal spawn path.
+ *
+ * 2. **Rebuild through the real APIs.** Restore calls `vehicles.spawn` and
+ *    `structures.place`, never `new VehicleInstance` — so meshes, selectable
+ *    userData and shadow-caster arrays are wired exactly as in a live game,
+ *    and a change to those paths can't silently skip loaded entities.
+ *
+ * 3. **Cross-references travel as ids, never as object graphs.** A docked
+ *    harvester, a repair bay, a combat target and the player's own vehicle are
+ *    all live object references at runtime; each becomes an integer here and
+ *    is resolved back in a second pass, after every entity exists.
+ */
+
+import * as THREE from 'three';
+
+/**
+ * Bumped whenever the shape below changes incompatibly. Stored in every
+ * snapshot so a future version can migrate rather than misread old data.
+ */
+export const SCHEMA_VERSION = 1;
+
+/** Transient controller state that is rebuilt or self-heals, and is deliberately not saved. */
+const REBUILT_ON_LOAD =
+  'mesh/LOD/quaternion, fog textures, nav-grid caches, dock queue slot sets, ' +
+  'per-vehicle reveal caches, in-flight tracer visuals';
+
+// ---------------------------------------------------------------------------
+// serialize
+// ---------------------------------------------------------------------------
+
+/** A Uint8Array as base64 — JSON has no binary type and fog masks are ~65KB each. */
+function bytesToBase64(bytes) {
+  let binary = '';
+  // Chunked: String.fromCharCode(...bytes) on a 65k array overflows the
+  // argument limit in some engines.
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+const round = (n, dp = 3) => Number(n.toFixed(dp));
+
+/** `{x, z}` from a Vector2/Vector3/plain point, or null. */
+function point2(p) {
+  if (!p) return null;
+  return { x: round(p.x), z: round(p.z ?? p.y) };
+}
+
+function serializeVehicle(inst) {
+  const pos = inst.group.position;
+  return {
+    id: inst.id,
+    defId: inst.def.id,
+    teamId: inst.teamId,
+    x: round(pos.x),
+    y: round(pos.y),
+    z: round(pos.z),
+    heading: round(inst.heading, 5),
+    health: round(inst.health, 2),
+    mode: inst.mode,
+    headlightsOn: inst.headlightsOn,
+    target: point2(inst.target),
+    // Drive state, so a vehicle mid-journey resumes at speed rather than
+    // snapping to a standstill.
+    speed: round(inst.speed, 3),
+    throttle: round(inst.throttle, 3),
+    steer: round(inst.steer, 3),
+    steerAngle: round(inst.steerAngle, 4),
+    shouldPark: inst.shouldPark ?? false,
+    // Cross-references, as ids. Bloom fields already carry a stable id.
+    targetFieldId: inst.targetField?.id ?? null,
+    combatTargetId: inst.combatTarget?.id ?? null,
+    combatTargetKind: inst.combatTarget?.kind ?? null,
+    repair: inst.repair
+      ? {
+          bayId: inst.repair.bay?.id ?? null,
+          state: inst.repair.state,
+          queuePosition: inst.repair.queuePosition ?? null,
+          owed: inst.repair.owed ?? 0,
+        }
+      : null,
+  };
+}
+
+function serializeStructure(inst) {
+  return {
+    id: inst.id,
+    defId: inst.def.id,
+    teamId: inst.teamId,
+    x: round(inst.x),
+    z: round(inst.z),
+    hN: round(inst.hN, 5),
+    angle: round(inst.angle, 5),
+    health: round(inst.health, 2),
+    mode: inst.mode,
+    progress: round(inst.progress, 4),
+    upgradeLevel: inst.upgradeLevel ?? 0,
+    padId: inst.pad?.id ?? null,
+    buildTimeOverride: inst.buildTimeOverride ?? null,
+    dockedHarvesterId: inst.dockedHarvester?.id ?? null,
+    dockedVehicleId: inst.dockedVehicle?.id ?? null,
+    parkedHarvesterIds: (inst.parkedHarvesters ?? []).map((v) => v.id),
+  };
+}
+
+function serializeTeam(team) {
+  return {
+    id: team.id,
+    name: team.name,
+    color: team.color,
+    isHuman: team.isHuman,
+    credits: round(team.credits, 2),
+    homePoint: point2(team.homePoint),
+    weaponTier: team.weaponTier,
+    defeated: team.defeated,
+    reachedRelocateThreshold: team.reachedRelocateThreshold,
+    stats: { ...team.stats },
+    // The per-team explored mask: the one genuinely irreproducible bulk value
+    // in a save, since it records where this team has actually driven.
+    fog: team.fog ? bytesToBase64(team.fog.data) : null,
+  };
+}
+
+/**
+ * @param {object} ctx { world, heightmap, terraform, vehicles, structures, game, harvesterAI }
+ * @returns {object} a plain JSON-safe object
+ */
+export function serialize(ctx) {
+  const { world, terraform, vehicles, structures, game } = ctx;
+  const heightmap = ctx.heightmap ?? world.heightmap;
+
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    savedAt: new Date().toISOString(),
+    rebuiltOnLoad: REBUILT_ON_LOAD, // documentation for anyone reading a raw save
+
+    mode: game.mode,
+    difficultyId: game.difficulty?.id ?? null,
+    aiMatch: game.aiMatch ? { ...game.aiMatch } : null,
+
+    // Terrain is a seed plus knobs — never a megabyte of heights.
+    terrain: { ...heightmap.params },
+
+    // Replayed over the regenerated terrain, in this order.
+    pads: terraform.pads.map((p) => ({
+      id: p.id,
+      x: round(p.x),
+      z: round(p.z),
+      teamId: p.teamId ?? 0,
+      radius: p.radius,
+      blend: p.blend,
+      targetN: round(p.targetN, 6),
+      progress: round(p.progress, 4),
+      complete: p.complete,
+    })),
+
+    teams: (game.teams ?? []).map(serializeTeam),
+    vehicles: vehicles.instances.filter((v) => !v.dead).map(serializeVehicle),
+    structures: structures.instances.filter((s) => !s.dead).map(serializeStructure),
+
+    // Which vehicle the player was driving.
+    activeVehicleId: vehicles.active?.id ?? null,
+
+    // Harvester routing state, keyed by vehicle id. Held in a Map keyed by
+    // object identity at runtime, so it has to be flattened out separately.
+    harvesterStates: serializeHarvesterStates(ctx),
+  };
+}
+
+function serializeHarvesterStates(ctx) {
+  const states = ctx.harvesterAI?.states;
+  if (!states) return [];
+  const out = [];
+  for (const [inst, s] of states) {
+    if (inst.dead) continue;
+    out.push({
+      vehicleId: inst.id,
+      state: s.state,
+      fieldId: s.field?.id ?? null,
+      facilityId: s.facility?.id ?? null,
+      dest: point2(s.dest),
+      parkingBayIndex: s.parkingBayIndex ?? null,
+      queuePosition: s.queuePosition ?? null,
+    });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// deserialize
+// ---------------------------------------------------------------------------
+
+export class SnapshotVersionError extends Error {
+  constructor(found) {
+    super(
+      `Save has schema version ${found}, this build understands ${SCHEMA_VERSION}. ` +
+        `Saves from a newer version cannot be loaded.`
+    );
+    this.name = 'SnapshotVersionError';
+  }
+}
+
+/**
+ * Rebuild a world from a snapshot, in place.
+ *
+ * Order is load-bearing and mirrors the care taken over destroy ordering:
+ * terrain → pads → teams → structures → vehicles → cross-references last,
+ * because the final pass resolves ids that only mean something once every
+ * entity exists.
+ */
+export function deserialize(ctx, snap) {
+  if (!snap || typeof snap !== 'object') throw new Error('Snapshot is empty or malformed.');
+  if (snap.schemaVersion > SCHEMA_VERSION) throw new SnapshotVersionError(snap.schemaVersion);
+
+  const { world, terraform, vehicles, structures, game } = ctx;
+
+  // --- clear the current world -------------------------------------------
+  // Through each controller's own remove(), which detaches the mesh and
+  // disposes its geometry — skipping it would leak a whole world's GPU
+  // resources on every load.
+  for (const inst of [...vehicles.instances]) vehicles.remove(inst);
+  for (const inst of [...structures.instances]) structures.remove(inst);
+  vehicles.active = null;
+  terraform.pads.length = 0;
+  terraform.jobs.length = 0;
+
+  // --- terrain, then pads replayed on top --------------------------------
+  world.regenerate(snap.terrain);
+  for (const pad of snap.pads) terraform.restorePad(pad);
+
+  // --- teams --------------------------------------------------------------
+  for (const saved of snap.teams) {
+    const team = game.teams[saved.id];
+    if (!team) continue;
+    team.credits = saved.credits;
+    team.homePoint = saved.homePoint;
+    team.weaponTier = saved.weaponTier;
+    team.defeated = saved.defeated;
+    team.reachedRelocateThreshold = saved.reachedRelocateThreshold;
+    Object.assign(team.stats, saved.stats);
+    if (saved.fog && team.fog) {
+      team.fog.data.set(base64ToBytes(saved.fog));
+      // The mask's own derived counts and GPU texture are refreshed from the
+      // bytes we just wrote, rather than being carried in the save.
+      team.fog.dirty = true;
+      if (team.fog.texture) team.fog.texture.needsUpdate = true;
+    }
+  }
+
+  // --- structures ---------------------------------------------------------
+  const padById = new Map(terraform.pads.map((p) => [p.id, p]));
+  const structureById = new Map();
+  for (const saved of snap.structures) {
+    const def = structures.defOf(saved.defId);
+    if (!def) continue; // a save referencing a def this build no longer has
+    const pad = saved.padId != null ? padById.get(saved.padId) : null;
+    const inst = structures.restore(def, saved, pad);
+    structureById.set(saved.id, inst);
+  }
+
+  // --- vehicles -----------------------------------------------------------
+  const vehicleById = new Map();
+  for (const saved of snap.vehicles) {
+    const def = vehicles.defOf(saved.defId);
+    if (!def) continue;
+    const inst = vehicles.spawn(
+      def,
+      new THREE.Vector3(saved.x, saved.y, saved.z),
+      saved.heading,
+      { activate: false, teamId: saved.teamId, id: saved.id }
+    );
+    inst.health = saved.health;
+    inst.mode = saved.mode;
+    inst.headlightsOn = saved.headlightsOn;
+    inst.speed = saved.speed;
+    inst.throttle = saved.throttle;
+    inst.steer = saved.steer;
+    inst.steerAngle = saved.steerAngle;
+    inst.shouldPark = saved.shouldPark;
+    if (saved.target) inst.target = new THREE.Vector2(saved.target.x, saved.target.z);
+    vehicleById.set(saved.id, inst);
+  }
+
+  // --- cross-references, now that everything exists -----------------------
+  const fieldById = new Map((world.blooms?.fields ?? []).map((f) => [f.id, f]));
+  const lookup = (kind, id) =>
+    kind === 'structure' ? structureById.get(id) : vehicleById.get(id);
+
+  for (const saved of snap.vehicles) {
+    const inst = vehicleById.get(saved.id);
+    if (!inst) continue;
+
+    if (saved.targetFieldId != null) inst.targetField = fieldById.get(saved.targetFieldId) ?? null;
+    if (saved.combatTargetId != null) {
+      // A dangling combat target is harmless — combatController re-acquires on
+      // the next tick — so a miss here is left null rather than treated as an
+      // error.
+      inst.combatTarget = lookup(saved.combatTargetKind, saved.combatTargetId) ?? null;
+    }
+    if (saved.repair?.bayId != null) {
+      const bay = structureById.get(saved.repair.bayId);
+      // Without its bay the repair record would be a permanent stall, so it is
+      // dropped entirely rather than restored half-resolved.
+      if (bay) {
+        inst.repair = {
+          bay,
+          state: saved.repair.state,
+          queuePosition: saved.repair.queuePosition,
+          owed: saved.repair.owed,
+        };
+      }
+    }
+  }
+
+  for (const saved of snap.structures) {
+    const inst = structureById.get(saved.id);
+    if (!inst) continue;
+    if (saved.dockedHarvesterId != null) {
+      inst.dockedHarvester = vehicleById.get(saved.dockedHarvesterId) ?? null;
+    }
+    if (saved.dockedVehicleId != null) {
+      inst.dockedVehicle = vehicleById.get(saved.dockedVehicleId) ?? null;
+    }
+    if (saved.parkedHarvesterIds?.length) {
+      inst.parkedHarvesters = saved.parkedHarvesterIds
+        .map((id) => vehicleById.get(id))
+        .filter(Boolean);
+    }
+  }
+
+  // --- harvester routing --------------------------------------------------
+  if (ctx.harvesterAI) {
+    ctx.harvesterAI.states.clear();
+    for (const saved of snap.harvesterStates) {
+      const inst = vehicleById.get(saved.vehicleId);
+      if (!inst) continue;
+      const state = ctx.harvesterAI._stateFor(inst);
+      state.state = saved.state;
+      state.field = saved.fieldId != null ? (fieldById.get(saved.fieldId) ?? null) : null;
+      state.facility = saved.facilityId != null ? (structureById.get(saved.facilityId) ?? null) : null;
+      state.dest = saved.dest;
+      state.parkingBayIndex = saved.parkingBayIndex;
+      state.queuePosition = saved.queuePosition;
+    }
+  }
+
+  // --- match context ------------------------------------------------------
+  game.mode = snap.mode;
+  if (snap.aiMatch) game.aiMatch = { ...snap.aiMatch };
+
+  // Restoring the player's vehicle last, through setActive, so the camera and
+  // input rig attach exactly as they would on a normal selection.
+  if (snap.activeVehicleId != null) {
+    const active = vehicleById.get(snap.activeVehicleId);
+    if (active) vehicles.setActive(active);
+  }
+
+  return {
+    vehicles: vehicleById.size,
+    structures: structureById.size,
+    pads: terraform.pads.length,
+  };
+}
