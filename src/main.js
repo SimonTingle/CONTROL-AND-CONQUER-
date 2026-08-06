@@ -883,6 +883,21 @@ const game = {
     menu.rebuild();
     return result;
   },
+
+  /** Cloud save under the signed-in account. Requires game.account. */
+  async saveToCloud(name) {
+    const snap = this.snapshot();
+    return api.putSave(name, snap.mode, snap.schemaVersion, snap);
+  },
+
+  listCloudSaves() {
+    return api.listSaves();
+  },
+
+  async loadFromCloud(id) {
+    const { payload } = await api.getSave(id);
+    return this.applySnapshot(payload);
+  },
   // docs/performance-optimization-plan.md Phase 2 — read/written by the
   // settings drawer's "Performance" group (controlSchema.js).
   shadowQuality,
