@@ -675,6 +675,8 @@ export class VehicleController {
     this.scene = scene;
     this.instances = [];
     this.active = null;
+    // Monotonic, never reused within a session — see spawn().
+    this.nextId = 1;
   }
 
   /**
@@ -685,8 +687,17 @@ export class VehicleController {
    * @param {number} [opts.teamId] owning team; defaults to the player's, so
    *   every existing caller keeps spawning player units unchanged.
    */
-  spawn(def, spawnPoint, facing = 0, { activate = true, teamId = 0 } = {}) {
+  spawn(def, spawnPoint, facing = 0, { activate = true, teamId = 0, id = null } = {}) {
     const instance = new VehicleInstance(def, spawnPoint, facing, teamId);
+    // Stable identity, assigned here rather than in the constructor so the
+    // counter lives on the controller and can be restored with a save.
+    // Everything that refers to "this particular vehicle" across a
+    // save/load — dock reservations, repair bays, combat targets, which
+    // vehicle the player was driving — keys off this instead of object
+    // identity, which cannot survive serialization.
+    instance.id = id ?? this.nextId++;
+    // A restored id must not be handed out again to a later spawn.
+    if (id !== null && id >= this.nextId) this.nextId = id + 1;
     this.instances.push(instance);
     // So a raycast hit on any part of the mesh can walk up to its instance.
     instance.group.userData.selectable = instance;

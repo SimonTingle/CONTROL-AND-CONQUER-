@@ -30,6 +30,67 @@ export class Terraform {
      * apart, so concurrent jobs never touch the same texels.
      */
     this.jobs = [];
+    // Stable pad identity for save/load: a structure records which pad it
+    // stands on by id, since the pad object itself cannot be serialized.
+    this.nextPadId = 1;
+  }
+
+  /**
+   * Re-apply a saved pad's flatten to freshly generated terrain.
+   *
+   * Terrain regenerates exactly from its seed, but a flattened pad is a
+   * runtime edit written straight into `heightmap.data`, so it is *not*
+   * reproducible from the seed alone. Rather than storing the whole
+   * heightfield in every save (~1MB of floats), this replays the same maths
+   * `_updateJob` runs — which is exact, because at a given `progress` the
+   * result depends only on the pristine terrain underneath and the pad's own
+   * saved geometry.
+   *
+   * Pads must be replayed in their original creation order, so overlapping
+   * ones compose the way they originally did.
+   */
+  restorePad(saved) {
+    const pad = { ...saved, buildings: [] };
+    this.pads.push(pad);
+    if (pad.id >= this.nextPadId) this.nextPadId = pad.id + 1;
+
+    const hm = this.heightmap;
+    const res = hm.params.resolution;
+    const size = hm.params.size;
+    const outer = pad.radius + pad.blend;
+    const eased = smoothstep01(pad.progress);
+
+    const toIdx = (w) => (w / size + 0.5) * (res - 1);
+    const i0 = Math.max(0, Math.floor(toIdx(pad.x - outer)));
+    const i1 = Math.min(res - 1, Math.ceil(toIdx(pad.x + outer)));
+    const j0 = Math.max(0, Math.floor(toIdx(pad.z - outer)));
+    const j1 = Math.min(res - 1, Math.ceil(toIdx(pad.z + outer)));
+
+    for (let j = j0; j <= j1; j++) {
+      const wz = (j / (res - 1) - 0.5) * size;
+      for (let i = i0; i <= i1; i++) {
+        const wx = (i / (res - 1) - 0.5) * size;
+        const d = Math.hypot(wx - pad.x, wz - pad.z);
+        if (d >= outer) continue;
+        const spatial = 1 - smoothstep(pad.radius, outer, d);
+        // `from` is the live value, which for the first pad replayed is the
+        // pristine regenerated terrain — exactly what the original job
+        // snapshotted before it started editing.
+        const from = hm.data[j * res + i];
+        hm.data[j * res + i] = from + (pad.targetN - from) * spatial * eased;
+      }
+    }
+    hm.texture.needsUpdate = true;
+
+    if (pad.complete) {
+      // The same world-changed-shape housekeeping _updateJob does on
+      // completion. Blooms regenerate from the world seed on load, so crystals
+      // under the concrete would otherwise come back.
+      this.world.fogTerrain.patchTerrain(pad.x, pad.z, outer);
+      this.world.blooms.clearUnder(pad.x, pad.z, pad.radius);
+      hm.terrainVersion++;
+    }
+    return pad;
   }
 
   /** Is this team already flattening somewhere? Deploying two at once is still
@@ -118,6 +179,7 @@ export class Terraform {
     }
 
     const pad = {
+      id: this.nextPadId++,
       x,
       z,
       // The team whose base flattened this ground. Everything built here
