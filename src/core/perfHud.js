@@ -44,8 +44,13 @@ export class PerfHud {
     if (this.samples.length > WINDOW_SIZE) this.samples.shift();
   }
 
-  /** Call once per rendered frame, after record(). Reads renderer.info for draws/tris. */
-  render(renderer) {
+  /**
+   * Call once per rendered frame, after record(). Reads renderer.info for draws/tris.
+   * @param {import('./tickProfiler.js').TickProfiler} [profiler] optional —
+   *   when given and enabled, appends its top offenders below the usual
+   *   fps/draws/tris line. Answers "which system" once fps alone says "slow."
+   */
+  render(renderer, profiler) {
     if (!this.visible || this.samples.length === 0) return;
 
     const sorted = [...this.samples].sort((a, b) => a - b);
@@ -59,10 +64,19 @@ export class PerfHud {
       sorted.slice(-onePercentCount).reduce((a, b) => a + b, 0) / onePercentCount;
 
     const info = renderer.info.render;
-    this.el.textContent =
+    let text =
       `${(1000 / avgMs).toFixed(0)} fps avg  ${(1000 / onePercentLowMs).toFixed(0)} fps 1% low  ${(1000 / worstMs).toFixed(0)} fps worst\n` +
       `${avgMs.toFixed(1)}ms avg  ${worstMs.toFixed(1)}ms worst\n` +
       `${info.calls} draws  ${(info.triangles / 1000).toFixed(0)}k tris` +
       (this.deviceLine ? `\n${this.deviceLine}` : '');
+
+    if (profiler?.enabled) {
+      const rows = profiler.report().slice(0, 6);
+      if (rows.length > 0) {
+        text += '\n--- tick breakdown (o) ---\n' + rows.map((r) => `${r.name}: ${r.avgMs.toFixed(2)}ms`).join('\n');
+      }
+    }
+
+    this.el.textContent = text;
   }
 }
