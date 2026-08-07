@@ -1493,19 +1493,20 @@ game.matchEndScreen = new MatchEndScreen(() => {
   location.reload();
 });
 
-game.portalScreen = new PortalScreen((modeId) => {
-  if (modeId === 'sandbox') game.difficultyScreen.show();
-  else if (modeId === 'multiplayer-ai') game.aiDifficultyScreen.show();
-});
-
 // Accounts are optional and additive: `game.account` stays null when there's
 // no API server configured, when the server is unreachable, or when the player
 // simply hasn't signed in — and every one of those is a normal state the game
 // plays fine in. Only cloud saves and online multiplayer consult it.
+//
+// Defined before portalScreen (which reads game.signIn/signOut/account via
+// closures, so the order they're assigned in doesn't matter by the time a
+// player actually clicks) so the portal's account corner has something real
+// to call from the very first screen shown.
 game.account = null;
 game.authScreen = new AuthScreen((user) => {
   game.account = user;
   menu.rebuild();
+  game.portalScreen?.refreshAccount();
 });
 game.signIn = () => game.authScreen.show();
 game.signOut = async () => {
@@ -1517,7 +1518,21 @@ game.signOut = async () => {
   }
   game.account = null;
   menu.rebuild();
+  game.portalScreen?.refreshAccount();
 };
+
+game.portalScreen = new PortalScreen(
+  (modeId) => {
+    if (modeId === 'sandbox') game.difficultyScreen.show();
+    else if (modeId === 'multiplayer-ai') game.aiDifficultyScreen.show();
+  },
+  {
+    isConfigured: api.isConfigured,
+    getAccount: () => game.account,
+    onSignIn: () => game.signIn(),
+    onSignOut: () => game.signOut(),
+  }
+);
 
 // Restores an existing session on load. Never throws and never blocks startup:
 // `api.me()` resolves to null for signed-out, no-backend, and unreachable
@@ -1526,6 +1541,7 @@ api.me().then((user) => {
   if (!user) return;
   game.account = user;
   menu.rebuild();
+  game.portalScreen?.refreshAccount();
 });
 
 addEventListener('resize', () => {
