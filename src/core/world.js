@@ -69,14 +69,22 @@ export class World {
     return this.lastGenerateMs;
   }
 
-  update(dt, camera) {
+  /**
+   * @param {import('./tickProfiler.js').TickProfiler} [profiler] optional —
+   *   when given, breaks this call down into its own sub-timings rather than
+   *   leaving the caller with just one lump "world" number. Passed in rather
+   *   than a module singleton since perfHud follows the same
+   *   caller-owns-the-instance pattern.
+   */
+  update(dt, camera, profiler) {
+    const time = profiler ? (name, fn) => profiler.time(name, fn) : (_, fn) => fn();
     // First: blooms below reads the elevation this call just produced, not
     // last frame's.
-    this.atmosphere.update(dt);
-    this.terrain.update(camera);
-    this.water.update(dt);
+    time('world.atmosphere', () => this.atmosphere.update(dt));
+    time('world.terrain', () => this.terrain.update(camera));
+    time('world.water', () => this.water.update(dt));
     // Sun elevation passed in rather than reached for, mirroring how the fleet
     // takes `headlightsOn` from its caller instead of knowing about the sky.
-    this.blooms.update(dt, this.atmosphere.params.elevation);
+    time('world.blooms', () => this.blooms.update(dt, this.atmosphere.params.elevation));
   }
 }

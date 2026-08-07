@@ -35,6 +35,7 @@ import { StructureController } from './structures/structures.js';
 import { Entities } from './core/entities.js';
 import { NavGrid } from './core/navGrid.js';
 import { PerfHud } from './core/perfHud.js';
+import { TickProfiler } from './core/tickProfiler.js';
 import { IS_MOBILE } from './core/platform.js';
 
 // __APP_VERSION__/__BUILD_TIME__ are literal strings substituted at build
@@ -75,9 +76,25 @@ const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerH
 // docs/performance-optimization-plan.md Phase 0 — on by default via ?perf=1,
 // toggleable at runtime with the 'p' key (mirrors the settings drawer's 'm').
 const perfHud = new PerfHud();
+// Off by default (time() degrades to a bare fn() call, zero overhead) —
+// "10fps but only 106 draws / 121k tris" proved the bottleneck is CPU-side
+// JS, not the GPU, so this exists to show which system it actually is
+// instead of guessing. Toggled alongside the perf HUD itself.
+const tickProfiler = new TickProfiler();
 document.addEventListener('keydown', (e) => {
   if (e.key.toLowerCase() === 'p' && e.target === document.body) perfHud.toggle();
+  // 'o' for "overhead" (breakdown) — shares 'p''s reasoning for why this is a
+  // dedicated key rather than folded into it: the two are independently
+  // useful (fps alone is enough most of the time; the breakdown is only
+  // needed once fps already looks wrong) and the profiler's own per-call
+  // overhead, though small, isn't something to pay for by default the way
+  // perfHud.record()'s array push already is.
+  if (e.key.toLowerCase() === 'o' && e.target === document.body) {
+    tickProfiler.enabled = !tickProfiler.enabled;
+    tickProfiler.reset();
+  }
 });
+window.__tickProfiler = tickProfiler; // console access, same convention as window.__benchmark
 
 const world = new World(renderer);
 const { heightmap } = world;
@@ -1573,39 +1590,42 @@ const FOG_STAGGER_PERIOD = 3;
 let fogRevealCounter = 0;
 
 function tick(dt, { render = true } = {}) {
+  const p = tickProfiler;
   // Vehicles move first so the camera frames where they actually ended up.
   applyDriveInput();
-  world.update(dt, camera);
+  p.time('world', () => world.update(dt, camera, p));
   // Between the input and the fleet: the AI must see this frame's keys before
   // deciding (so it never issues an order the player just cancelled) and set
   // its targets before the fleet consumes them.
-  harvesterAI.update(dt);
+  p.time('harvesterAI', () => harvesterAI.update(dt));
   // Same reasoning, one level up: each AI team's own deploy/build/scout
   // decisions need this frame's harvester targets already set (so it isn't
   // second-guessing an order harvesterAI just issued) and have to land before
   // trafficController reads what everyone is driving toward.
-  if (!game.matchOver) for (const commander of game.aiCommanders) commander.update(dt);
+  p.time('aiCommanders', () => {
+    if (!game.matchOver) for (const commander of game.aiCommanders) commander.update(dt);
+  });
   // After harvesterAI: a repairing harvester is already paused by the check
   // above, so this is the only thing setting its target this frame.
-  repairController.update(dt);
+  p.time('repairController', () => repairController.update(dt));
   // After both AI systems have set their targets, and before movement reads
   // them: this is what actually decides `yielding` and hands out collision
   // damage for the frame about to run.
-  trafficController.update(dt);
+  p.time('trafficController', () => trafficController.update(dt));
   // After every driver has had its say and before the fleet moves: a shot is
   // resolved against where things are *this* frame, and any resulting death is
   // queued for the single flush below rather than removed underneath the
   // movement step that is about to run.
-  combatController.update(dt);
-  vehicles.update(dt, heightmap, headlightsWanted(), camera);
-  structures.update(dt, heightmap);
+  p.time('combatController', () => combatController.update(dt));
+  p.time('vehicles', () => vehicles.update(dt, heightmap, headlightsWanted(), camera));
+  p.time('structures', () => structures.update(dt, heightmap));
 
   // Flushed here, and nowhere else — after every system above has taken its
   // turn iterating vehicles/structures for the frame, before the fog reveal
   // loop below iterates them again. Never mid-iteration: a system splicing
   // an array while another system is still walking it would skip or
   // double-visit an entry.
-  entities.flush();
+  p.time('entitiesFlush', () => entities.flush());
 
   // Reveal after the vehicles have moved — world.update() runs before them, so
   // committing there would upload a frame stale. Each entity reveals into its
@@ -1615,61 +1635,69 @@ function tick(dt, { render = true } = {}) {
   // read on the CPU on their own schedule, so they're staggered one team per
   // frame — the reveal loop is now an N-times cost with N teams, and nothing
   // needs an AI's fog fresher than "within the last few frames."
-  fogRevealCounter = (fogRevealCounter + 1) % FOG_STAGGER_PERIOD;
-  for (const v of vehicles.instances) {
-    if (v.teamId !== PLAYER_TEAM_ID && v.teamId % FOG_STAGGER_PERIOD !== fogRevealCounter) continue;
-    const mask = game.fogFor(v.teamId);
-    if (mask) mask.reveal(v.group.position.x, v.group.position.z, v.def.sightRadius, v);
-  }
-  for (const s of structures.instances) {
-    if (s.teamId !== PLAYER_TEAM_ID && s.teamId % FOG_STAGGER_PERIOD !== fogRevealCounter) continue;
-    const mask = game.fogFor(s.teamId);
-    if (mask) mask.reveal(s.x, s.z, s.def.sightRadius, s);
-  }
-  // Only the player's mask is drawn, so only it needs uploading; the AI masks
-  // are read on the CPU and have no texture to commit.
-  world.fog.commit();
+  p.time('fogReveal', () => {
+    fogRevealCounter = (fogRevealCounter + 1) % FOG_STAGGER_PERIOD;
+    for (const v of vehicles.instances) {
+      if (v.teamId !== PLAYER_TEAM_ID && v.teamId % FOG_STAGGER_PERIOD !== fogRevealCounter) continue;
+      const mask = game.fogFor(v.teamId);
+      if (mask) mask.reveal(v.group.position.x, v.group.position.z, v.def.sightRadius, v);
+    }
+    for (const s of structures.instances) {
+      if (s.teamId !== PLAYER_TEAM_ID && s.teamId % FOG_STAGGER_PERIOD !== fogRevealCounter) continue;
+      const mask = game.fogFor(s.teamId);
+      if (mask) mask.reveal(s.x, s.z, s.def.sightRadius, s);
+    }
+    // Only the player's mask is drawn, so only it needs uploading; the AI masks
+    // are read on the CPU and have no texture to commit.
+    world.fog.commit();
+  });
 
-  if (isChasing()) {
-    // MapControls would fight the chase rig for the camera transform.
-    controls.enabled = false;
-    chase.update(dt, vehicles.active);
-  } else {
-    controls.enabled = true;
-    controls.update();
-  }
+  p.time('cameraControls', () => {
+    if (isChasing()) {
+      // MapControls would fight the chase rig for the camera transform.
+      controls.enabled = false;
+      chase.update(dt, vehicles.active);
+    } else {
+      controls.enabled = true;
+      controls.update();
+    }
+  });
 
   // After the camera has settled, so the menu projects against this frame's
   // view rather than lagging it by one.
-  terraform.update(dt);
-  checkBaseRepositioning();
-  // After entities.flush() above, so "does this team still have a base" is
-  // asked of a fleet with this tick's deaths already removed rather than one
-  // still holding a corpse.
-  checkMatchEnd();
-  updateRespawns(dt);
-  radialMenu.update();
+  p.time('terraform', () => terraform.update(dt));
+  p.time('matchState', () => {
+    checkBaseRepositioning();
+    // After entities.flush() above, so "does this team still have a base" is
+    // asked of a fleet with this tick's deaths already removed rather than one
+    // still holding a corpse.
+    checkMatchEnd();
+    updateRespawns(dt);
+  });
+  p.time('radialMenu', () => radialMenu.update());
 
   if (!render) return;
 
-  updateTracers(dt);
+  p.time('updateTracers', () => updateTracers(dt));
   // Per-frame, unlike the rest of the HUD's half-second poll — see
   // Hud.updateHealth for why health specifically cannot wait.
-  hud.updateHealth(vehicles.active);
-  updateMarker(clock.elapsedTime);
-  updateHarvestMarker(clock.elapsedTime);
-  updatePlacementPreview(lastX, lastY);
-  syncQueueIcons();
-  canvas.classList.toggle(
-    'crosshair-mode',
-    !!commandContext.harvestSelectMode ||
-      !!commandContext.buildPlacementMode ||
-      !!commandContext.targetSelectMode
-  );
-  vehiclePicker.update(dt);
-  renderer.render(world.scene, camera);
+  p.time('hudHealth', () => hud.updateHealth(vehicles.active));
+  p.time('markers', () => {
+    updateMarker(clock.elapsedTime);
+    updateHarvestMarker(clock.elapsedTime);
+    updatePlacementPreview(lastX, lastY);
+    syncQueueIcons();
+    canvas.classList.toggle(
+      'crosshair-mode',
+      !!commandContext.harvestSelectMode ||
+        !!commandContext.buildPlacementMode ||
+        !!commandContext.targetSelectMode
+    );
+  });
+  p.time('vehiclePicker', () => vehiclePicker.update(dt));
+  p.time('render', () => renderer.render(world.scene, camera));
   perfHud.record(dt);
-  perfHud.render(renderer);
+  perfHud.render(renderer, tickProfiler);
 
   frames++;
   statsTimer += dt;
