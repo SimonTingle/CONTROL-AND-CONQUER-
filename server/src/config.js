@@ -41,4 +41,20 @@ export const config = {
   // Only a genuinely cross-site deploy needs 'none', which also requires
   // Secure (and therefore HTTPS) or browsers will drop the cookie entirely.
   cookieSameSite: process.env.COOKIE_SAMESITE ?? 'lax',
+
+  // Deliberately NOT required() — the server must still boot (and every
+  // other feature must still work) with no email provider configured, the
+  // same "optional, degrades" rule the frontend's api.isConfigured already
+  // follows for the backend as a whole. /auth/forgot-password checks this
+  // itself and logs a clear warning rather than silently pretending to send.
+  resendApiKey: process.env.RESEND_API_KEY ?? '',
+  // Resend's shared sending domain — works with no DNS/domain verification,
+  // the right default to get password reset working before anyone has set
+  // up a verified sending domain. Override once one exists.
+  emailFrom: process.env.EMAIL_FROM ?? 'Procedural Terrain <onboarding@resend.dev>',
+
+  // Where the reset link points — the same origin CORS is already locked to,
+  // since that origin *is* the frontend serving the page that reads the
+  // token out of the URL.
+  frontendUrl: process.env.CORS_ORIGIN ?? 'http://localhost:5173',
 };

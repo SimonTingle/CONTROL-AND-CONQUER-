@@ -1561,6 +1561,22 @@ api.me().then((user) => {
   game.portalScreen?.refreshAccount();
 });
 
+// A mailed reset link points back at this page with the token in the query
+// string — jump straight to "set new password" rather than making the player
+// find their own way to it through sign-in. Stripped from the URL
+// immediately (history.replaceState, no reload) so refreshing or sharing the
+// link afterward doesn't re-arm a token that's either already spent or about
+// to be.
+{
+  const resetToken = new URLSearchParams(location.search).get('resetToken');
+  if (resetToken && api.isConfigured) {
+    game.authScreen.showReset(resetToken);
+    const url = new URL(location.href);
+    url.searchParams.delete('resetToken');
+    history.replaceState(null, '', url);
+  }
+}
+
 addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();

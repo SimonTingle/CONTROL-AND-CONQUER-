@@ -65,6 +65,16 @@ export const api = {
 
   logout: () => request('/auth/logout', { method: 'POST' }),
 
+  // Always resolves { ok: true } on the server's side regardless of whether
+  // the email has an account — see server/src/routes/auth.js. Still surfaced
+  // as a real request here (not hidden behind a fire-and-forget) so a
+  // genuine network failure can tell the user to check their connection,
+  // just never "does this email exist".
+  forgotPassword: (email) => request('/auth/forgot-password', { method: 'POST', body: { email } }),
+
+  resetPassword: (token, password) =>
+    request('/auth/reset-password', { method: 'POST', body: { token, password } }),
+
   /**
    * The signed-in user, or null.
    *

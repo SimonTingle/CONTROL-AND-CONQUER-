@@ -1051,6 +1051,17 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
 
 .auth-error[hidden] { display: none; }
 
+/* The success/confirmation counterpart to .auth-error — "check your email",
+   "password changed" — deliberately not red, and not role="alert" in the
+   markup, since neither is a failure. */
+.auth-status {
+  margin: 0;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.auth-status[hidden] { display: none; }
+
 .auth-submit {
   margin-top: 4px;
   padding: 10px;
@@ -1083,6 +1094,14 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
 
 .auth-toggle:hover,
 .auth-skip:hover { color: var(--accent); }
+
+/* Without this, `.hidden = true` in JS has no visible effect: the [hidden]
+   attribute and the .auth-toggle { display: block } rule above have equal
+   specificity, so whichever is declared later in the stylesheet wins — and
+   it was this one. forgotLink relies on real hiding to disappear outside
+   the login form. */
+.auth-toggle[hidden],
+.auth-skip[hidden] { display: none; }
 
 /* Visually quieter than the toggle — it's the way out, not a second action. */
 .auth-skip { font-size: 11px; opacity: 0.75; }
