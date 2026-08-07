@@ -27,17 +27,56 @@ export class PortalScreen {
    * @param {(modeId: string) => void} onChoose called once, with the picked
    *   mode's id — never called for 'multiplayer-online', which has no
    *   destination to route to yet.
+   * @param {object} [account] account UI wiring, all optional. Omitting it
+   *   (or leaving `isConfigured` false) renders the portal exactly as before
+   *   — this is the first screen every player sees, so a backend-less build
+   *   must show no trace of an account affordance it cannot honour.
+   * @param {boolean} [account.isConfigured] whether a backend is configured at all.
+   * @param {() => object|null} [account.getAccount] current signed-in user, or null.
+   * @param {() => void} [account.onSignIn] opens the sign-in/register overlay.
+   * @param {() => void} [account.onSignOut] signs out.
    */
-  constructor(onChoose) {
+  constructor(onChoose, account = {}) {
     this.onChoose = onChoose;
+    this.account = account;
     this.root = document.getElementById('portal');
     this.open = true;
     this.buildGrid();
   }
 
+  /** Call after sign-in/sign-out so the corner reflects the new state. */
+  refreshAccount() {
+    if (!this.accountBar) return;
+    this.renderAccountBar();
+  }
+
+  renderAccountBar() {
+    const { isConfigured, getAccount } = this.account;
+    this.accountBar.replaceChildren();
+    if (!isConfigured) return; // no backend: show nothing, exactly as before this feature existed
+
+    const user = getAccount?.();
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'portal-account-btn';
+    if (user) {
+      btn.textContent = `Signed in as ${user.displayName} · Sign out`;
+      btn.addEventListener('click', () => this.account.onSignOut?.());
+    } else {
+      btn.textContent = 'Sign in / create account';
+      btn.addEventListener('click', () => this.account.onSignIn?.());
+    }
+    this.accountBar.appendChild(btn);
+  }
+
   buildGrid() {
     const panel = document.createElement('div');
     panel.className = 'portal-panel';
+
+    this.accountBar = document.createElement('div');
+    this.accountBar.className = 'portal-account-bar';
+    this.renderAccountBar();
+    panel.appendChild(this.accountBar);
 
     const h1 = document.createElement('h1');
     h1.textContent = 'Procedural Terrain';

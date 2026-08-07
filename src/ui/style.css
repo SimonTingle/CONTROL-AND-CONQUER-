@@ -772,6 +772,33 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
   text-align: center;
 }
 
+/* Empty (zero height) whenever there's no backend configured —
+   renderAccountBar() leaves it childless in that case, so it collapses to
+   nothing rather than leaving a gap. In normal document flow (not absolutely
+   positioned) so it can't clip off-screen on short viewports. */
+.portal-account-bar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 16px;
+}
+
+.portal-account-btn {
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+  background: rgba(8, 12, 17, 0.7);
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.portal-account-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 .portal-panel h1 {
   margin: 0;
   font-size: 15px;
