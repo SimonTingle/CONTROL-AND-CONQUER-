@@ -31,6 +31,9 @@ const SUN_DAY = new THREE.Color('#fff4e0');
  * is what makes the time-of-day slider feel like weather instead of a toggle.
  */
 export class Atmosphere {
+  // Sun elevation in degrees at solar noon, when the day/night cycle is running.
+  static CYCLE_MAX_ELEVATION = 70;
+
   constructor(scene, renderer, { mapSize = 1024 } = {}) {
     this.scene = scene;
     this.renderer = renderer;
@@ -70,7 +73,38 @@ export class Atmosphere {
     scene.fog = new THREE.FogExp2(0x9fb6cc, this.params.fogDensity);
 
     this.mapSize = mapSize;
+
+    // A stylized cycle, not real solar geometry: elevation follows a sine wave
+    // (0° and rising at sunrise, CYCLE_MAX_ELEVATION at solar noon, 0° and
+    // falling at sunset, -CYCLE_MAX_ELEVATION at midnight) and azimuth sweeps
+    // a full circle over the same period, so the sun visibly arcs across the
+    // sky rather than just dimming in place. periodSeconds is real (wall-clock)
+    // time for one full day+night. phase/azimuthOffset are seeded so the very
+    // first frame lands close to DEFAULT_ATMOSPHERE's elevation/azimuth rather
+    // than jumping — the toggle in the settings drawer starts this enabled.
+    const initialRatio = THREE.MathUtils.clamp(
+      DEFAULT_ATMOSPHERE.elevation / Atmosphere.CYCLE_MAX_ELEVATION,
+      -1,
+      1
+    );
+    const initialPhase = Math.asin(initialRatio) / (Math.PI * 2); // rising branch, in [-0.25, 0.25]
+    this.cycle = {
+      enabled: true,
+      periodSeconds: 1800,
+      phase: initialPhase < 0 ? initialPhase + 1 : initialPhase,
+      azimuthOffset: (DEFAULT_ATMOSPHERE.azimuth - initialPhase * 360 + 360) % 360,
+    };
+
     this.apply();
+  }
+
+  /** Advance the day/night cycle, if enabled. No-op (and cheap) when it's off. */
+  update(dt) {
+    if (!this.cycle.enabled) return this;
+    this.cycle.phase = (this.cycle.phase + dt / this.cycle.periodSeconds) % 1;
+    this.params.elevation = Atmosphere.CYCLE_MAX_ELEVATION * Math.sin(this.cycle.phase * Math.PI * 2);
+    this.params.azimuth = (this.cycle.azimuthOffset + this.cycle.phase * 360) % 360;
+    return this.apply();
   }
 
   /** Push the current params into the sky shader, lights and fog. */
