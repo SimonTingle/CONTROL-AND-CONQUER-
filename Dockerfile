@@ -20,10 +20,15 @@ COPY . .
 
 # Baked in at build time — Vite's define constants have no runtime config
 # file to read later, so this has to be an image build-time input, not a
-# container-runtime env var. Defaults to empty so every other build path
-# (local docker build, CI, a plain docker run) is unaffected and the game
-# stays fully playable with no backend configured.
-ARG VITE_API_URL=""
+# container-runtime env var.
+#
+# Defaults to the live production API rather than empty: this CapRover
+# instance's GitHub-deploy method (Method 3) has no UI field for passing
+# --build-arg through to the build, so the value actually used in production
+# is whatever this default is, not something set per-deploy. Override with
+# --build-arg VITE_API_URL=... for a build that should stay backend-less
+# (e.g. testing the offline path, or a different environment's own server).
+ARG VITE_API_URL="https://control-conquer-api.apps.simontingle.com"
 ENV VITE_API_URL=$VITE_API_URL
 RUN npm run build
 
