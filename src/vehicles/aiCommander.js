@@ -99,6 +99,12 @@ export class AiCommander {
     this.startTimer = buildDelaySeconds;
     this.retryTimer = 0;
     this.buildTimer = 0;
+    // _manageArmy's target pick (an O(all structures + all vehicles) scan)
+    // is cached here and only refreshed every ARMY_TARGET_INTERVAL — see
+    // that method's comment for why running it unthrottled, every frame,
+    // for every AI team was a real perf problem.
+    this.armyTargetTimer = 0;
+    this.armyTarget = null;
     this.exploreRadius = EXPLORE_RADIUS_START;
     // Widens each time the base has to go looking for a deploy site — a
     // point clearing findSpawnPointNear's own land check can still turn out
@@ -131,7 +137,7 @@ export class AiCommander {
     this._driveScout(dt);
     this._manageBase(dt);
     this._manageEconomy(dt);
-    this._manageArmy();
+    this._manageArmy(dt);
   }
 
   // ---- own units, re-resolved fresh every call — see the header comment ----
@@ -285,7 +291,18 @@ export class AiCommander {
 
   // ---- army: arm what it builds, and send it at something it can see ----
 
-  _manageArmy() {
+  // How often the army's target (attack-target scan, or fallback advance
+  // point) is recomputed. This is the throttle that matters: "where should
+  // the army be heading" doesn't need per-frame freshness the way turret
+  // acquisition does (combatController has its own, separate, much shorter
+  // throttle for that) — but _attackTarget's O(all structures + all
+  // vehicles) scan running unthrottled, every frame, for every AI team was a
+  // real cost that scaled with both team count and match size. A ~1.5s lag
+  // on army orders is imperceptible; 60 full-map scans a second per team is
+  // not free.
+  static ARMY_TARGET_INTERVAL = 1.5;
+
+  _manageArmy(dt) {
     const army = this.ctx.vehicles.instances.filter(
       (v) => v.teamId === this.team.id && !v.dead && v.def.tags?.includes('combat') && v.def.id !== 'scout-buggy'
     );
@@ -302,18 +319,23 @@ export class AiCommander {
     // combatController engages anything that wanders into range regardless.
     if (army.length < this.economy.attackAt) return;
 
-    // Somewhere scouted and worth hitting, or — failing that — forward.
-    //
-    // An army that only ever moves toward *known* enemies never moves at all
-    // on a large map: the lone scout rarely ranges far enough to reveal
-    // another team's base before the army is built, so every unit sits at home
-    // guarding nothing. Advancing on the island's middle instead keeps the
-    // fair-vision rule completely intact — it is not homing on anything it
-    // cannot see — while guaranteeing that four teams pushing outward
-    // eventually meet. The units carry their own sight radius, so the advance
-    // *is* the reconnaissance, and the moment it reveals something real
-    // `_attackTarget` starts returning it instead.
-    const target = this._attackTarget() ?? this._advancePoint();
+    this.armyTargetTimer -= dt;
+    if (this.armyTargetTimer <= 0) {
+      this.armyTargetTimer = AiCommander.ARMY_TARGET_INTERVAL;
+      // Somewhere scouted and worth hitting, or — failing that — forward.
+      //
+      // An army that only ever moves toward *known* enemies never moves at all
+      // on a large map: the lone scout rarely ranges far enough to reveal
+      // another team's base before the army is built, so every unit sits at home
+      // guarding nothing. Advancing on the island's middle instead keeps the
+      // fair-vision rule completely intact — it is not homing on anything it
+      // cannot see — while guaranteeing that four teams pushing outward
+      // eventually meet. The units carry their own sight radius, so the advance
+      // *is* the reconnaissance, and the moment it reveals something real
+      // `_attackTarget` starts returning it instead.
+      this.armyTarget = this._attackTarget() ?? this._advancePoint();
+    }
+    const target = this.armyTarget;
     if (!target) return;
 
     for (const unit of army) {
