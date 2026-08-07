@@ -145,6 +145,13 @@ export function buildSchema(world, view, game) {
       title: 'Atmosphere',
       open: true,
       controls: [
+        // While running, the cycle drives elevation/azimuth itself every
+        // frame (world.js calls atmosphere.update(dt)) — the two sliders
+        // below still work, but whatever they're set to gets overwritten on
+        // the next frame until this is switched off. Same relationship the
+        // chase-camera toggle has with its own sliders further down.
+        toggle('Day/night cycle (30 min)',
+          () => atmo.cycle.enabled, (v) => (atmo.cycle.enabled = v)),
         slider('Sun elevation', -10, 90, 0.5,
           () => atmo.params.elevation, (v) => atmo.set({ elevation: v })),
         slider('Sun azimuth', 0, 360, 1,

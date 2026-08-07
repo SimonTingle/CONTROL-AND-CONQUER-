@@ -70,6 +70,9 @@ export class World {
   }
 
   update(dt, camera) {
+    // First: blooms below reads the elevation this call just produced, not
+    // last frame's.
+    this.atmosphere.update(dt);
     this.terrain.update(camera);
     this.water.update(dt);
     // Sun elevation passed in rather than reached for, mirroring how the fleet
