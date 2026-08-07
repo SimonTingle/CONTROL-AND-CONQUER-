@@ -21,13 +21,15 @@ const MESSAGES = {
   network_unreachable: 'Cannot reach the server. You can keep playing offline.',
   no_backend_configured: 'This build has no account server configured.',
   authentication_required: 'Please sign in again.',
+  invalid_or_expired_token: 'This reset link is invalid or has expired. Request a new one.',
 };
 
 export class AuthScreen {
   /** @param {(user: object|null) => void} onDone called with the signed-in user, or null if dismissed. */
   constructor(onDone) {
     this.onDone = onDone;
-    this.mode = 'login'; // 'login' | 'register'
+    this.mode = 'login'; // 'login' | 'register' | 'forgot' | 'reset'
+    this.resetToken = null; // set by showReset(); consumed on successful reset
     this.open = false;
     this.root = document.getElementById('auth-screen');
     this.build();
@@ -65,6 +67,14 @@ export class AuthScreen {
     this.error.setAttribute('role', 'alert');
     this.form.appendChild(this.error);
 
+    // A second status line, separate from .auth-error, for the "check your
+    // email" / "password changed" confirmations — those aren't failures and
+    // shouldn't render in the error's red, or announce as role="alert".
+    this.status = document.createElement('p');
+    this.status.className = 'auth-status';
+    this.status.hidden = true;
+    this.form.appendChild(this.status);
+
     this.submitBtn = document.createElement('button');
     this.submitBtn.type = 'submit';
     this.submitBtn.className = 'auth-submit';
@@ -72,10 +82,25 @@ export class AuthScreen {
 
     this.panel.appendChild(this.form);
 
+    // Only ever shown on the login form — forgetting a password only makes
+    // sense once there's a password to have forgotten.
+    this.forgotLink = document.createElement('button');
+    this.forgotLink.type = 'button';
+    this.forgotLink.className = 'auth-toggle';
+    this.forgotLink.textContent = 'Forgot password?';
+    this.forgotLink.addEventListener('click', () => {
+      this.mode = 'forgot';
+      this.render();
+    });
+    this.panel.appendChild(this.forgotLink);
+
     this.toggle = document.createElement('button');
     this.toggle.type = 'button';
     this.toggle.className = 'auth-toggle';
     this.toggle.addEventListener('click', () => {
+      // 'forgot'/'reset' both return to the sign-in form, not toggle to
+      // 'register' — this button reads as "back" from either of those, and
+      // as the login/register switch everywhere else.
       this.mode = this.mode === 'login' ? 'register' : 'login';
       this.render();
     });
@@ -110,23 +135,61 @@ export class AuthScreen {
   }
 
   render() {
-    const registering = this.mode === 'register';
-    this.heading.textContent = registering ? 'Create account' : 'Sign in';
-    this.hint.textContent = registering
-      ? 'An account stores your saves in the cloud and lets you play online.'
-      : 'Sign in to reach your cloud saves and online matches.';
-    this.submitBtn.textContent = registering ? 'Create account' : 'Sign in';
-    this.toggle.textContent = registering
-      ? 'Already have an account? Sign in'
-      : 'Need an account? Create one';
+    const { mode } = this;
+    const copy = {
+      login: {
+        heading: 'Sign in',
+        hint: 'Sign in to reach your cloud saves and online matches.',
+        submit: 'Sign in',
+        toggle: 'Need an account? Create one',
+      },
+      register: {
+        heading: 'Create account',
+        hint: 'An account stores your saves in the cloud and lets you play online.',
+        submit: 'Create account',
+        toggle: 'Already have an account? Sign in',
+      },
+      forgot: {
+        heading: 'Reset password',
+        hint: "Enter your account's email and we'll send a link to set a new password.",
+        submit: 'Send reset link',
+        toggle: 'Back to sign in',
+      },
+      reset: {
+        heading: 'Set a new password',
+        hint: 'Choose a new password for your account.',
+        submit: 'Set new password',
+        toggle: 'Back to sign in',
+      },
+    }[mode];
 
-    this.displayNameField.wrap.hidden = !registering;
-    this.displayNameField.input.required = registering;
-    // A password manager should be offered a *new* password on the register
-    // form and the saved one on the sign-in form.
-    this.passwordField.input.autocomplete = registering ? 'new-password' : 'current-password';
+    this.heading.textContent = copy.heading;
+    this.hint.textContent = copy.hint;
+    this.submitBtn.textContent = copy.submit;
+    this.toggle.textContent = copy.toggle;
+    this.toggle.hidden = false;
+
+    // Only the login form offers a way *into* 'forgot' — the other three
+    // modes have nothing sensible for it to do.
+    this.forgotLink.hidden = mode !== 'login';
+
+    this.displayNameField.wrap.hidden = mode !== 'register';
+    this.displayNameField.input.required = mode === 'register';
+
+    // 'forgot' only needs the address to send a link to; 'reset' only needs
+    // the new password (the account is identified by the URL token, not by
+    // asking the person to re-enter their email).
+    this.emailField.wrap.hidden = mode === 'reset';
+    this.emailField.input.required = mode !== 'reset';
+    this.passwordField.wrap.hidden = mode === 'forgot';
+    this.passwordField.input.required = mode !== 'forgot';
+    // A password manager should be offered a *new* password on register/reset
+    // and the saved one on sign-in.
+    this.passwordField.input.autocomplete =
+      mode === 'register' || mode === 'reset' ? 'new-password' : 'current-password';
 
     this.error.hidden = true;
+    this.status.hidden = true;
   }
 
   async submit() {
@@ -136,13 +199,29 @@ export class AuthScreen {
 
     this.submitBtn.disabled = true;
     this.error.hidden = true;
+    this.status.hidden = true;
 
     try {
-      const { user } =
-        this.mode === 'register'
-          ? await api.register(email, password, displayName)
-          : await api.login(email, password);
-      this.close(user);
+      if (this.mode === 'register') {
+        this.close((await api.register(email, password, displayName)).user);
+      } else if (this.mode === 'login') {
+        this.close((await api.login(email, password)).user);
+      } else if (this.mode === 'forgot') {
+        await api.forgotPassword(email);
+        // Same message whether or not the address has an account — the
+        // server's response is already indistinguishable (see api.js), and
+        // showing a different UI message here would defeat that.
+        this.status.textContent = "If an account exists for that email, we've sent a reset link.";
+        this.status.hidden = false;
+        this.emailField.input.value = '';
+      } else if (this.mode === 'reset') {
+        await api.resetPassword(this.resetToken, password);
+        this.resetToken = null;
+        this.mode = 'login';
+        this.render();
+        this.status.textContent = 'Password changed. Sign in with your new password.';
+        this.status.hidden = false;
+      }
     } catch (err) {
       const code = err instanceof ApiError ? err.code : 'request_failed';
       // Password length is the one rejection worth spelling out, since the
@@ -163,10 +242,25 @@ export class AuthScreen {
     this.emailField.input.focus();
   }
 
+  /**
+   * Reached from a mailed reset link (main.js reads `?resetToken=` off the
+   * URL on load) — jumps straight to the "set new password" form rather than
+   * making the player navigate there through sign-in first.
+   */
+  showReset(token) {
+    this.mode = 'reset';
+    this.resetToken = token;
+    this.render();
+    this.open = true;
+    this.root.classList.remove('hidden');
+    this.passwordField.input.focus();
+  }
+
   close(user) {
     this.open = false;
     this.root.classList.add('hidden');
     this.passwordField.input.value = ''; // don't leave a password sitting in the DOM
+    this.mode = 'login'; // next open always starts at sign-in, not wherever this one left off
     this.onDone?.(user);
   }
 }

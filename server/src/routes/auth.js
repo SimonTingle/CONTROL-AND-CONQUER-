@@ -16,6 +16,9 @@ import {
   revokeSession,
   sessionCookieOptions,
 } from '../auth/sessions.js';
+import { createPasswordReset, userForResetToken, consumePasswordReset } from '../auth/passwordResets.js';
+import { sendEmail, passwordResetEmail } from '../email/resend.js';
+import { config } from '../config.js';
 
 const credentials = z.object({
   email: z.string().email().max(254),
@@ -135,5 +138,74 @@ export async function authRoutes(app) {
    */
   app.get('/auth/me', async (req) => {
     return { user: req.user ? publicUser(req.user) : null };
+  });
+
+  const forgotPasswordBody = z.object({ email: z.string().email().max(254) });
+
+  /**
+   * Always responds `{ ok: true }`, whether or not the email has an account —
+   * this is the one place the no-enumeration rule can't bend the way
+   * registration's does (there's no form field to legitimately need the
+   * answer here). If the account exists, a reset email goes out; either way
+   * the response looks identical.
+   */
+  app.post('/auth/forgot-password', { config: authLimit }, async (req, reply) => {
+    const parsed = forgotPasswordBody.safeParse(req.body);
+    if (!parsed.success) return reply.send({ ok: true }); // same response as "no such account" — see above
+
+    const { rows } = await query('select id, email from users where email = $1', [parsed.data.email]);
+    const user = rows[0];
+
+    if (user) {
+      const reset = await createPasswordReset(user.id);
+      const resetUrl = `${config.frontendUrl}/?resetToken=${reset.token}`;
+      const sent = await sendEmail({ to: user.email, log: req.log, ...passwordResetEmail(resetUrl) });
+      if (!sent) {
+        // The user gets the same "check your email" response regardless —
+        // this log line is what tells the operator to go check RESEND_API_KEY
+        // rather than the player being left wondering why no email arrived.
+        req.log.warn({ userId: user.id }, '[auth] password reset email did not send');
+      }
+    }
+
+    return reply.send({ ok: true });
+  });
+
+  const resetPasswordBody = z.object({
+    token: z.string().uuid(),
+    password: z.string().min(12).max(200),
+  });
+
+  app.post('/auth/reset-password', { config: authLimit }, async (req, reply) => {
+    const parsed = resetPasswordBody.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: 'invalid_input',
+        details: parsed.error.flatten().fieldErrors,
+      });
+    }
+    const { token, password } = parsed.data;
+
+    const user = await userForResetToken(token);
+    if (!user) {
+      // Deliberately one error code for "no such token", "expired", and
+      // "already used" — same reasoning login's invalid_credentials
+      // collapses two distinct failures into one response.
+      return reply.code(400).send({ error: 'invalid_or_expired_token' });
+    }
+
+    const password_hash = await hashPassword(password);
+    const applied = await consumePasswordReset(token, user.id, password_hash);
+    if (!applied) {
+      // Lost a race with a concurrent request that consumed the same token
+      // between the check above and now — same user-facing answer either way.
+      return reply.code(400).send({ error: 'invalid_or_expired_token' });
+    }
+
+    // Deliberately does NOT sign the caller in — consumePasswordReset just
+    // revoked every session on this account, including any the browser
+    // making this request happens to be holding. Making them use the
+    // password they just set, once, confirms it actually works.
+    return reply.send({ ok: true });
   });
 }
