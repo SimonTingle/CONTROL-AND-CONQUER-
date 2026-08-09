@@ -533,47 +533,31 @@ class VehicleInstance {
     if (casters) {
       for (const mesh of casters) mesh.castShadow = newTier !== LOD_TIERS.LOW;
     }
-
-    const lights = this.group.userData.lights;
-    if (!lights) return;
-
-    // Lights visible at all zoom levels; updateLights controls intensity
-    for (const spot of lights.spots) spot.visible = true;
-    for (const spot of lights.tailSpots) spot.visible = true;
-    for (const spot of lights.reverseSpots) spot.visible = true;
+    // Nothing to do for lights here any more. Vehicles no longer own SpotLights
+    // (see headlightPool.js) — and note that toggling light visibility by LOD,
+    // which is what this block used to reach for, is precisely the thing that
+    // must never happen: a change in visible light count re-links every material
+    // in the scene, measured at 764ms.
   }
 
   updateLights(headlightsOn) {
     const lights = this.group.userData.lights;
     if (!lights) return;
 
+    // Emissive lens intensities only. Every vehicle keeps these — they are what
+    // makes the whole fleet visibly light up at night, and an emissive material
+    // costs nothing. The projected beams belong to the shared HeadlightPool and
+    // follow only the vehicle the player is driving (see headlightPool.js).
     this.headlightsOn = headlightsOn;
     lights.headlampMaterial.emissiveIntensity = headlightsOn ? 2.2 : 0;
-    for (const spot of lights.spots) {
-      spot.intensity = headlightsOn ? lights.config.beamIntensity : 0;
-    }
 
     // Dim running lights once the lamps are on, full red under braking.
     const running = headlightsOn ? 0.55 : 0;
     lights.tailMaterial.emissiveIntensity = this.braking ? 3.0 : running;
 
-    // The lamps also throw a faint red wash on the ground behind. Like the
-    // reversing beam it only lights up once the headlights are on: a red patch
-    // on sunlit grass reads as a rendering fault rather than a brake light.
-    const tailGlow = headlightsOn ? (this.braking ? 1 : 0.3) : 0;
-    for (const spot of lights.tailSpots) {
-      spot.intensity = lights.config.tailBeamIntensity * tailGlow;
-    }
-
     // Reversing lamps are wired to the gearbox, so the lenses glow whenever the
     // vehicle is actually rolling backwards — day or night, like a real car.
-    // The beam itself only lights up after dark, or it would wash a bright
-    // patch onto sunlit ground for no visible benefit.
-    const reversing = this.reversing;
-    lights.reverseMaterial.emissiveIntensity = reversing ? 2.6 : 0;
-    for (const spot of lights.reverseSpots) {
-      spot.intensity = reversing && headlightsOn ? lights.config.reverseBeamIntensity : 0;
-    }
+    lights.reverseMaterial.emissiveIntensity = this.reversing ? 2.6 : 0;
   }
 
   /**

@@ -22,6 +22,7 @@ import { FogMask } from './core/fogOfWar.js';
 import { Hud } from './ui/hud.js';
 import { RadialMenu } from './ui/radialMenu.js';
 import { VehicleController } from './vehicles/vehicleController.js';
+import { HeadlightPool } from './vehicles/headlightPool.js';
 import { VEHICLE_CATALOG } from './vehicles/catalog.js';
 import { commandsFor } from './vehicles/commands.js';
 import { HarvesterAI } from './vehicles/harvesterAI.js';
@@ -67,7 +68,15 @@ const renderer = new THREE.WebGLRenderer({
   antialias: !IS_MOBILE,
   powerPreference: 'high-performance',
 });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, IS_MOBILE ? 1 : 2));
+// Captured so autoQuality has something to restore to after dropping to 1 under
+// load. On a Retina Mac this is 2, i.e. 4x the fragments of DPR 1 — measured at
+// 4.4ms vs 1.65ms, which makes it the biggest single GPU lever left once the
+// headlight-pool fix removed the spotlight blowup.
+const BASE_PIXEL_RATIO = Math.min(window.devicePixelRatio, IS_MOBILE ? 1 : 2);
+// userForced: set if the player ever picks a render resolution themselves, after
+// which autoQuality stops touching it. Mirrors shadowQuality.userForced below.
+const renderQuality = { userForced: false };
+renderer.setPixelRatio(BASE_PIXEL_RATIO);
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -450,6 +459,10 @@ function checkBaseRepositioning() {
 }
 
 const vehicles = new VehicleController(world.scene);
+// The scene's only vehicle headlights — four, shared, re-parented to whoever the
+// player is driving. Vehicles used to carry their own; at 20 vehicles that was 80
+// spotlights and 705ms of a 710ms frame. See headlightPool.js.
+const headlightPool = new HeadlightPool(world.scene);
 
 const terraform = new Terraform(world);
 const structures = new StructureController(world.scene, vehicles);
@@ -1645,7 +1658,16 @@ function tick(dt, { render = true } = {}) {
   // queued for the single flush below rather than removed underneath the
   // movement step that is about to run.
   p.time('combatController', () => combatController.update(dt));
-  p.time('vehicles', () => vehicles.update(dt, heightmap, headlightsWanted(), camera));
+  p.time('vehicles', () => {
+    const headlights = headlightsWanted();
+    vehicles.update(dt, heightmap, headlights, camera);
+    // Called every frame rather than only on selection change: attach() is a
+    // no-op when the target is unchanged, and driving it from here means the
+    // pool also recovers on its own when the active vehicle is destroyed and
+    // the 2B handoff picks a replacement (or leaves none).
+    headlightPool.attach(vehicles.active);
+    headlightPool.update(headlights);
+  });
   p.time('structures', () => structures.update(dt, heightmap));
 
   // Flushed here, and nowhere else — after every system above has taken its
@@ -1729,8 +1751,9 @@ function tick(dt, { render = true } = {}) {
 
   autoQuality.record(dt);
   autoQuality.update({
-    userForcedShadowQuality: shadowQuality.userForced,
-    setShadowQuality: applyShadowQuality,
+    userForcedPixelRatio: renderQuality.userForced,
+    setPixelRatio: (ratio) => renderer.setPixelRatio(ratio),
+    basePixelRatio: BASE_PIXEL_RATIO,
     setFogDensity: (density) => { world.atmosphere.params.fogDensity = density; },
     baseFogDensity: BASE_FOG_DENSITY,
   });
@@ -1741,6 +1764,13 @@ function tick(dt, { render = true } = {}) {
     fps = Math.round(frames / statsTimer);
     frames = 0;
     statsTimer = 0;
+
+    // Same cadence, same reasoning as exploration below: counting lights costs a
+    // scene.traverse, and twice a second is plenty for a number that only moves
+    // when something is structurally wrong.
+    let lights = 0;
+    world.scene.traverse((o) => { if (o.isLight) lights++; });
+    perfHud.setLightCount(lights);
 
     // Exploration is polled here rather than per frame: it re-derives the land
     // mask whenever the sea-level slider has moved, and twice a second is

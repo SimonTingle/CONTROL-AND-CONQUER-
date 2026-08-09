@@ -355,64 +355,6 @@ function buildLights(group, dims, cfg, shape = {}) {
   });
 
   const reverseZ = lampZ * 0.42; // inboard of the tail lights
-  const spots = [];
-  const reverseSpots = [];
-  const tailSpots = [];
-
-  // Brake glow. One lamp on the centreline whatever the lens style: this is a
-  // soft, short pool rather than a beam, so a second light would double the
-  // per-frame lighting cost for something nobody could see.
-  {
-    const tailSpot = new THREE.SpotLight(
-      new THREE.Color(cfg.tailColor),
-      0, // switched by the controller
-      cfg.tailBeamDistance,
-      cfg.tailBeamAngle,
-      0.9, // very soft edge — a wash, not a cone
-      1.4 // falls off fast so it stays a pool right behind the vehicle
-    );
-    tailSpot.castShadow = false;
-    tailSpot.position.set(tailX, lampY, 0);
-
-    // Aimed back and steeply down, so the red lands on the ground close behind
-    // rather than reaching out like a driving beam.
-    const tailAim = new THREE.Object3D();
-    tailAim.position.set(tailX - cfg.tailBeamDistance * 0.35, lampY - cfg.tailBeamDistance * 0.5, 0);
-    group.add(tailAim);
-    tailSpot.target = tailAim;
-
-    group.add(tailSpot);
-    tailSpots.push(tailSpot);
-  }
-
-  // Reversing lamps: one round lamp on the centreline for a bar rig, a pair
-  // inboard of the tail lights otherwise.
-  const reversePositions = bar ? [0] : [-reverseZ, reverseZ];
-  for (const rz of reversePositions) {
-    const reverseSpot = new THREE.SpotLight(
-      new THREE.Color(cfg.reverseColor),
-      0,
-      cfg.reverseBeamDistance,
-      cfg.reverseBeamAngle,
-      0.6,
-      1.1
-    );
-    reverseSpot.castShadow = false;
-    reverseSpot.position.set(tailX, lampY, rz);
-
-    // Reversing beam: aimed backwards (-X) and down, mirroring the headlights.
-    const reverseAim = new THREE.Object3D();
-    reverseAim.position.set(
-      tailX - cfg.reverseBeamDistance * 0.5,
-      lampY - cfg.reverseBeamDistance * 0.22,
-      rz
-    );
-    group.add(reverseAim);
-    reverseSpot.target = reverseAim;
-
-    group.add(reverseSpot);
-    reverseSpots.push(reverseSpot);
-  }
 
   if (bar) {
     // Lens sizes are proportional to the hull here, unlike the scout's fixed
@@ -455,30 +397,21 @@ function buildLights(group, dims, cfg, shape = {}) {
     }
   }
 
-  // Driving beams: a pair either way, so night driving behaves the same
-  // whatever the lenses look like.
-  for (const side of [-1, 1]) {
-    const spot = new THREE.SpotLight(
-      new THREE.Color(cfg.beamColor),
-      0, // switched on by the controller
-      cfg.beamDistance,
-      cfg.beamAngle,
-      0.55, // penumbra — soft-edged pool rather than a hard disc
-      1.1 // gentle falloff so the beam still reaches down-range
-    );
-    spot.castShadow = false;
-    spot.position.set(noseX, lampY, side * lampZ);
+  // No SpotLights are built here, deliberately. Every vehicle used to carry its
+  // own 4-5 (2 driving beams, 1 brake pool, 1-2 reversing lamps), which meant a
+  // 20-vehicle match put 80 lights in the scene. Three.js compiles the *visible*
+  // light count into every material and evaluates all of them per fragment
+  // regardless of intensity, so those 80 — all sitting at intensity 0 in daylight
+  // — measured as 705ms of a 710ms frame on the deployed build. Beams now come
+  // from the single shared HeadlightPool (headlightPool.js), which keeps a fixed
+  // four lights in the scene and re-parents them onto whichever vehicle the
+  // player is driving.
+  //
+  // The lamp *lenses* above stay per-vehicle: they are emissive materials, cost
+  // nothing, and are what makes every vehicle still visibly light up at night.
+  // `mounts` hands the pool the rig geometry so its beams land where this
+  // vehicle's lenses actually are.
+  const mounts = { noseX, tailX, lampY, lampZ, reverseZ, bar };
 
-    // Aim well ahead and slightly down, so the pool lands on the terrain
-    // rather than shooting off over the horizon.
-    const aim = new THREE.Object3D();
-    aim.position.set(noseX + cfg.beamDistance * 0.55, lampY - cfg.beamDistance * 0.16, side * lampZ);
-    group.add(aim);
-    spot.target = aim;
-
-    group.add(spot);
-    spots.push(spot);
-  }
-
-  return { headlampMaterial, tailMaterial, reverseMaterial, spots, reverseSpots, tailSpots, config: cfg };
+  return { headlampMaterial, tailMaterial, reverseMaterial, mounts, config: cfg };
 }
