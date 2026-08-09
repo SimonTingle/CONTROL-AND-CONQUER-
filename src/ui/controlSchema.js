@@ -145,15 +145,26 @@ export function buildSchema(world, view, game) {
       title: 'Atmosphere',
       open: true,
       controls: [
-        // While running, the cycle drives elevation/azimuth itself every
-        // frame (world.js calls atmosphere.update(dt)) — the two sliders
-        // below still work, but whatever they're set to gets overwritten on
-        // the next frame until this is switched off. Same relationship the
-        // chase-camera toggle has with its own sliders further down.
-        toggle('Day/night cycle (30 min)',
-          () => atmo.cycle.enabled, (v) => (atmo.cycle.enabled = v)),
+        // The cycle drives elevation/azimuth itself every frame (world.js calls
+        // atmosphere.update(dt)), so Sun elevation below scrubs `cycle.phase`
+        // rather than writing `params.elevation` — otherwise the cycle would
+        // overwrite it on the very next frame and the slider would just snap
+        // back, which is exactly what it used to do. Azimuth is still derived
+        // from phase, so it follows the scrub and its own slider only bites
+        // once the cycle is switched off.
+        toggle('Day/night cycle', () => atmo.cycle.enabled, (v) => (atmo.cycle.enabled = v)),
+        // A full day defaults to 30 minutes, which means ~13 minutes of play
+        // before dusk — long enough that the cycle looks broken when you're
+        // testing. Shorten this to watch a whole day (and the headlights coming
+        // on by themselves) in seconds.
+        slider('Day length (min)', 0.5, 30, 0.5,
+          () => atmo.cycle.periodSeconds / 60, (v) => (atmo.cycle.periodSeconds = v * 60)),
+        // Scrubs time of day while the cycle runs; a plain direct set once it's
+        // off. Note the sun's arc peaks at 70°, so the top of this range clamps
+        // while cycling.
         slider('Sun elevation', -10, 90, 0.5,
-          () => atmo.params.elevation, (v) => atmo.set({ elevation: v })),
+          () => atmo.params.elevation,
+          (v) => (atmo.cycle.enabled ? atmo.scrubToElevation(v) : atmo.set({ elevation: v }))),
         slider('Sun azimuth', 0, 360, 1,
           () => atmo.params.azimuth, (v) => atmo.set({ azimuth: v })),
         slider('Haze / turbidity', 0, 20, 0.1,
@@ -250,6 +261,12 @@ export function buildSchema(world, view, game) {
     {
       title: 'Game / debug',
       controls: [
+        // Also the production worst-case fps test. Beams come from a fixed pool
+        // of four lights (headlightPool.js), so scene light count is 6 whether
+        // it's noon or midnight and whether there are 2 vehicles or 80 — there
+        // is no heavier lighting state to measure. Turn this on, press `p`, and
+        // the fps shown is the floor. Watch the HUD's light count while you do:
+        // if it isn't 6, something has started creating per-entity lights again.
         toggle('Headlights (force on)',
           () => view.lighting.forceHeadlights, (v) => (view.lighting.forceHeadlights = v)),
         toggle('Tap-to-move (mobile)',

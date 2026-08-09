@@ -107,6 +107,35 @@ export class Atmosphere {
     return this.apply();
   }
 
+  /**
+   * Move the cycle to whatever time of day produces this sun elevation.
+   *
+   * Exists because setting `params.elevation` directly does nothing while the
+   * cycle is running — `update()` above recomputes it from `phase` on the very
+   * next frame, so the Sun elevation slider used to flicker and snap back. This
+   * inverts `elevation = CYCLE_MAX_ELEVATION * sin(2π·phase)` and moves `phase`
+   * itself, which is what the slider was always meant to do: scrub time of day.
+   *
+   * Note the sun only ever reaches ±CYCLE_MAX_ELEVATION (70°), so a slider that
+   * ranges higher clamps here. That's the sun's actual arc, not a bug to fix.
+   */
+  scrubToElevation(elev) {
+    const ratio = THREE.MathUtils.clamp(elev / Atmosphere.CYCLE_MAX_ELEVATION, -1, 1);
+    const base = Math.asin(ratio) / (Math.PI * 2); // [-0.25, 0.25]
+    // asin can't tell morning from afternoon, so keep the half of the day we're
+    // already in: dragging the sun down at noon should set into evening, not
+    // jump backwards to dawn. Tested off `phase` rather than cos(2π·phase),
+    // which is exactly 0 at *both* noon (0.25) and midnight (0.75) and so can't
+    // distinguish them — that ambiguity sent a drag down from noon to morning.
+    const p = this.cycle.phase;
+    const rising = p < 0.25 || p >= 0.75;
+    const phase = rising ? base : 0.5 - base;
+    this.cycle.phase = ((phase % 1) + 1) % 1;
+    // dt 0: recompute elevation/azimuth from the new phase and apply now, so the
+    // change is visible on this frame rather than the next.
+    return this.update(0);
+  }
+
   /** Push the current params into the sky shader, lights and fog. */
   apply() {
     const p = this.params;
