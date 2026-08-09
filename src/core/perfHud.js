@@ -14,17 +14,49 @@
 // that the numbers stay current as a scene changes.
 const WINDOW_SIZE = 120;
 
+// Sun + hemi + the 4 shared headlights = 6 in a healthy scene; a couple of Power
+// Spire beacons on top of that is still fine. Past ~8 the per-fragment light loop
+// starts climbing steeply (measured: 8 lights 7.2ms, 16 lights 21.5ms).
+const LIGHT_BUDGET = 8;
+
 export class PerfHud {
   constructor() {
     this.el = document.getElementById('perf-hud');
     this.samples = []; // frame times in ms, oldest first
     this.visible = false;
     this.deviceLine = ''; // set once via setDeviceLine — mobile-branch readout, Phase 1 verification
+    this.lightCount = 0;
+    this._warnedLights = false;
   }
 
   /** One-line summary of the renderer settings IS_MOBILE actually produced, for on-device checks without devtools. */
   setDeviceLine(text) {
     this.deviceLine = text;
+  }
+
+  /**
+   * Scene light count, polled on the HUD's half-second cadence (never per frame —
+   * it costs a scene.traverse).
+   *
+   * This exists because the worst performance bug this project has had was
+   * invisible: vehicles each built 4-5 SpotLights, so a 20-vehicle match ran 80,
+   * and Three.js evaluates every *visible* light per fragment no matter its
+   * intensity. That was 705ms of a 710ms frame, and nothing on screen reported
+   * it — the WebGL uniform warnings it produced were repeatedly written off in
+   * this project's notes as "pre-existing, unrelated shader warnings". They were
+   * never unrelated. A number on the HUD makes the whole class of regression
+   * obvious at a glance.
+   */
+  setLightCount(n) {
+    this.lightCount = n;
+    if (n > LIGHT_BUDGET && !this._warnedLights) {
+      this._warnedLights = true;
+      console.warn(
+        `[perf] ${n} lights in the scene (budget ${LIGHT_BUDGET}). Three.js evaluates every ` +
+          `visible light per fragment regardless of intensity — this is the shape of the ` +
+          `80-spotlight bug that cost 705ms/frame. See headlightPool.js.`
+      );
+    }
   }
 
   setVisible(visible) {
@@ -67,7 +99,8 @@ export class PerfHud {
     let text =
       `${(1000 / avgMs).toFixed(0)} fps avg  ${(1000 / onePercentLowMs).toFixed(0)} fps 1% low  ${(1000 / worstMs).toFixed(0)} fps worst\n` +
       `${avgMs.toFixed(1)}ms avg  ${worstMs.toFixed(1)}ms worst\n` +
-      `${info.calls} draws  ${(info.triangles / 1000).toFixed(0)}k tris` +
+      `${info.calls} draws  ${(info.triangles / 1000).toFixed(0)}k tris  ` +
+      `${this.lightCount} lights${this.lightCount > LIGHT_BUDGET ? ' ⚠' : ''}` +
       (this.deviceLine ? `\n${this.deviceLine}` : '');
 
     if (profiler?.enabled) {
