@@ -463,6 +463,7 @@ const vehicles = new VehicleController(world.scene);
 // player is driving. Vehicles used to carry their own; at 20 vehicles that was 80
 // spotlights and 705ms of a 710ms frame. See headlightPool.js.
 const headlightPool = new HeadlightPool(world.scene);
+window.__headlightPool = headlightPool; // console access, same convention as window.__tickProfiler
 
 const terraform = new Terraform(world);
 const structures = new StructureController(world.scene, vehicles);
@@ -804,7 +805,10 @@ function applyDriveInput() {
  * Lamps follow the sun, so dusk, night and dawn all light up without the
  * player touching anything. The manual override is for inspecting the beam.
  */
-const lighting = { forceHeadlights: false };
+// floodHeadlights is a testing-only switch that gives *every* vehicle real
+// beams — deliberately the expensive shape the headlight pool exists to avoid.
+// Off by default, never persisted; see HeadlightPool.setFlood().
+const lighting = { forceHeadlights: false, floodHeadlights: false };
 function headlightsWanted() {
   if (lighting.forceHeadlights) return true;
   const dusk = vehicles.active?.def.lights?.duskElevation ?? 8;
@@ -1667,6 +1671,10 @@ function tick(dt, { render = true } = {}) {
     // the 2B handoff picks a replacement (or leaves none).
     headlightPool.attach(vehicles.active);
     headlightPool.update(headlights);
+    // Testing-only flood mode. Both calls are no-ops while it's off, so the
+    // normal path pays nothing for it.
+    headlightPool.setFlood(lighting.floodHeadlights);
+    headlightPool.syncFlood(vehicles.instances, headlights);
   });
   p.time('structures', () => structures.update(dt, heightmap));
 

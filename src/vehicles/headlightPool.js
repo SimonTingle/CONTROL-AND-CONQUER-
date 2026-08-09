@@ -48,6 +48,100 @@ export class HeadlightPool {
     this.tail = make(0.9, 1.4);
     this.reverse = make(0.6, 1.1);
     this.all = [...this.beams, this.tail, this.reverse];
+
+    // Debug flood mode — see setFlood(). Off by default and never persisted.
+    this.flood = false;
+    this.floodRigs = new Map(); // instance -> [{spot, aim}, {spot, aim}]
+  }
+
+  /**
+   * **Testing only.** Give every vehicle its own pair of real driving beams.
+   *
+   * This deliberately recreates the shape of the bug this module exists to fix,
+   * because being able to reproduce it on demand is genuinely useful: it shows
+   * what per-vehicle lights actually cost on *your* hardware, and it proves the
+   * perf HUD's light-count warning fires. It is not a play feature — leaving it
+   * on will drag a 60fps match down hard, by design.
+   *
+   * Two beams per vehicle rather than the historical 4-5, so the number answers
+   * the useful question ("could every vehicle afford headlights?") rather than
+   * just reproducing the worst case. Expect a stall of a few hundred ms each
+   * time this is toggled, and on every spawn/death while it is on: the light
+   * count changes, and Three.js re-links every material when it does. That
+   * stall is the whole reason the normal path uses a fixed pool.
+   */
+  setFlood(on) {
+    if (on === this.flood) return;
+    this.flood = on;
+    if (!on) {
+      for (const rig of this.floodRigs.values()) this._disposeRig(rig);
+      this.floodRigs.clear();
+    }
+  }
+
+  _makeFloodRig(instance) {
+    const { mounts, config } = instance.group.userData.lights;
+    const { noseX, lampY, lampZ } = mounts;
+    return [-1, 1].map((side) => {
+      const spot = new THREE.SpotLight(
+        new THREE.Color(config.beamColor), 0, config.beamDistance, config.beamAngle, 0.55, 1.1
+      );
+      spot.castShadow = false;
+      spot.position.set(noseX, lampY, side * lampZ);
+      const aim = new THREE.Object3D();
+      aim.position.set(
+        noseX + config.beamDistance * 0.55,
+        lampY - config.beamDistance * 0.16,
+        side * lampZ
+      );
+      spot.target = aim;
+      instance.group.add(spot, aim);
+      return { spot, aim };
+    });
+  }
+
+  _disposeRig(rig) {
+    // SpotLights own no geometry or material, so removing them from the graph is
+    // the whole of the cleanup.
+    for (const { spot, aim } of rig) {
+      spot.parent?.remove(spot);
+      aim.parent?.remove(aim);
+    }
+  }
+
+  /**
+   * Keep flood rigs in step with the live fleet. Cheap no-op when flood is off,
+   * and only touches the scene graph when the set of vehicles actually changes —
+   * adding or removing a light re-links every material, so doing it per frame
+   * would be far worse than the thing being measured.
+   */
+  syncFlood(instances, headlightsOn) {
+    if (!this.flood) return;
+
+    const live = new Set();
+    for (const inst of instances) {
+      // The driven vehicle already carries the real pool; giving it a second
+      // pair would double-light it and misreport the count.
+      if (inst.dead || inst === this.attachedTo) continue;
+      const lights = inst.group?.userData?.lights;
+      if (!lights?.mounts) continue;
+
+      live.add(inst);
+      let rig = this.floodRigs.get(inst);
+      if (!rig) {
+        rig = this._makeFloodRig(inst);
+        this.floodRigs.set(inst, rig);
+      }
+      for (const { spot } of rig) {
+        spot.intensity = headlightsOn ? lights.config.beamIntensity : 0;
+      }
+    }
+
+    for (const [inst, rig] of this.floodRigs) {
+      if (live.has(inst)) continue;
+      this._disposeRig(rig); // died, or became the driven vehicle
+      this.floodRigs.delete(inst);
+    }
   }
 
   /**
