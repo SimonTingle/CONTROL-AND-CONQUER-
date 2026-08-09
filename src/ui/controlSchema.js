@@ -269,6 +269,16 @@ export function buildSchema(world, view, game) {
         // if it isn't 6, something has started creating per-entity lights again.
         toggle('Headlights (force on)',
           () => view.lighting.forceHeadlights, (v) => (view.lighting.forceHeadlights = v)),
+        // TESTING ONLY, and expect it to hurt — that's the point. This gives
+        // every vehicle its own pair of real beams, which is the expensive
+        // shape headlightPool.js exists to avoid: light cost scales with fleet
+        // size again, and toggling it stalls for a few hundred ms while every
+        // material re-links. Useful for seeing what per-vehicle lights actually
+        // cost on your own hardware, and for confirming the HUD's light-count
+        // warning fires. Pair it with 'Headlights (force on)' to see the beams
+        // in daylight. Leave it off for real play.
+        toggle('Flood: beams on ALL vehicles (test)',
+          () => view.lighting.floodHeadlights, (v) => (view.lighting.floodHeadlights = v)),
         toggle('Tap-to-move (mobile)',
           () => view.input.tapToMove, (v) => (view.input.tapToMove = v)),
         toggle('Buildable-ground overlay',
