@@ -36,6 +36,7 @@ import { Entities } from './core/entities.js';
 import { NavGrid } from './core/navGrid.js';
 import { PerfHud } from './core/perfHud.js';
 import { TickProfiler } from './core/tickProfiler.js';
+import { AutoQuality } from './core/autoQuality.js';
 import { IS_MOBILE } from './core/platform.js';
 
 // __APP_VERSION__/__BUILD_TIME__ are literal strings substituted at build
@@ -81,6 +82,7 @@ const perfHud = new PerfHud();
 // JS, not the GPU, so this exists to show which system it actually is
 // instead of guessing. Toggled alongside the perf HUD itself.
 const tickProfiler = new TickProfiler();
+const autoQuality = new AutoQuality();
 document.addEventListener('keydown', (e) => {
   if (e.key.toLowerCase() === 'p' && e.target === document.body) perfHud.toggle();
   // 'o' for "overhead" (breakdown) — shares 'p''s reasoning for why this is a
@@ -95,8 +97,12 @@ document.addEventListener('keydown', (e) => {
   }
 });
 window.__tickProfiler = tickProfiler; // console access, same convention as window.__benchmark
+window.__autoQuality = autoQuality;
 
 const world = new World(renderer);
+// Captured once, before autoQuality (below) ever has a chance to raise it —
+// the value auto-quality restores to once fps recovers.
+const BASE_FOG_DENSITY = world.atmosphere.params.fogDensity;
 const { heightmap } = world;
 
 // docs/performance-optimization-plan.md Phase 2 — shadows were identified as
@@ -106,7 +112,10 @@ const { heightmap } = world;
 // as a settings-drawer toggle (controlSchema.js's "Performance" group) so
 // either platform can opt into the other's setting — a phone that turns out
 // to handle it fine, or a desktop user who'd rather have the fps.
-const shadowQuality = { high: !IS_MOBILE };
+// userForced: set once the player touches the settings-drawer toggle themselves — after
+// that, auto-quality (below) leaves shadow quality alone rather than fighting an explicit
+// choice. Fog density is left out of that guard since there's no manual fog control to defer to.
+const shadowQuality = { high: !IS_MOBILE, userForced: false };
 function applyShadowQuality(high) {
   shadowQuality.high = high;
   renderer.shadowMap.type = high ? THREE.PCFSoftShadowMap : THREE.BasicShadowMap;
@@ -918,7 +927,10 @@ const game = {
   // docs/performance-optimization-plan.md Phase 2 — read/written by the
   // settings drawer's "Performance" group (controlSchema.js).
   shadowQuality,
-  setShadowQuality: applyShadowQuality,
+  setShadowQuality(high) {
+    shadowQuality.userForced = true;
+    applyShadowQuality(high);
+  },
   version: __APP_VERSION__,
   buildTime: __BUILD_TIME__,
 };
@@ -1714,6 +1726,14 @@ function tick(dt, { render = true } = {}) {
   p.time('render', () => renderer.render(world.scene, camera));
   perfHud.record(dt);
   perfHud.render(renderer, tickProfiler);
+
+  autoQuality.record(dt);
+  autoQuality.update({
+    userForcedShadowQuality: shadowQuality.userForced,
+    setShadowQuality: applyShadowQuality,
+    setFogDensity: (density) => { world.atmosphere.params.fogDensity = density; },
+    baseFogDensity: BASE_FOG_DENSITY,
+  });
 
   frames++;
   statsTimer += dt;
