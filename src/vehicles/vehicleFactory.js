@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { addSelectionHitbox } from '../core/selectionHitbox.js';
 
 /**
  * Where the axles sit for a given hull. Shared so anything that needs the
@@ -305,6 +306,22 @@ export function buildVehicleMesh(def) {
   // nose, tank, barrel) keeps castShadow=true at build time but drops out
   // first on mobile.
   group.userData.shadowCasters = [hull, group.userData.turret].filter(Boolean);
+
+  // Invisible hitbox spanning the whole vehicle, ground to top — clicking to
+  // open the radial menu was landing on empty local space between the hull's
+  // real sub-meshes (a wheel gap, under the nose/barrel) far more often than
+  // it should. The 30%/20% margins are deliberately generous rather than a
+  // tight fit: comfortably covering the nose/turret/barrel overhang matters
+  // far more here than pixel-precise bounds. See selectionHitbox.js.
+  const topY =
+    dims.wheelRadius * 2 +
+    dims.hullHeight +
+    Math.max(dims.cabinHeight ?? 0, shape.turret ? dims.turretHeight : 0);
+  const hitbox = addSelectionHitbox(
+    group,
+    new THREE.BoxGeometry(dims.hullLength * 1.3, topY * 1.05, dims.hullWidth * 1.2)
+  );
+  hitbox.position.y = (topY * 1.05) / 2;
 
   return group;
 }

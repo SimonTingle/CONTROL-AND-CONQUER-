@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { disposeObject3D } from '../core/disposeObject3D.js';
+import { addSelectionHitbox } from '../core/selectionHitbox.js';
 
 /**
  * Buildings, and the controller that owns them.
@@ -271,6 +272,16 @@ function buildFacilityMesh(def) {
 
   group.userData.buildRing = ring;
   group.userData.shadowCasters = [shell, roof, mast];
+
+  // Generous over the shell — the roof/mast/cap stick out beyond it, and this
+  // is meant to catch every click inside the visual silhouette, not just the
+  // shell box. See selectionHitbox.js.
+  const hitbox = addSelectionHitbox(
+    group,
+    new THREE.BoxGeometry(dims.depth * 1.2, (dims.height + dims.roofHeight) * 1.15, dims.width * 1.2)
+  );
+  hitbox.position.y = ((dims.height + dims.roofHeight) * 1.15) / 2;
+
   return group;
 }
 
@@ -359,6 +370,19 @@ function buildRepairBayMesh(def) {
   // The repair controller recolors this by state (idle/working/ready) —
   // its own emissive color is the "idle" default and never touched directly.
   group.userData.ringMaterial = accentMat;
+
+  // The worst offender this whole mechanism exists for: a bay is a 0.6-unit
+  // floor slab, four skinny posts and a thin ring nine units up — almost
+  // entirely open air above the pad. A cylinder spanning the full radius and
+  // height (plus the ring's overhang) turns the whole visual footprint into a
+  // real target. See selectionHitbox.js.
+  const hitboxHeight = dims.height + 1;
+  const hitbox = addSelectionHitbox(
+    group,
+    new THREE.CylinderGeometry(dims.padRadius * 1.05, dims.padRadius * 1.05, hitboxHeight, 16)
+  );
+  hitbox.position.y = hitboxHeight / 2;
+
   return group;
 }
 
@@ -422,6 +446,17 @@ function buildSpireMesh(def) {
   group.userData.shadowCasters = shellSegments;
   group.userData.beaconMaterial = beaconMat;
   group.userData.beaconLight = beaconLight;
+
+  // Uniform-radius cylinder at the *base* radius, not tapered like the real
+  // spire — deliberately generous near the top, which is exactly where the
+  // real geometry thins out to almost nothing and clicks miss most. See
+  // selectionHitbox.js.
+  const hitbox = addSelectionHitbox(
+    group,
+    new THREE.CylinderGeometry(dims.baseRadius, dims.baseRadius, dims.height, 8)
+  );
+  hitbox.position.y = dims.height / 2;
+
   return group;
 }
 
