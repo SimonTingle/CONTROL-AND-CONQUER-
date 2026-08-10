@@ -22,6 +22,7 @@ export function buildSchema(world, view, game) {
   });
   const toggle = (label, get, set) => ({ type: 'toggle', label, get, set });
   const color = (label, get, set) => ({ type: 'color', label, get, set });
+  const saveField = (get, onSave, onLoad) => ({ type: 'save-field', get, onSave, onLoad });
 
   // Accounts are entirely optional — this group hides itself in a build with
   // no API server (__API_URL__ empty), so an offline build shows no sign-in
@@ -54,29 +55,22 @@ export function buildSchema(world, view, game) {
     {
       title: 'Save / Load',
       controls: [
-        // Local saves work fully offline — no account, no backend. A native
-        // prompt() for the slot name keeps this to one control each rather
-        // than introducing a text-field control type for a single use.
-        {
-          type: 'button',
-          label: 'Save game (local)',
-          action: () => {
-            const slot = window.prompt('Save slot name:', 'default');
-            if (slot === null) return; // cancelled
-            game.saveGame(slot || 'default');
-            window.alert(`Saved to "${slot || 'default'}".`);
+        // Local saves work fully offline — no account, no backend. The field
+        // lists existing slot names as you type (game.listLocalSaves()) so
+        // re-saving over or loading a known name doesn't mean retyping it
+        // exactly; Save always proceeds (new or overwrite), Load only acts on
+        // an exact match.
+        saveField(
+          () => game.listLocalSaves(),
+          (name) => {
+            game.saveGame(name || 'default');
+            window.alert(`Saved to "${name || 'default'}".`);
           },
-        },
-        {
-          type: 'button',
-          label: 'Load game (local)',
-          action: () => {
-            const slot = window.prompt('Load which slot?', 'default');
-            if (slot === null) return;
-            const result = game.loadGame(slot || 'default');
-            if (!result) window.alert(`No save found in slot "${slot || 'default'}".`);
-          },
-        },
+          (name) => {
+            const result = game.loadGame(name || 'default');
+            if (!result) window.alert(`No save found named "${name || 'default'}".`);
+          }
+        ),
         // Cloud saves need both a backend build and a signed-in account —
         // hidden rather than shown-disabled, since an offline build has no
         // sensible "sign in" action to point the player at.
