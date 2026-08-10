@@ -15,6 +15,10 @@
  */
 
 import { hasVehicleBehind } from './trafficController.js';
+// Simulated time, never wall clock: field bans and threat memory are
+// simulation state, so they have to advance with the sim (including under
+// __step's fast-forward) and tick identically on every machine.
+import { simClock } from '../core/simClock.js';
 
 const IDLE = 'idle';
 const TO_FIELD = 'to-field';
@@ -191,7 +195,7 @@ export class HarvesterAI {
     // until the self-heal sweep notices. Finishing an unload takes a moment;
     // corrupting the facility lasts until something catches it.
     if (inst.threatUntil != null) {
-      if (performance.now() / 1000 < inst.threatUntil) {
+      if (simClock.time < inst.threatUntil) {
         if (s.state !== FLEEING && s.state !== UNLOADING && s.state !== WAITING_FOR_DOCK) {
           s.resumeState = this._safeResumeState(inst, s);
           s.state = FLEEING;
@@ -252,7 +256,7 @@ export class HarvesterAI {
   // ---- states ----
 
   _idle(inst, s) {
-    const now = performance.now() / 1000;
+    const now = simClock.time;
 
     if (s.load >= inst.def.capacity * 0.98) {
       s.state = TO_BASE;
@@ -329,7 +333,7 @@ export class HarvesterAI {
   _reachedField(inst, s) {
     // The field may have been stripped or paved while we drove to it.
     if (!s.field || s.field.dead || s.field.stock <= 0) {
-      s.bans.set(s.field?.id ?? -1, performance.now() / 1000 + BAN_SECONDS);
+      s.bans.set(s.field?.id ?? -1, simClock.time + BAN_SECONDS);
       s.state = s.load > 0 ? TO_BASE : IDLE;
       s.dest = null;
       return;
@@ -376,7 +380,7 @@ export class HarvesterAI {
       s.dest = null;
       s.detours = 0;
     } else if (dry) {
-      s.bans.set(s.field.id, performance.now() / 1000 + BAN_SECONDS);
+      s.bans.set(s.field.id, simClock.time + BAN_SECONDS);
       s.state = IDLE;
     }
   }
@@ -778,7 +782,7 @@ export class HarvesterAI {
     // Ban the destination, not the route: the failure this handles is "that
     // field sits on ground I cannot climb", and moving on is what a player
     // would do.
-    if (s.field) s.bans.set(s.field.id, performance.now() / 1000 + BAN_SECONDS);
+    if (s.field) s.bans.set(s.field.id, simClock.time + BAN_SECONDS);
     s.state = s.load > 0 ? TO_BASE : IDLE;
     s.dest = null;
     s.retryTimer = RETRY_PAUSE;

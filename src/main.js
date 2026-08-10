@@ -32,6 +32,9 @@ import { AiCommander } from './vehicles/aiCommander.js';
 import { CombatController } from './vehicles/combatController.js';
 import { MatchEndScreen } from './ui/matchEndScreen.js';
 import { Terraform } from './core/terraform.js';
+import { SIM_DT, simClock, advanceSimClock, resetSimClock } from './core/simClock.js';
+import { hashState } from './core/stateHash.js';
+import { Intent, IntentQueue, applyIntent } from './net/intents.js';
 import { StructureController } from './structures/structures.js';
 import { Entities } from './core/entities.js';
 import { NavGrid } from './core/navGrid.js';
@@ -616,8 +619,11 @@ canvas.addEventListener('pointerup', (e) => {
       // Same snap the preview outline used, so the click lands exactly where
       // the player was shown it would.
       const snapped = snapToGrid(point.x, point.z);
+      // Validity is checked here so the click feels immediate and an invalid
+      // spot stays in placement mode; the placement itself is queued, and
+      // re-validated on apply in case the ground was taken meanwhile.
       if (structures.canPlaceAt(pad, def, snapped.x, snapped.z)) {
-        structures.place(def, pad, snapped);
+        submitIntent(Intent.build(def.id, pad.id, snapped.x, snapped.z, pad.teamId ?? PLAYER_TEAM_ID));
         cancelPlacementMode();
       }
     }
@@ -641,7 +647,7 @@ canvas.addEventListener('pointerup', (e) => {
         // The harvester this mode was opened for can have been destroyed
         // while the player was still aiming the click.
         if (!harvester.dead) {
-          harvester.targetField = field;
+          submitIntent(Intent.harvest(harvester.id, field.id));
           // Anchored to the field's centre, not the click: it has to be
           // obvious *which* field was taken, even when the click landed out
           // at the edge.
@@ -661,8 +667,7 @@ canvas.addEventListener('pointerup', (e) => {
     // ordering anything — same "invalid click has no other effect" shape as
     // harvest targeting, just filtered to "a live enemy" instead of "a field".
     if (unit && !unit.dead && hit && hit !== unit && !hit.dead && hit.teamId !== unit.teamId) {
-      unit.mode = 'armed';
-      unit.combatTarget = hit;
+      submitIntent(Intent.target(unit.id, hit.id, hit.kind ?? 'vehicle'));
     }
     commandContext.targetSelectMode = null;
     return;
@@ -677,8 +682,14 @@ canvas.addEventListener('pointerup', (e) => {
   }
   // The ball marks an accepted move order, so a refused one (water, or no
   // vehicle spawned yet) leaves nothing behind to chase.
-  if (vehicles.commandActive(point.x, point.z, heightmap)) showMarker(point);
-  else marker.visible = false;
+  // setTarget is the authority on whether the order is legal (it refuses
+  // water), so ask it before queueing — the ball has to mark an order that was
+  // actually accepted, not one that will be silently dropped on apply.
+  if (vehicles.active && !vehicles.active.dead &&
+      vehicles.active.canTarget(point.x, point.z, heightmap)) {
+    submitIntent(Intent.move(vehicles.active.id, point.x, point.z));
+    showMarker(point);
+  } else marker.visible = false;
 });
 
 // Right-drag pans, so the browser menu has to stay out of the way.
@@ -794,6 +805,29 @@ addEventListener('blur', () => {
 function isTextInputFocused() {
   const el = document.activeElement;
   return el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA');
+}
+
+/**
+ * The local player's intent queue.
+ *
+ * Single player drains this straight into the sim at the top of the next step.
+ * A networked match will instead hand each batch to the lockstep session, which
+ * stamps it with a turn and sends it — so the producers above never need to
+ * know which mode they are in, and the local path is the same code that runs
+ * online rather than a separate one that only gets exercised in multiplayer.
+ */
+const intentQueue = new IntentQueue();
+
+function submitIntent(intent) {
+  intentQueue.push(intent);
+}
+
+function drainIntents() {
+  const batch = intentQueue.drain();
+  if (!batch.length) return;
+  // Local play passes teamId null: there is one human team, and the ownership
+  // check exists to stop a *remote* client ordering somebody else's units.
+  for (const intent of batch) applyIntent(intent, commandContext, null);
 }
 
 function applyDriveInput() {
@@ -973,9 +1007,15 @@ const menu = new Menu(() => buildSchema(world, view, game));
 
 const hud = new Hud();
 
+/**
+ * Every radial-menu command in the game funnels through here, which is what
+ * makes routing them through the intent queue a two-line change rather than a
+ * rewrite: a command is fully described by its id plus the instance it was
+ * opened on, so it serialises without touching the command table itself.
+ */
 const radialMenu = new RadialMenu(camera, {
   onCommand(cmd, instance) {
-    cmd.execute?.(instance, commandContext);
+    submitIntent(Intent.command(instance.id, cmd.id));
   },
 });
 
@@ -1455,6 +1495,9 @@ function updateProgression(explored) {
 function beginMatch(difficulty) {
   game.difficulty = difficulty;
   game.matchOver = false;
+  // A match is the unit of simulated time — tick 0 is its first step. Every
+  // ban, threat memory and (later) lockstep turn number is relative to this.
+  resetSimClock(0);
   // Sandbox is a one-team match; Multiplayer AI adds one team per AI opponent.
   game.teams = createTeams(game.aiMatch?.teamCount ?? 0);
 
@@ -1684,8 +1727,21 @@ function autosave() {
 const FOG_STAGGER_PERIOD = 3;
 let fogRevealCounter = 0;
 
-function tick(dt, { render = true } = {}) {
+/**
+ * One fixed simulation step. Everything that changes game state lives here and
+ * nowhere else — `renderTick` below is pure presentation.
+ *
+ * `dt` is a parameter rather than a hardcoded SIM_DT only so `window.__step`
+ * can still fast-forward at a chosen step size; real play always passes SIM_DT.
+ */
+function simTick(dt) {
   const p = tickProfiler;
+  advanceSimClock();
+  // Player intent is applied here — at a fixed point in the step — rather than
+  // inside the DOM event handler that produced it. Browsers deliver events
+  // whenever they like; a simulation that must match another machine's cannot
+  // be at the mercy of that.
+  drainIntents();
   // Vehicles move first so the camera frames where they actually ended up.
   applyDriveInput();
   p.time('world', () => world.update(dt, camera, p));
@@ -1821,7 +1877,16 @@ function tick(dt, { render = true } = {}) {
     autosave();
   }
 
-  if (!render) return;
+}
+
+/**
+ * Presentation only — never mutates simulation state, so it can run once per
+ * animation frame at whatever rate the display manages while the sim above runs
+ * on its own fixed clock. `dt` here is real frame time (what fps counters,
+ * tracer fades and auto-quality want), not simulated time.
+ */
+function renderTick(dt) {
+  const p = tickProfiler;
 
   p.time('updateTracers', () => updateTracers(dt));
   // Per-frame, unlike the rest of the HUD's half-second poll — see
@@ -1905,9 +1970,48 @@ function tick(dt, { render = true } = {}) {
   }
 }
 
+/**
+ * Advance the sim and draw one frame. Kept as the single entry point that
+ * `window.__step` and `__benchmark` already drive.
+ */
+function tick(dt, { render = true } = {}) {
+  simTick(dt);
+  if (render) renderTick(dt);
+}
+
+/**
+ * The simulation runs on a fixed step; only rendering runs per animation frame.
+ *
+ * This is not a micro-optimisation — it is a correctness requirement. Feeding
+ * `clock.getDelta()` straight into the sim (what this used to do) means every
+ * machine integrates movement with a slightly different `dt` every frame, so
+ * two clients replaying identical inputs still drift apart. It also made the
+ * game subtly frame-rate dependent in single player.
+ *
+ * The sim rate stays at 60Hz, which is why no render interpolation is needed:
+ * positions are still updated at least as often as they are drawn.
+ */
+const MAX_FRAME_DT = 0.25; // a tab regaining focus must not deliver a huge dt
+const MAX_CATCHUP_STEPS = 5; // bound the work per frame — see the drop below
+let simAccumulator = 0;
+
 function animate() {
   requestAnimationFrame(animate);
-  tick(Math.min(clock.getDelta(), 0.1));
+  const frameDt = Math.min(clock.getDelta(), MAX_FRAME_DT);
+  simAccumulator += frameDt;
+
+  let steps = 0;
+  while (simAccumulator >= SIM_DT && steps < MAX_CATCHUP_STEPS) {
+    simAccumulator -= SIM_DT;
+    steps++;
+    simTick(SIM_DT);
+  }
+  // If we hit the cap the machine cannot keep up; keeping the backlog would
+  // make every subsequent frame run the cap too and never recover (the classic
+  // spiral of death). Drop the debt instead and let the match run slow.
+  if (steps >= MAX_CATCHUP_STEPS) simAccumulator = 0;
+
+  renderTick(frameDt);
 }
 
 animate();
@@ -1917,10 +2021,80 @@ animate();
  * rendering. Lets a slow system (a harvest run, a regrowth cycle) be exercised
  * and asserted from the console in a fraction of the wall-clock time.
  */
-window.__step = (seconds, dt = 1 / 60) => {
+window.__step = (seconds, dt = SIM_DT) => {
   const steps = Math.max(1, Math.round(seconds / dt));
   for (let i = 0; i < steps; i++) tick(dt, { render: false });
   return { steps, simulated: +(steps * dt).toFixed(2) };
+};
+
+/**
+ * Does the simulation produce identical results from identical starting state?
+ *
+ * This is the claim lockstep multiplayer rests on, so it is worth being able to
+ * ask directly rather than inferring it from a match that looks about right.
+ * The method: snapshot the live world, run it forward N ticks recording state
+ * hashes, restore the identical snapshot, run it again, and compare.
+ *
+ * Note what is and isn't covered. The "inputs" here are the AI commanders and
+ * every autonomous system (harvesters, traffic, combat) — which is most of the
+ * simulation and all of the parts with interesting branching. It does not
+ * replay human clicks; those become deterministic by construction in 4C, since
+ * they are queued and applied at fixed tick boundaries.
+ *
+ * A mismatch reports the first sampled tick that differs, which is far more
+ * useful than a bare boolean — it says how long the two runs stayed together.
+ */
+/**
+ * This client's current state digest. Exposed because when two machines
+ * disagree, the first question is always "disagree about what" — and being able
+ * to read and diff the hash from a console on each side is the cheapest way in.
+ */
+window.__hashState = () => hashState({ vehicles, structures, game }, simClock.tick);
+
+/**
+ * Issue player intent from the console, exactly as a click would.
+ *
+ * The point of routing input through data is that it can be produced without a
+ * mouse — which makes order-handling testable, and is what a replay or a
+ * scripted determinism run needs.
+ */
+window.__intent = { submit: submitIntent, Intent };
+
+window.__determinismCheck = ({ ticks = 900, sampleEvery = 60 } = {}) => {
+  if (!game.teams?.length) return { ok: false, error: 'Start a match first.' };
+
+  const baseline = JSON.stringify(serialize(snapshotContext()));
+  const hashCtx = { vehicles, structures, game };
+
+  const run = () => {
+    deserialize(snapshotContext(), JSON.parse(baseline));
+    const out = [];
+    for (let i = 0; i < ticks; i++) {
+      simTick(SIM_DT);
+      if ((i + 1) % sampleEvery === 0) out.push(hashState(hashCtx, simClock.tick));
+    }
+    return out;
+  };
+
+  const a = run();
+  const b = run();
+  const firstDivergence = a.findIndex((h, i) => h !== b[i]);
+
+  // Leave the world on the second run's state rather than half-restored.
+  const result = {
+    ok: firstDivergence === -1,
+    ticks,
+    samples: a.length,
+    firstDivergence: firstDivergence === -1 ? null : {
+      sample: firstDivergence,
+      tick: (firstDivergence + 1) * sampleEvery,
+      runA: a[firstDivergence],
+      runB: b[firstDivergence],
+    },
+    finalHash: a[a.length - 1] ?? null,
+  };
+  console[result.ok ? 'log' : 'warn']('determinism:', result);
+  return result;
 };
 
 /**

@@ -17,6 +17,10 @@
  * fire — goes through it.
  */
 
+// Simulated time, never wall clock — threat memory is simulation state that
+// must advance with the sim and match across clients. See core/simClock.js.
+import { simClock } from '../core/simClock.js';
+
 // Reacquisition is the expensive part (an O(targets) scan plus a line-of-sight
 // march each), so it runs on a cadence rather than per frame, staggered across
 // instances so they never all pay it on the same tick. Holding an existing
@@ -214,7 +218,7 @@ export class CombatController {
     // Tell the victim it is under fire, and from where. Read by harvesterAI's
     // FLEEING state; anything that ignores these fields simply stands its
     // ground, which is the right default for something armed.
-    target.threatUntil = performance.now() / 1000 + THREAT_MEMORY;
+    target.threatUntil = simClock.time + THREAT_MEMORY;
     target.threatFrom = { x: inst.group.position.x, z: inst.group.position.z };
 
     const killed = target.takeDamage(inst.def.turret.damage);
