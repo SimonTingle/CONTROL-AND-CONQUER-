@@ -79,6 +79,10 @@ export class Menu {
       return row;
     }
 
+    if (control.type === 'save-field') {
+      return this.createSaveField(row, control);
+    }
+
     const label = document.createElement('label');
     label.textContent = control.label;
     row.appendChild(label);
@@ -124,6 +128,141 @@ export class Menu {
       control._sync = () => (input.value = `#${control.get().getHexString()}`);
     }
 
+    this.controls = this.controls || [];
+    this.controls.push(control);
+    return row;
+  }
+
+  /**
+   * Save-name field: a text input, a tappable suggestion list, and Save/Load
+   * buttons. Built by hand rather than `<datalist>` — iOS Safari has never
+   * reliably shown a datalist's dropdown, and "pick an existing save from a
+   * list" is the first thing this control needs to do on every platform, not
+   * just desktop. Buttons stack full-width below the input rather than sitting
+   * beside it, matching every other button in this drawer (`button.action` is
+   * always `width: 100%`) and keeping both comfortably tappable at the panel's
+   * fixed 320px width.
+   */
+  createSaveField(row, control) {
+    const wrap = document.createElement('div');
+    wrap.className = 'save-field-input-wrap';
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'Save name…';
+    input.autocomplete = 'off'; // don't let the OS's own field history render over ours
+    input.autocapitalize = 'off';
+    input.setAttribute('autocorrect', 'off'); // Safari-specific; harmless elsewhere
+    input.spellcheck = false;
+
+    const list = document.createElement('div');
+    list.className = 'save-field-suggestions hidden';
+
+    let lastKeyWasSpace = false;
+
+    const renderSuggestions = () => {
+      const names = control.get();
+      const val = input.value.trim();
+      const matches = val ? names.filter((n) => n.toLowerCase().includes(val.toLowerCase())) : names;
+      list.innerHTML = '';
+      if (matches.length === 0) {
+        list.classList.add('hidden');
+        return;
+      }
+      for (const name of matches) {
+        const item = document.createElement('div');
+        item.className = 'save-field-suggestion';
+        item.textContent = name;
+        // mousedown/touchstart, not click: both fire before the input's blur,
+        // so the list is still open (and not yet hidden by it) when a pick
+        // lands. A plain click handler would lose the race to blur closing it.
+        const pick = () => {
+          input.value = name;
+          list.classList.add('hidden');
+          syncLoadEnabled();
+        };
+        item.addEventListener('mousedown', (e) => { e.preventDefault(); pick(); });
+        item.addEventListener('touchstart', (e) => { e.preventDefault(); pick(); }, { passive: false });
+        list.appendChild(item);
+      }
+      list.classList.remove('hidden');
+    };
+
+    input.addEventListener('focus', renderSuggestions);
+    input.addEventListener('input', () => {
+      lastKeyWasSpace = false;
+      renderSuggestions();
+    });
+    input.addEventListener('blur', () => list.classList.add('hidden'));
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        control.onSave(input.value.trim());
+        list.classList.add('hidden');
+        syncLoadEnabled(); // the name just saved now exists, so Load can enable
+        return;
+      }
+      if (e.key !== ' ') {
+        lastKeyWasSpace = false;
+        return;
+      }
+      if (lastKeyWasSpace) {
+        // second space in a row: let it through as a literal space
+        lastKeyWasSpace = false;
+        return;
+      }
+      const val = input.value;
+      const names = control.get();
+      const matches = val ? names.filter((n) => n !== val && n.startsWith(val)) : [];
+      if (matches.length === 1) {
+        e.preventDefault();
+        input.value = matches[0];
+        renderSuggestions();
+        syncLoadEnabled();
+      }
+      lastKeyWasSpace = true;
+    });
+
+    wrap.append(input, list);
+    row.appendChild(wrap);
+
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'action';
+    saveBtn.textContent = 'Save';
+    saveBtn.addEventListener('click', () => {
+      control.onSave(input.value.trim());
+      syncLoadEnabled();
+    });
+
+    const loadBtn = document.createElement('button');
+    loadBtn.className = 'action';
+    loadBtn.textContent = 'Load';
+    loadBtn.addEventListener('click', () => {
+      if (loadBtn.getAttribute('aria-disabled') === 'true') {
+        window.alert(`No save found named "${input.value.trim() || 'default'}".`);
+        return;
+      }
+      control.onLoad(input.value.trim());
+    });
+
+    // Load only ever acts on an exact match — aria-disabled (not the native
+    // `disabled`) keeps it keyboard/tap-reachable so it can explain why.
+    const syncLoadEnabled = () => {
+      const exact = control.get().includes(input.value.trim());
+      loadBtn.classList.toggle('save-field-disabled', !exact);
+      loadBtn.setAttribute('aria-disabled', String(!exact));
+    };
+    input.addEventListener('input', syncLoadEnabled);
+    syncLoadEnabled();
+
+    row.append(saveBtn, loadBtn);
+
+    // Only re-check Load's enabled state, not the suggestion list itself — the
+    // list already reads control.get() fresh every time it opens, and syncing
+    // it here would pop it open on any unrelated refreshValues() call (e.g.
+    // "New random world"), not just while this field is actually focused.
+    control._sync = syncLoadEnabled;
     this.controls = this.controls || [];
     this.controls.push(control);
     return row;

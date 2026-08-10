@@ -214,6 +214,69 @@ button.action {
 
 button.action:hover { background: rgba(79, 209, 197, 0.22); }
 
+/* ---- save-field: Save/Load's autocomplete name field ---- */
+
+/* Save/Load buttons stack full-width below the input rather than sitting
+   beside it — every other button in this drawer is already width:100%, and at
+   the panel's fixed 320px there's no room to keep two real touch targets next
+   to a usable text field. */
+.control-save-field { display: flex; flex-direction: column; gap: 6px; }
+
+.save-field-input-wrap { position: relative; }
+
+.control-save-field input[type='text'] {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font: inherit;
+}
+
+.control-save-field input[type='text']:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* Built by hand rather than a native <datalist> — iOS Safari has never
+   reliably rendered a datalist's dropdown, and "pick an existing save from a
+   list" needs to work on every platform, not just desktop. */
+.save-field-suggestions {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 5;
+  max-height: 160px;
+  overflow-y: auto;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(14px);
+}
+
+.save-field-suggestions.hidden { display: none; }
+
+.save-field-suggestion {
+  min-height: 44px; /* real touch target, not just a dense list row */
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.save-field-suggestion:hover { background: rgba(79, 209, 197, 0.14); }
+.save-field-suggestion + .save-field-suggestion { border-top: 1px solid rgba(255, 255, 255, 0.05); }
+
+.control-save-field button.save-field-disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.control-save-field button.save-field-disabled:hover { background: rgba(79, 209, 197, 0.12); }
+
 /* ---- vehicle picker (mirrors the settings hamburger/drawer, right side) ---- */
 
 #vehicle-toggle {

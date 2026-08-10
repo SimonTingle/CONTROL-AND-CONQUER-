@@ -911,6 +911,17 @@ const game = {
     return snap;
   },
 
+  /** Every local save's slot name, for the Save/Load field's autocomplete. */
+  listLocalSaves() {
+    const prefix = 'ptg-save:';
+    const names = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key?.startsWith(prefix)) names.push(key.slice(prefix.length));
+    }
+    return names.sort((a, b) => a.localeCompare(b));
+  },
+
   loadGame(slot = 'default') {
     const raw = localStorage.getItem(`ptg-save:${slot}`);
     if (!raw) return null;
