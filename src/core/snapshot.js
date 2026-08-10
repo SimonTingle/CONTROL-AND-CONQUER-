@@ -181,10 +181,12 @@ export function serialize(ctx) {
     vehicles: vehicles.instances.filter((v) => !v.dead).map(serializeVehicle),
     structures: structures.instances.filter((s) => !s.dead).map(serializeStructure),
 
-    // Tire tracks: one shared mask, not per-team — same base64-bytes approach
-    // as team.fog below, since a track mark is exactly as irreproducible as
-    // where a team has scouted (it records where vehicles actually drove).
-    tracks: world.trackMask ? bytesToBase64(world.trackMask.data) : null,
+    // Tire tracks: one shared mask, not per-team, since a track mark is
+    // exactly as irreproducible as where a team has scouted (it records where
+    // vehicles actually drove). Unlike team.fog this is run-length encoded
+    // first: the mask is a megabyte and almost entirely zero, so raw base64
+    // would add ~1.4MB to every save and put the localStorage quota at risk.
+    tracksRLE: world.trackMask ? bytesToBase64(world.trackMask.toRLE()) : null,
 
     // Which vehicle the player was driving.
     activeVehicleId: vehicles.active?.id ?? null,
@@ -257,9 +259,12 @@ export function deserialize(ctx, snap) {
   for (const pad of snap.pads) terraform.restorePad(pad);
 
   // world.regenerate() already cleared trackMask (the ground it described is
-  // gone); restore it from the save now that the fresh mask exists.
-  if (snap.tracks && world.trackMask) {
-    world.trackMask.restoreFromBytes(base64ToBytes(snap.tracks));
+  // gone); restore it from the save now that the fresh mask exists. Saves
+  // written before the mask changed resolution carry a `tracks` field instead,
+  // which no longer matches the grid — those are simply dropped rather than
+  // migrated, since tracks are cosmetic and fade within 75s of play anyway.
+  if (snap.tracksRLE && world.trackMask) {
+    world.trackMask.fromRLE(base64ToBytes(snap.tracksRLE));
   }
 
   // --- teams --------------------------------------------------------------

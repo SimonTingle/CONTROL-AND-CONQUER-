@@ -1767,11 +1767,22 @@ function tick(dt, { render = true } = {}) {
     const mask = world.trackMask;
     for (const v of vehicles.instances) {
       if (v.dead || v.speed < 0.2) continue; // parked/stationary lays nothing new
-      // Weight drives darkness, physical footprint drives width — one field
-      // isn't asked to do both jobs. 0.25 floor so even the lightest vehicle
-      // (scout, 1.2t) leaves a visible mark, not just the heavy ones.
-      const intensity = Math.min(1, 0.25 + v.def.weight / 15);
-      mask.stamp(v.group.position.x, v.group.position.z, v.def.dims.hullWidth * 0.6, intensity, v);
+      // Weight drives darkness; the wheels drive where and how wide. Spread
+      // chosen so nothing saturates: scout 1.2t -> 0.41, harvester 4.5t ->
+      // 0.57, tank 6t -> 0.65, base station 12t -> 0.95. An earlier curve
+      // pinned both the tank and the base station at 1.0, which threw away
+      // the weight difference the feature exists to show.
+      const intensity = Math.min(1, 0.35 + v.def.weight / 20);
+      const dims = v.def.dims;
+      mask.stampVehicle(
+        v.group.position.x,
+        v.group.position.z,
+        v.heading,
+        dims.hullWidth * 0.5, // wheel lines sit at the hull edge
+        Math.max(dims.wheelWidth * 0.5, mask.cellSize * 0.5), // never sub-texel
+        intensity,
+        v
+      );
     }
     mask.decay(dt);
     mask.commit();
