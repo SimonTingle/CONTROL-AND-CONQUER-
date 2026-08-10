@@ -9,6 +9,9 @@ export const VEHICLE_CATALOG = [
     name: 'Scout Buggy',
     description: 'Fast, light recon vehicle.',
     role: 'unit',
+    // Tonnes. Narrative only — drives track-mark darkness/depth (trackMask.js),
+    // not physics or handling.
+    weight: 1.2,
     // What an AI commander reads to decide what a unit is *for*, generically —
     // see aiCommander.js. Not read by anything else yet.
     tags: ['recon', 'combat'],
@@ -112,6 +115,7 @@ export const VEHICLE_CATALOG = [
     description: 'Eight-wheeled mobile base. Slow, heavy, hard to turn.',
     role: 'unit', // becomes a structure by deploying; the pad and its buildings are structures
     tags: ['command'],
+    weight: 12, // heaviest thing that moves — the deepest, widest track marks
     // Earned by exploring the island with the scout, not available from the
     // start — see the difficulty thresholds in ui/difficultyScreen.js.
     unlock: 'exploration',
@@ -205,6 +209,7 @@ export const VEHICLE_CATALOG = [
     description: 'Autonomous six-wheel hauler. Fills at a bloom field, unloads at the facility.',
     role: 'unit',
     tags: ['economy'],
+    weight: 4.5,
     // Produced by the facility, never conjured from the drawer — a card that
     // handed one over free would contradict the economy it belongs to. It also
     // keeps the picker's per-card WebGL context count down.
@@ -297,6 +302,7 @@ export const VEHICLE_CATALOG = [
     description: 'Six-wheel weapons carrier. Slow, tough, and the only thing built to win a fight.',
     role: 'unit',
     tags: ['combat'],
+    weight: 6,
     // Same reasoning as the harvester: produced by a building, not conjured
     // from the drawer, so it costs what the economy says it costs.
     spawnable: false,

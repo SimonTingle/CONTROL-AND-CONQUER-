@@ -89,7 +89,48 @@ export class Terraform {
       this.world.fogTerrain.patchTerrain(pad.x, pad.z, outer);
       this.world.blooms.clearUnder(pad.x, pad.z, pad.radius);
       hm.terrainVersion++;
+    } else {
+      // A pad interrupted mid-flatten used to just sit there forever: nothing
+      // re-added it to `this.jobs`, so `_updateJob` never ran for it again and
+      // the base station it belongs to never finished deploying. The pristine
+      // pre-pad heightfield `_updateJob` would normally lerp from isn't saved
+      // (that's the whole point of replaying maths instead of storing a
+      // heightfield) and can't be reconstructed, so this resumes from the
+      // *current*, already-correctly-partial ground as a new baseline and
+      // finishes covering only the remaining fraction of the job. Different
+      // curve than an uninterrupted deploy would have drawn, same destination
+      // (`targetN`) — what matters is that it converges, not replaying a
+      // specific frame-by-frame history.
+      const w = i1 - i0 + 1;
+      const h = j1 - j0 + 1;
+      const original = new Float32Array(w * h);
+      for (let j = j0; j <= j1; j++) {
+        for (let i = i0; i <= i1; i++) {
+          original[(j - j0) * w + (i - i0)] = hm.data[j * res + i];
+        }
+      }
+      const remaining = 1 - pad.progress;
+      this.jobs.push({
+        pad,
+        original,
+        i0,
+        i1,
+        j0,
+        j1,
+        w,
+        // Scaled so the remaining ground covers the remaining time at the
+        // same rate the original job was moving at, rather than snapping
+        // through what's left in whatever's left of the default duration.
+        duration: Math.max(0.1, (saved.duration ?? 5) * remaining),
+      });
     }
+
+    // Pour-effect uniforms are a single global slot, given to the player's own
+    // pad (see `_updateJob`) — restoring a save has to re-claim it the same
+    // way, or the grey grid simply doesn't reappear even though the ground
+    // shape is correct.
+    if ((pad.teamId ?? 0) === 0) this._applyUniforms(pad, eased);
+
     return pad;
   }
 

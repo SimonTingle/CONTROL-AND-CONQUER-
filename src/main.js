@@ -39,6 +39,7 @@ import { PerfHud } from './core/perfHud.js';
 import { TickProfiler } from './core/tickProfiler.js';
 import { AutoQuality } from './core/autoQuality.js';
 import { IS_MOBILE } from './core/platform.js';
+import { showToast } from './ui/toast.js';
 
 // __APP_VERSION__/__BUILD_TIME__ are literal strings substituted at build
 // time by vite.config.js's `define` — not runtime values, so they describe
@@ -922,6 +923,11 @@ const game = {
     return names.sort((a, b) => a.localeCompare(b));
   },
 
+  /** Used by autosave's pruning; not exposed in the Save/Load field itself. */
+  deleteLocalSave(slot) {
+    localStorage.removeItem(`ptg-save:${slot}`);
+  },
+
   loadGame(slot = 'default') {
     const raw = localStorage.getItem(`ptg-save:${slot}`);
     if (!raw) return null;
@@ -1628,6 +1634,39 @@ let statsTimer = 0;
 let frames = 0;
 let fps = 0;
 
+// Tick-driven, not setInterval — same reasoning updateRespawns already states:
+// this has to advance correctly under window.__step's synthetic ticks too,
+// not just real wall-clock frames, and a real JS timer would never fire (or
+// fire at the wrong rate) while __step is fast-forwarding simulated seconds.
+const AUTOSAVE_INTERVAL_SECONDS = 300;
+const AUTOSAVE_KEEP = 8; // ~40 minutes of history at the 5-minute interval
+const AUTOSAVE_PREFIX = 'Autosave ';
+let autosaveTimer = 0;
+
+/** Zero-padded and lexicographically sortable, unlike toLocaleString(). */
+function autosaveTimestamp(d = new Date()) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
+ * A generated name only — manual saves (controlSchema.js's save field) are
+ * completely untouched by this, by design: typing a name and clicking Save
+ * still overwrites that exact slot, exactly as before.
+ */
+function autosave() {
+  const name = AUTOSAVE_PREFIX + autosaveTimestamp();
+  game.saveGame(name);
+  showToast(`Autosaved ${autosaveTimestamp()}`);
+
+  // Prune oldest-first once there are more than AUTOSAVE_KEEP — the
+  // timestamp's format sorts lexicographically the same as chronologically,
+  // so listLocalSaves()'s existing alphabetical sort is already the right order.
+  const autosaves = game.listLocalSaves().filter((n) => n.startsWith(AUTOSAVE_PREFIX));
+  const excess = autosaves.length - AUTOSAVE_KEEP;
+  for (let i = 0; i < excess; i++) game.deleteLocalSave(autosaves[i]);
+}
+
 /**
  * One simulation step.
  *
@@ -1721,6 +1760,23 @@ function tick(dt, { render = true } = {}) {
     world.fog.commit();
   });
 
+  // Tire tracks — every vehicle, every team, no staggering: unlike fog this is
+  // shared world detail, not team-private knowledge, so there's no "whose
+  // turn" to reason about.
+  p.time('trackMask', () => {
+    const mask = world.trackMask;
+    for (const v of vehicles.instances) {
+      if (v.dead || v.speed < 0.2) continue; // parked/stationary lays nothing new
+      // Weight drives darkness, physical footprint drives width — one field
+      // isn't asked to do both jobs. 0.25 floor so even the lightest vehicle
+      // (scout, 1.2t) leaves a visible mark, not just the heavy ones.
+      const intensity = Math.min(1, 0.25 + v.def.weight / 15);
+      mask.stamp(v.group.position.x, v.group.position.z, v.def.dims.hullWidth * 0.6, intensity, v);
+    }
+    mask.decay(dt);
+    mask.commit();
+  });
+
   p.time('cameraControls', () => {
     if (isChasing()) {
       // MapControls would fight the chase rig for the camera transform.
@@ -1744,6 +1800,15 @@ function tick(dt, { render = true } = {}) {
     updateRespawns(dt);
   });
   p.time('radialMenu', () => radialMenu.update());
+
+  // Before the render-only early return, same reasoning as updateRespawns
+  // above: this has to fire correctly under window.__step's headless
+  // fast-forward, not just real animate() frames.
+  autosaveTimer += dt;
+  if (autosaveTimer >= AUTOSAVE_INTERVAL_SECONDS) {
+    autosaveTimer = 0;
+    autosave();
+  }
 
   if (!render) return;
 

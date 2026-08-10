@@ -98,6 +98,12 @@ export function createTerrainUniforms(heightmap) {
     uPadProgress: { value: 0 },
     uPadColor: { value: new THREE.Color('#7a828a') },
 
+    // Tire tracks. Sits before the fog block below (world detail, not an
+    // overlay) — see trackMask.js. The mask texture is assigned by World once
+    // it owns one, same as the fog mask.
+    uTrackMask: { value: null },
+    uTrackTint: { value: new THREE.Color('#241f1a') },
+
     // Fog of war. The mask texture is assigned by World once it owns one.
     uFogMask: { value: null },
     uFogEnabled: { value: 1 },
@@ -224,6 +230,8 @@ export function createTerrainMaterial(heightmap, uniforms = createTerrainUniform
         uniform float uPadBlend;
         uniform float uPadProgress;
         uniform vec3 uPadColor;
+        uniform sampler2D uTrackMask;
+        uniform vec3 uTrackTint;
         uniform sampler2D uFogMask;
         uniform float uFogEnabled;
         uniform float uFogDarken;
@@ -293,6 +301,14 @@ export function createTerrainMaterial(heightmap, uniforms = createTerrainUniform
             float pgrid = 1.0 - smoothstep(0.44, 0.5, max(pg.x, pg.y));
             vec3 padCol = uPadColor * (0.92 + 0.16 * detail);
             col = mix(col, mix(padCol * 0.78, padCol, pgrid), padMask * 0.94);
+          }
+
+          // Tire tracks: world detail like the pad above, so it sits before
+          // the fog block — an unexplored track should still be dimmed by fog
+          // like anything else, not painted on top of it.
+          float trackMark = texture2D(uTrackMask, vWorldPos.xz / uMapSize + 0.5).r;
+          if (trackMark > 0.0) {
+            col = mix(col, uTrackTint, trackMark * 0.6);
           }
 
           // Fog of war. Applied to the albedo rather than to the final lit
