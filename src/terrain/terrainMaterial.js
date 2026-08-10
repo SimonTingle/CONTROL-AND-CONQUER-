@@ -308,7 +308,12 @@ export function createTerrainMaterial(heightmap, uniforms = createTerrainUniform
           // like anything else, not painted on top of it.
           float trackMark = texture2D(uTrackMask, vWorldPos.xz / uMapSize + 0.5).r;
           if (trackMark > 0.0) {
-            col = mix(col, uTrackTint, trackMark * 0.6);
+            // 0.6 measured (GPU pixel readback) as too weak to read on screen
+            // for anything short of a fully-saturated (1.0) texel — a scout's
+            // real intensity only shifted the rendered pixel by ~3%. 0.85
+            // keeps the mark legible without fully overriding the terrain's
+            // own detail/noise at low intensity.
+            col = mix(col, uTrackTint, trackMark * 0.85);
           }
 
           // Fog of war. Applied to the albedo rather than to the final lit
