@@ -136,9 +136,21 @@ class VehicleInstance {
   }
 
   /** Order a move. Silently refused if the point is underwater. */
-  setTarget(x, z, heightmap) {
+  /**
+   * Would `setTarget` accept this order?
+   *
+   * Split out because move orders are now queued rather than applied at click
+   * time, and the click still has to decide immediately whether to show the
+   * marker. Sharing the predicate is what stops the two from disagreeing — a
+   * marker on a spot the order will later refuse would be a lie.
+   */
+  canTarget(x, z, heightmap) {
     if (this.immobile) return false;
-    if (heightmap.heightAt(x, z) <= heightmap.seaLevelY) return false;
+    return heightmap.heightAt(x, z) > heightmap.seaLevelY;
+  }
+
+  setTarget(x, z, heightmap) {
+    if (!this.canTarget(x, z, heightmap)) return false;
     this.target = new THREE.Vector2(x, z);
     this.blocked = false;
     return true;

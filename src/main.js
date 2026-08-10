@@ -34,6 +34,7 @@ import { MatchEndScreen } from './ui/matchEndScreen.js';
 import { Terraform } from './core/terraform.js';
 import { SIM_DT, simClock, advanceSimClock, resetSimClock } from './core/simClock.js';
 import { hashState } from './core/stateHash.js';
+import { Intent, IntentQueue, applyIntent } from './net/intents.js';
 import { StructureController } from './structures/structures.js';
 import { Entities } from './core/entities.js';
 import { NavGrid } from './core/navGrid.js';
@@ -618,8 +619,11 @@ canvas.addEventListener('pointerup', (e) => {
       // Same snap the preview outline used, so the click lands exactly where
       // the player was shown it would.
       const snapped = snapToGrid(point.x, point.z);
+      // Validity is checked here so the click feels immediate and an invalid
+      // spot stays in placement mode; the placement itself is queued, and
+      // re-validated on apply in case the ground was taken meanwhile.
       if (structures.canPlaceAt(pad, def, snapped.x, snapped.z)) {
-        structures.place(def, pad, snapped);
+        submitIntent(Intent.build(def.id, pad.id, snapped.x, snapped.z, pad.teamId ?? PLAYER_TEAM_ID));
         cancelPlacementMode();
       }
     }
@@ -643,7 +647,7 @@ canvas.addEventListener('pointerup', (e) => {
         // The harvester this mode was opened for can have been destroyed
         // while the player was still aiming the click.
         if (!harvester.dead) {
-          harvester.targetField = field;
+          submitIntent(Intent.harvest(harvester.id, field.id));
           // Anchored to the field's centre, not the click: it has to be
           // obvious *which* field was taken, even when the click landed out
           // at the edge.
@@ -663,8 +667,7 @@ canvas.addEventListener('pointerup', (e) => {
     // ordering anything — same "invalid click has no other effect" shape as
     // harvest targeting, just filtered to "a live enemy" instead of "a field".
     if (unit && !unit.dead && hit && hit !== unit && !hit.dead && hit.teamId !== unit.teamId) {
-      unit.mode = 'armed';
-      unit.combatTarget = hit;
+      submitIntent(Intent.target(unit.id, hit.id, hit.kind ?? 'vehicle'));
     }
     commandContext.targetSelectMode = null;
     return;
@@ -679,8 +682,14 @@ canvas.addEventListener('pointerup', (e) => {
   }
   // The ball marks an accepted move order, so a refused one (water, or no
   // vehicle spawned yet) leaves nothing behind to chase.
-  if (vehicles.commandActive(point.x, point.z, heightmap)) showMarker(point);
-  else marker.visible = false;
+  // setTarget is the authority on whether the order is legal (it refuses
+  // water), so ask it before queueing — the ball has to mark an order that was
+  // actually accepted, not one that will be silently dropped on apply.
+  if (vehicles.active && !vehicles.active.dead &&
+      vehicles.active.canTarget(point.x, point.z, heightmap)) {
+    submitIntent(Intent.move(vehicles.active.id, point.x, point.z));
+    showMarker(point);
+  } else marker.visible = false;
 });
 
 // Right-drag pans, so the browser menu has to stay out of the way.
@@ -796,6 +805,29 @@ addEventListener('blur', () => {
 function isTextInputFocused() {
   const el = document.activeElement;
   return el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA');
+}
+
+/**
+ * The local player's intent queue.
+ *
+ * Single player drains this straight into the sim at the top of the next step.
+ * A networked match will instead hand each batch to the lockstep session, which
+ * stamps it with a turn and sends it — so the producers above never need to
+ * know which mode they are in, and the local path is the same code that runs
+ * online rather than a separate one that only gets exercised in multiplayer.
+ */
+const intentQueue = new IntentQueue();
+
+function submitIntent(intent) {
+  intentQueue.push(intent);
+}
+
+function drainIntents() {
+  const batch = intentQueue.drain();
+  if (!batch.length) return;
+  // Local play passes teamId null: there is one human team, and the ownership
+  // check exists to stop a *remote* client ordering somebody else's units.
+  for (const intent of batch) applyIntent(intent, commandContext, null);
 }
 
 function applyDriveInput() {
@@ -975,9 +1007,15 @@ const menu = new Menu(() => buildSchema(world, view, game));
 
 const hud = new Hud();
 
+/**
+ * Every radial-menu command in the game funnels through here, which is what
+ * makes routing them through the intent queue a two-line change rather than a
+ * rewrite: a command is fully described by its id plus the instance it was
+ * opened on, so it serialises without touching the command table itself.
+ */
 const radialMenu = new RadialMenu(camera, {
   onCommand(cmd, instance) {
-    cmd.execute?.(instance, commandContext);
+    submitIntent(Intent.command(instance.id, cmd.id));
   },
 });
 
@@ -1699,6 +1737,11 @@ let fogRevealCounter = 0;
 function simTick(dt) {
   const p = tickProfiler;
   advanceSimClock();
+  // Player intent is applied here — at a fixed point in the step — rather than
+  // inside the DOM event handler that produced it. Browsers deliver events
+  // whenever they like; a simulation that must match another machine's cannot
+  // be at the mercy of that.
+  drainIntents();
   // Vehicles move first so the camera frames where they actually ended up.
   applyDriveInput();
   p.time('world', () => world.update(dt, camera, p));
@@ -2007,6 +2050,15 @@ window.__step = (seconds, dt = SIM_DT) => {
  * to read and diff the hash from a console on each side is the cheapest way in.
  */
 window.__hashState = () => hashState({ vehicles, structures, game }, simClock.tick);
+
+/**
+ * Issue player intent from the console, exactly as a click would.
+ *
+ * The point of routing input through data is that it can be produced without a
+ * mouse — which makes order-handling testable, and is what a replay or a
+ * scripted determinism run needs.
+ */
+window.__intent = { submit: submitIntent, Intent };
 
 window.__determinismCheck = ({ ticks = 900, sampleEvery = 60 } = {}) => {
   if (!game.teams?.length) return { ok: false, error: 'Start a match first.' };
