@@ -149,7 +149,7 @@ export class Menu {
 
     const input = document.createElement('input');
     input.type = 'text';
-    input.placeholder = 'Save name…';
+    input.placeholder = control.placeholder ?? 'Save name…';
     input.autocomplete = 'off'; // don't let the OS's own field history render over ours
     input.autocapitalize = 'off';
     input.setAttribute('autocorrect', 'off'); // Safari-specific; harmless elsewhere
@@ -188,7 +188,21 @@ export class Menu {
       list.classList.remove('hidden');
     };
 
-    input.addEventListener('focus', renderSuggestions);
+    input.addEventListener('focus', () => {
+      renderSuggestions();
+      // Cloud fields carry a `refresh` that fetches the real list from the
+      // server; local fields have none, since localStorage is already
+      // synchronous and always current. Re-render (and re-check Load) once it
+      // resolves, but only if focus hasn't already moved on.
+      if (control.refresh) {
+        control.refresh()
+          .then(() => {
+            if (document.activeElement === input) renderSuggestions();
+            syncLoadEnabled();
+          })
+          .catch((err) => console.warn('save-field refresh failed:', err));
+      }
+    });
     input.addEventListener('input', () => {
       lastKeyWasSpace = false;
       renderSuggestions();
@@ -229,28 +243,56 @@ export class Menu {
 
     const saveBtn = document.createElement('button');
     saveBtn.className = 'action';
-    saveBtn.textContent = 'Save';
-    saveBtn.addEventListener('click', () => {
-      control.onSave(input.value.trim());
-      syncLoadEnabled();
-    });
+    saveBtn.textContent = control.saveLabel ?? 'Save';
 
     const loadBtn = document.createElement('button');
     loadBtn.className = 'action';
-    loadBtn.textContent = 'Load';
-    loadBtn.addEventListener('click', () => {
+    loadBtn.textContent = control.loadLabel ?? 'Load';
+
+    // Distinct from Load's aria-disabled "no exact match" state — a save/load
+    // in flight (cloud only; local ones resolve in the same tick) disables
+    // both buttons so a slow network can't be double-clicked into two
+    // overlapping saves, without that busy state being mistaken for "no save
+    // found" by Load's own click handler.
+    let busy = false;
+    const setBusy = (b) => {
+      busy = b;
+      saveBtn.classList.toggle('save-field-disabled', b);
+      loadBtn.classList.toggle('save-field-disabled', b || loadBtn.getAttribute('aria-disabled') === 'true');
+    };
+
+    saveBtn.addEventListener('click', async () => {
+      if (busy) return;
+      setBusy(true);
+      try {
+        await control.onSave(input.value.trim());
+        if (control.refresh) await control.refresh().catch(() => {}); // let a just-saved name appear immediately
+      } finally {
+        setBusy(false);
+        syncLoadEnabled();
+        if (document.activeElement === input) renderSuggestions();
+      }
+    });
+
+    loadBtn.addEventListener('click', async () => {
+      if (busy) return;
       if (loadBtn.getAttribute('aria-disabled') === 'true') {
         window.alert(`No save found named "${input.value.trim() || 'default'}".`);
         return;
       }
-      control.onLoad(input.value.trim());
+      setBusy(true);
+      try {
+        await control.onLoad(input.value.trim());
+      } finally {
+        setBusy(false);
+      }
     });
 
     // Load only ever acts on an exact match — aria-disabled (not the native
     // `disabled`) keeps it keyboard/tap-reachable so it can explain why.
     const syncLoadEnabled = () => {
       const exact = control.get().includes(input.value.trim());
-      loadBtn.classList.toggle('save-field-disabled', !exact);
+      loadBtn.classList.toggle('save-field-disabled', !exact || busy);
       loadBtn.setAttribute('aria-disabled', String(!exact));
     };
     input.addEventListener('input', syncLoadEnabled);
