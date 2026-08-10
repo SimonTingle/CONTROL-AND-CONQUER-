@@ -22,7 +22,11 @@ export function buildSchema(world, view, game) {
   });
   const toggle = (label, get, set) => ({ type: 'toggle', label, get, set });
   const color = (label, get, set) => ({ type: 'color', label, get, set });
-  const saveField = (get, onSave, onLoad) => ({ type: 'save-field', get, onSave, onLoad });
+  // opts: { placeholder, saveLabel, loadLabel, refresh } — refresh is only
+  // needed by fields whose list isn't already synchronous (cloud saves).
+  const saveField = (get, onSave, onLoad, opts = {}) => ({
+    type: 'save-field', get, onSave, onLoad, ...opts,
+  });
 
   // Accounts are entirely optional — this group hides itself in a build with
   // no API server (__API_URL__ empty), so an offline build shows no sign-in
@@ -75,51 +79,47 @@ export function buildSchema(world, view, game) {
         // hidden rather than shown-disabled, since an offline build has no
         // sensible "sign in" action to point the player at.
         ...(api.isConfigured && game.account
-          ? [
-              {
-                type: 'button',
-                label: 'Save to cloud',
-                action: async () => {
-                  const name = window.prompt('Cloud save name:', 'default');
-                  if (name === null) return;
-                  try {
-                    await game.saveToCloud(name || 'default');
-                    window.alert(`Saved "${name || 'default'}" to your account.`);
-                  } catch (err) {
-                    window.alert(`Could not save: ${err.message ?? err}`);
+          ? (() => {
+              // Cloud names are upserted by (user_id, name) server-side
+              // (server/src/routes/saves.js), so — same as local slots — a
+              // name is unique per account and safe to treat as the field's
+              // key. This cache is what get()/onLoad read; `refresh` (called
+              // on focus by menu.js) is what keeps it real.
+              let cloudSaves = [];
+              return [
+                saveField(
+                  () => cloudSaves.map((s) => s.name),
+                  async (name) => {
+                    try {
+                      await game.saveToCloud(name || 'default');
+                      window.alert(`Saved "${name || 'default'}" to your account.`);
+                    } catch (err) {
+                      window.alert(`Could not save: ${err.message ?? err}`);
+                    }
+                  },
+                  async (name) => {
+                    const match = cloudSaves.find((s) => s.name === name);
+                    if (!match) {
+                      window.alert(`No cloud save named "${name || 'default'}".`);
+                      return;
+                    }
+                    try {
+                      await game.loadFromCloud(match.id);
+                    } catch (err) {
+                      window.alert(`Could not load: ${err.message ?? err}`);
+                    }
+                  },
+                  {
+                    placeholder: 'Cloud save name…',
+                    saveLabel: 'Save to cloud',
+                    loadLabel: 'Load from cloud',
+                    refresh: async () => {
+                      cloudSaves = await game.listCloudSaves();
+                    },
                   }
-                },
-              },
-              {
-                type: 'button',
-                label: 'Load from cloud',
-                action: async () => {
-                  let saves;
-                  try {
-                    saves = await game.listCloudSaves();
-                  } catch (err) {
-                    window.alert(`Could not reach the server: ${err.message ?? err}`);
-                    return;
-                  }
-                  if (!saves.length) {
-                    window.alert('No cloud saves yet.');
-                    return;
-                  }
-                  const listing = saves
-                    .map((s, i) => `${i + 1}. ${s.name} — ${new Date(s.updatedAt).toLocaleString()}`)
-                    .join('\n');
-                  const pick = window.prompt(`${listing}\n\nEnter a number to load:`, '1');
-                  if (pick === null) return;
-                  const chosen = saves[Number(pick) - 1];
-                  if (!chosen) return;
-                  try {
-                    await game.loadFromCloud(chosen.id);
-                  } catch (err) {
-                    window.alert(`Could not load: ${err.message ?? err}`);
-                  }
-                },
-              },
-            ]
+                ),
+              ];
+            })()
           : []),
       ],
     },
