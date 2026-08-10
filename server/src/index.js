@@ -16,6 +16,9 @@ import { migrate } from './db/migrate.js';
 import authPlugin from './auth/plugin.js';
 import { authRoutes } from './routes/auth.js';
 import { saveRoutes } from './routes/saves.js';
+import websocket from '@fastify/websocket';
+import { matchRoutes } from './routes/matches.js';
+import { matchSocket } from './ws/match.js';
 
 export async function build() {
   const app = Fastify({
@@ -69,6 +72,11 @@ export async function build() {
   await app.register(authPlugin);
   await app.register(authRoutes);
   await app.register(saveRoutes);
+  await app.register(matchRoutes);
+  // Websocket last: matchSocket's route needs authPlugin's onRequest hook to
+  // have already run on the upgrade request.
+  await app.register(websocket);
+  await app.register(matchSocket);
 
   return app;
 }
