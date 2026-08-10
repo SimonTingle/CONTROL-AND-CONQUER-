@@ -32,6 +32,8 @@ import { AiCommander } from './vehicles/aiCommander.js';
 import { CombatController } from './vehicles/combatController.js';
 import { MatchEndScreen } from './ui/matchEndScreen.js';
 import { Terraform } from './core/terraform.js';
+import { SIM_DT, simClock, advanceSimClock, resetSimClock } from './core/simClock.js';
+import { hashState } from './core/stateHash.js';
 import { StructureController } from './structures/structures.js';
 import { Entities } from './core/entities.js';
 import { NavGrid } from './core/navGrid.js';
@@ -1455,6 +1457,9 @@ function updateProgression(explored) {
 function beginMatch(difficulty) {
   game.difficulty = difficulty;
   game.matchOver = false;
+  // A match is the unit of simulated time — tick 0 is its first step. Every
+  // ban, threat memory and (later) lockstep turn number is relative to this.
+  resetSimClock(0);
   // Sandbox is a one-team match; Multiplayer AI adds one team per AI opponent.
   game.teams = createTeams(game.aiMatch?.teamCount ?? 0);
 
@@ -1684,8 +1689,16 @@ function autosave() {
 const FOG_STAGGER_PERIOD = 3;
 let fogRevealCounter = 0;
 
-function tick(dt, { render = true } = {}) {
+/**
+ * One fixed simulation step. Everything that changes game state lives here and
+ * nowhere else — `renderTick` below is pure presentation.
+ *
+ * `dt` is a parameter rather than a hardcoded SIM_DT only so `window.__step`
+ * can still fast-forward at a chosen step size; real play always passes SIM_DT.
+ */
+function simTick(dt) {
   const p = tickProfiler;
+  advanceSimClock();
   // Vehicles move first so the camera frames where they actually ended up.
   applyDriveInput();
   p.time('world', () => world.update(dt, camera, p));
@@ -1821,7 +1834,16 @@ function tick(dt, { render = true } = {}) {
     autosave();
   }
 
-  if (!render) return;
+}
+
+/**
+ * Presentation only — never mutates simulation state, so it can run once per
+ * animation frame at whatever rate the display manages while the sim above runs
+ * on its own fixed clock. `dt` here is real frame time (what fps counters,
+ * tracer fades and auto-quality want), not simulated time.
+ */
+function renderTick(dt) {
+  const p = tickProfiler;
 
   p.time('updateTracers', () => updateTracers(dt));
   // Per-frame, unlike the rest of the HUD's half-second poll — see
@@ -1905,9 +1927,48 @@ function tick(dt, { render = true } = {}) {
   }
 }
 
+/**
+ * Advance the sim and draw one frame. Kept as the single entry point that
+ * `window.__step` and `__benchmark` already drive.
+ */
+function tick(dt, { render = true } = {}) {
+  simTick(dt);
+  if (render) renderTick(dt);
+}
+
+/**
+ * The simulation runs on a fixed step; only rendering runs per animation frame.
+ *
+ * This is not a micro-optimisation — it is a correctness requirement. Feeding
+ * `clock.getDelta()` straight into the sim (what this used to do) means every
+ * machine integrates movement with a slightly different `dt` every frame, so
+ * two clients replaying identical inputs still drift apart. It also made the
+ * game subtly frame-rate dependent in single player.
+ *
+ * The sim rate stays at 60Hz, which is why no render interpolation is needed:
+ * positions are still updated at least as often as they are drawn.
+ */
+const MAX_FRAME_DT = 0.25; // a tab regaining focus must not deliver a huge dt
+const MAX_CATCHUP_STEPS = 5; // bound the work per frame — see the drop below
+let simAccumulator = 0;
+
 function animate() {
   requestAnimationFrame(animate);
-  tick(Math.min(clock.getDelta(), 0.1));
+  const frameDt = Math.min(clock.getDelta(), MAX_FRAME_DT);
+  simAccumulator += frameDt;
+
+  let steps = 0;
+  while (simAccumulator >= SIM_DT && steps < MAX_CATCHUP_STEPS) {
+    simAccumulator -= SIM_DT;
+    steps++;
+    simTick(SIM_DT);
+  }
+  // If we hit the cap the machine cannot keep up; keeping the backlog would
+  // make every subsequent frame run the cap too and never recover (the classic
+  // spiral of death). Drop the debt instead and let the match run slow.
+  if (steps >= MAX_CATCHUP_STEPS) simAccumulator = 0;
+
+  renderTick(frameDt);
 }
 
 animate();
@@ -1917,10 +1978,71 @@ animate();
  * rendering. Lets a slow system (a harvest run, a regrowth cycle) be exercised
  * and asserted from the console in a fraction of the wall-clock time.
  */
-window.__step = (seconds, dt = 1 / 60) => {
+window.__step = (seconds, dt = SIM_DT) => {
   const steps = Math.max(1, Math.round(seconds / dt));
   for (let i = 0; i < steps; i++) tick(dt, { render: false });
   return { steps, simulated: +(steps * dt).toFixed(2) };
+};
+
+/**
+ * Does the simulation produce identical results from identical starting state?
+ *
+ * This is the claim lockstep multiplayer rests on, so it is worth being able to
+ * ask directly rather than inferring it from a match that looks about right.
+ * The method: snapshot the live world, run it forward N ticks recording state
+ * hashes, restore the identical snapshot, run it again, and compare.
+ *
+ * Note what is and isn't covered. The "inputs" here are the AI commanders and
+ * every autonomous system (harvesters, traffic, combat) — which is most of the
+ * simulation and all of the parts with interesting branching. It does not
+ * replay human clicks; those become deterministic by construction in 4C, since
+ * they are queued and applied at fixed tick boundaries.
+ *
+ * A mismatch reports the first sampled tick that differs, which is far more
+ * useful than a bare boolean — it says how long the two runs stayed together.
+ */
+/**
+ * This client's current state digest. Exposed because when two machines
+ * disagree, the first question is always "disagree about what" — and being able
+ * to read and diff the hash from a console on each side is the cheapest way in.
+ */
+window.__hashState = () => hashState({ vehicles, structures, game }, simClock.tick);
+
+window.__determinismCheck = ({ ticks = 900, sampleEvery = 60 } = {}) => {
+  if (!game.teams?.length) return { ok: false, error: 'Start a match first.' };
+
+  const baseline = JSON.stringify(serialize(snapshotContext()));
+  const hashCtx = { vehicles, structures, game };
+
+  const run = () => {
+    deserialize(snapshotContext(), JSON.parse(baseline));
+    const out = [];
+    for (let i = 0; i < ticks; i++) {
+      simTick(SIM_DT);
+      if ((i + 1) % sampleEvery === 0) out.push(hashState(hashCtx, simClock.tick));
+    }
+    return out;
+  };
+
+  const a = run();
+  const b = run();
+  const firstDivergence = a.findIndex((h, i) => h !== b[i]);
+
+  // Leave the world on the second run's state rather than half-restored.
+  const result = {
+    ok: firstDivergence === -1,
+    ticks,
+    samples: a.length,
+    firstDivergence: firstDivergence === -1 ? null : {
+      sample: firstDivergence,
+      tick: (firstDivergence + 1) * sampleEvery,
+      runA: a[firstDivergence],
+      runB: b[firstDivergence],
+    },
+    finalHash: a[a.length - 1] ?? null,
+  };
+  console[result.ok ? 'log' : 'warn']('determinism:', result);
+  return result;
 };
 
 /**

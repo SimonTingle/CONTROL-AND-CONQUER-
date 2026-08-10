@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { buildVehicleMesh } from './vehicleFactory.js';
 import { VEHICLE_CATALOG } from './catalog.js';
 import { disposeObject3D } from '../core/disposeObject3D.js';
+import { simClock } from '../core/simClock.js';
 
 const ARRIVE_DISTANCE = 1.5;
 const BRAKE_SPEED = 0.1; // at or below this the vehicle counts as stopped
@@ -84,7 +85,10 @@ class VehicleInstance {
     this.reverseTimer = null;
     this.headlightsOn = false;
     this.lodTier = LOD_TIERS.FULL; // distance-based level of detail
-    this.createdAt = Date.now(); // timestamp for menu ordering
+    // Sim tick, not Date.now(): this only orders the vehicle picker, but it is
+    // state living on a simulated entity, and a wall-clock value would differ
+    // between clients running the same match.
+    this.createdAt = simClock.tick;
     // Set by RadialMenu while this vehicle's command menu is up. An autonomous
     // driver holds position while it is true, so the menu does not slide away
     // from under the player's cursor mid-decision.

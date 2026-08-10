@@ -26,17 +26,22 @@
  */
 
 import * as THREE from 'three';
+import { simClock, resetSimClock } from './simClock.js';
 
 /**
  * Bumped whenever the shape below changes incompatibly. Stored in every
  * snapshot so a future version can migrate rather than misread old data.
  */
-export const SCHEMA_VERSION = 1;
+// v2 closed real gaps rather than reshaping anything: harvester cargo/timers/
+// bans, AI commander timers, combat cooldown/turret aim, and the sim tick.
+// v1 saves still load — the restore paths below all tolerate the fields being
+// absent, which is why this stayed a readable bump and not a migration.
+export const SCHEMA_VERSION = 2;
 
 /** Transient controller state that is rebuilt or self-heals, and is deliberately not saved. */
 const REBUILT_ON_LOAD =
   'mesh/LOD/quaternion, fog textures, nav-grid caches, dock queue slot sets, ' +
-  'per-vehicle reveal caches, in-flight tracer visuals';
+  'per-vehicle reveal caches, in-flight tracer visuals, traffic yield cooldowns';
 
 // ---------------------------------------------------------------------------
 // serialize
@@ -90,6 +95,15 @@ function serializeVehicle(inst) {
     steer: round(inst.steer, 3),
     steerAngle: round(inst.steerAngle, 4),
     shouldPark: inst.shouldPark ?? false,
+    // Combat timing. Without these a restored unit fires the instant it loads,
+    // its cooldown having defaulted to 0 — a free alpha strike after any load
+    // or resync. `turretBearing` is deliberately absent: it is a derived
+    // getter over turretYaw, not state.
+    fireCooldown: round(inst._fireCooldown ?? 0, 3),
+    turretAim: inst.turretAim === null || inst.turretAim === undefined
+      ? null
+      : round(inst.turretAim, 5),
+    threatUntil: round(inst.threatUntil ?? 0, 3),
     // Cross-references, as ids. Bloom fields already carry a stable id.
     targetFieldId: inst.targetField?.id ?? null,
     combatTargetId: inst.combatTarget?.id ?? null,
@@ -194,6 +208,11 @@ export function serialize(ctx) {
     // Harvester routing state, keyed by vehicle id. Held in a Map keyed by
     // object identity at runtime, so it has to be flattened out separately.
     harvesterStates: serializeHarvesterStates(ctx),
+    aiCommanders: serializeAiCommanders(ctx),
+    // The simulation's own clock. Field bans and threat memory are expressed in
+    // sim time, so restoring them without the tick they were written against
+    // would make every one of them either already expired or unreachably distant.
+    simTick: simClock.tick,
   };
 }
 
@@ -211,7 +230,50 @@ function serializeHarvesterStates(ctx) {
       dest: point2(s.dest),
       parkingBayIndex: s.parkingBayIndex ?? null,
       queuePosition: s.queuePosition ?? null,
+      // `load` is the harvester's cargo. Omitting it (as this did) silently
+      // emptied every harvester on load — a crystal run in progress lost its
+      // whole payload, and the HUD's load readout reset to 0.
+      load: round(s.load ?? 0, 2),
+      resumeState: s.resumeState ?? null,
+      waypoint: point2(s.waypoint),
+      detours: s.detours ?? 0,
+      // The three timers. Restoring a harvester without them restarts its
+      // stall/pause/retry accounting, which is what makes a reloaded harvester
+      // behave differently from one that was never saved.
+      stallTimer: round(s.stallTimer ?? 0, 3),
+      pauseTimer: round(s.pauseTimer ?? 0, 3),
+      retryTimer: round(s.retryTimer ?? 0, 3),
+      // Field bans, as [fieldId, expirySimTime] pairs. These are sim-time
+      // based (see simClock.js), so they survive a round trip meaningfully.
+      bans: s.bans ? [...s.bans].map(([id, until]) => [id, round(until, 3)]) : [],
     });
+  }
+  return out;
+}
+
+/**
+ * Each AI team's commander. Small scalars, but omitting them meant a load reset
+ * `startTimer` to the full configured build delay — a complete AI restart, with
+ * every team standing still again for its opening delay however far into the
+ * match the save was taken.
+ */
+function serializeAiCommanders(ctx) {
+  const out = [];
+  for (const c of ctx.game?.aiCommanders ?? []) {
+    out.push({
+      teamId: c.team.id,
+      startTimer: round(c.startTimer, 3),
+      retryTimer: round(c.retryTimer, 3),
+      buildTimer: round(c.buildTimer, 3),
+      armyTargetTimer: round(c.armyTargetTimer, 3),
+      baseOrderElapsed: round(c.baseOrderElapsed, 3),
+      // Latched counters — these only ever widen, so resetting them would send
+      // a commander back to searching a ring it has already proven is no good.
+      exploreRadius: round(c.exploreRadius, 2),
+      baseRelocateAttempts: c.baseRelocateAttempts,
+    });
+    // `armyTarget` is deliberately not saved: it is a live entity reference
+    // that _manageArmy re-picks on its own interval anyway.
   }
   return out;
 }
@@ -316,6 +378,11 @@ export function deserialize(ctx, snap) {
     inst.steer = saved.steer;
     inst.steerAngle = saved.steerAngle;
     inst.shouldPark = saved.shouldPark;
+    // Combat timing (v2+). `??` throughout so a v1 save still loads, just
+    // without these — the same tolerance every other v2 field relies on.
+    inst._fireCooldown = saved.fireCooldown ?? 0;
+    inst.turretAim = saved.turretAim ?? null;
+    inst.threatUntil = saved.threatUntil ?? 0;
     if (saved.target) inst.target = new THREE.Vector2(saved.target.x, saved.target.z);
     vehicleById.set(saved.id, inst);
   }
@@ -396,12 +463,42 @@ export function deserialize(ctx, snap) {
       state.dest = saved.dest;
       state.parkingBayIndex = saved.parkingBayIndex;
       state.queuePosition = saved.queuePosition;
+      // v2+. Cargo especially: without it every harvester loaded empty.
+      state.load = saved.load ?? 0;
+      state.resumeState = saved.resumeState ?? state.resumeState;
+      state.waypoint = saved.waypoint ?? null;
+      state.detours = saved.detours ?? 0;
+      state.stallTimer = saved.stallTimer ?? 0;
+      state.pauseTimer = saved.pauseTimer ?? 0;
+      state.retryTimer = saved.retryTimer ?? 0;
+      state.bans = new Map(saved.bans ?? []);
+    }
+  }
+
+  // --- AI commanders ------------------------------------------------------
+  // Timers only; `armyTarget` is a live reference the commander re-picks on its
+  // own interval, and `economy` is derived from difficulty in the constructor.
+  if (snap.aiCommanders?.length) {
+    const byTeam = new Map((game.aiCommanders ?? []).map((c) => [c.team.id, c]));
+    for (const saved of snap.aiCommanders) {
+      const c = byTeam.get(saved.teamId);
+      if (!c) continue;
+      c.startTimer = saved.startTimer ?? 0;
+      c.retryTimer = saved.retryTimer ?? 0;
+      c.buildTimer = saved.buildTimer ?? 0;
+      c.armyTargetTimer = saved.armyTargetTimer ?? 0;
+      c.baseOrderElapsed = saved.baseOrderElapsed ?? 0;
+      if (saved.exploreRadius != null) c.exploreRadius = saved.exploreRadius;
+      if (saved.baseRelocateAttempts != null) c.baseRelocateAttempts = saved.baseRelocateAttempts;
     }
   }
 
   // --- match context ------------------------------------------------------
   game.mode = snap.mode;
   if (snap.aiMatch) game.aiMatch = { ...snap.aiMatch };
+  // The sim clock last: bans and threat memory restored above are expressed
+  // against it, so it has to land as the value they were written under.
+  resetSimClock(snap.simTick ?? 0);
 
   // Restoring the player's vehicle last, through setActive, so the camera and
   // input rig attach exactly as they would on a normal selection.
