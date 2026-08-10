@@ -277,6 +277,28 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
 }
 .control-save-field button.save-field-disabled:hover { background: rgba(79, 209, 197, 0.12); }
 
+/* ---- toast: transient, non-blocking messages (autosave, etc.) ---- */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  z-index: 40; /* above every overlay screen — a background event still deserves to be seen */
+  transform: translateX(-50%);
+  padding: 10px 18px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(14px);
+  color: var(--text);
+  font-size: 12px;
+  pointer-events: none; /* never blocks a click the way window.alert would */
+  opacity: 1;
+  transition: opacity 0.4s ease;
+}
+
+.toast.hidden { opacity: 0; }
+
 /* ---- vehicle picker (mirrors the settings hamburger/drawer, right side) ---- */
 
 #vehicle-toggle {

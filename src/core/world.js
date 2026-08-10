@@ -4,6 +4,7 @@ import { TerrainMesh } from '../terrain/terrainMesh.js';
 import { Water } from '../terrain/water.js';
 import { Atmosphere } from '../sky/atmosphere.js';
 import { FogTerrain, FogMask } from './fogOfWar.js';
+import { TrackMask } from './trackMask.js';
 import { Blooms } from '../terrain/blooms.js';
 
 /**
@@ -49,6 +50,11 @@ export class World {
     // an AI team happens to have scouted.
     this.blooms = new Blooms(this.heightmap, this.fog, { seed: this.heightmap.params.seed });
     this.scene.add(this.blooms.mesh);
+
+    // Tire tracks — one shared mask, not per-team; unlike fog there's nothing
+    // team-private about where a vehicle has driven.
+    this.trackMask = new TrackMask(this.heightmap.params.size);
+    this.terrain.uniforms.uTrackMask.value = this.trackMask.texture;
   }
 
   /**
@@ -64,6 +70,7 @@ export class World {
     // it described a heightfield that no longer exists.
     this.fogTerrain.refresh();
     for (const mask of this.fogMasks) mask.reset();
+    this.trackMask.clear(); // describes ground that no longer has this shape
     this.blooms.refresh();
     this.lastGenerateMs = performance.now() - t0;
     return this.lastGenerateMs;

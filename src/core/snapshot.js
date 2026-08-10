@@ -181,6 +181,11 @@ export function serialize(ctx) {
     vehicles: vehicles.instances.filter((v) => !v.dead).map(serializeVehicle),
     structures: structures.instances.filter((s) => !s.dead).map(serializeStructure),
 
+    // Tire tracks: one shared mask, not per-team — same base64-bytes approach
+    // as team.fog below, since a track mark is exactly as irreproducible as
+    // where a team has scouted (it records where vehicles actually drove).
+    tracks: world.trackMask ? bytesToBase64(world.trackMask.data) : null,
+
     // Which vehicle the player was driving.
     activeVehicleId: vehicles.active?.id ?? null,
 
@@ -251,6 +256,12 @@ export function deserialize(ctx, snap) {
   world.regenerate(snap.terrain);
   for (const pad of snap.pads) terraform.restorePad(pad);
 
+  // world.regenerate() already cleared trackMask (the ground it described is
+  // gone); restore it from the save now that the fresh mask exists.
+  if (snap.tracks && world.trackMask) {
+    world.trackMask.restoreFromBytes(base64ToBytes(snap.tracks));
+  }
+
   // --- teams --------------------------------------------------------------
   for (const saved of snap.teams) {
     const team = game.teams[saved.id];
@@ -302,6 +313,22 @@ export function deserialize(ctx, snap) {
     inst.shouldPark = saved.shouldPark;
     if (saved.target) inst.target = new THREE.Vector2(saved.target.x, saved.target.z);
     vehicleById.set(saved.id, inst);
+  }
+
+  // A base station saved mid-deploy needs its pad's job wired back to it: the
+  // original onComplete (commands.js's 'deploy' command) is a closure over the
+  // vehicle instance and cannot be serialized, so without this the pad would
+  // finish flattening (terraform.js's restorePad re-queues the job) but the
+  // vehicle would sit at mode 'deploying' forever, never becoming 'deployed'.
+  for (const inst of vehicleById.values()) {
+    if (inst.mode !== 'deploying') continue;
+    const job = terraform.jobs.find((j) => (j.pad.teamId ?? 0) === inst.teamId && !j.pad.complete);
+    if (!job) continue;
+    job.onComplete = () => {
+      inst.mode = 'deployed';
+      inst.deployOrigin = { x: inst.group.position.x, z: inst.group.position.z };
+      inst.spireGrown = false;
+    };
   }
 
   // --- cross-references, now that everything exists -----------------------
