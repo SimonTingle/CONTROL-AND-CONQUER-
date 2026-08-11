@@ -32,12 +32,14 @@ import { AiCommander } from './vehicles/aiCommander.js';
 import { CombatController } from './vehicles/combatController.js';
 import { MatchEndScreen } from './ui/matchEndScreen.js';
 import { Terraform } from './core/terraform.js';
+import { DEFAULT_TERRAIN } from './terrain/heightmap.js';
 import { SIM_DT, simClock, advanceSimClock, resetSimClock } from './core/simClock.js';
 import { hashState } from './core/stateHash.js';
 import { Intent, IntentQueue, applyIntent } from './net/intents.js';
 import { LockstepSession } from './net/lockstep.js';
 import { MatchClient } from './net/matchClient.js';
 import { LobbyScreen } from './ui/lobbyScreen.js';
+import { updateNetDebug, hideNetDebug } from './ui/netDebug.js';
 import { StructureController } from './structures/structures.js';
 import { Entities } from './core/entities.js';
 import { NavGrid } from './core/navGrid.js';
@@ -1557,6 +1559,7 @@ function endOnlineMatch(reason) {
   if (!match) return;
   match.client.close();
   match = null;
+  hideNetDebug();
   if (reason) showToast(reason, 5000);
 }
 
@@ -1584,7 +1587,12 @@ async function startOnlineMatch(matchId, difficulty) {
       );
     },
     onTurn: (turn, inputs) => match?.session.receiveTurn(turn, inputs),
-    onDesync: (msg) => handleDesync(msg),
+    onDesync: (msg) => {
+      // The server's comparison is the authority on agreement; every client
+      // shows it, while only the host acts on it.
+      if (match) match.desyncTurn = msg.turn;
+      handleDesync(msg);
+    },
     onSnapshot: (msg) => {
       // Buffered, not applied here: it has to land exactly at its turn
       // boundary, which is the one moment both machines agree on.
@@ -1609,7 +1617,15 @@ async function startOnlineMatch(matchId, difficulty) {
   game.aiMatch = { teamCount: totalTeams - 1, buildDelaySeconds: 5 };
 
   // Same island for everyone, from the seed the lobby fixed at creation.
-  world.regenerate({ ...heightmap.params, seed: welcome.seed });
+  // Defaults plus the shared seed — deliberately NOT this client's current
+  // params. Spreading `heightmap.params` here meant the island was built from
+  // whatever world sliders each player happened to have set locally, so two
+  // clients could generate entirely different terrain from the same seed. Every
+  // spawn point is derived from the heightmap, so that diverges the match from
+  // its first tick: each player sees their own island with the other team's
+  // vehicles at coordinates that mean nothing on it (a base station left
+  // hovering over the wrong ground is the classic tell).
+  world.regenerate({ ...DEFAULT_TERRAIN, seed: welcome.seed });
   beginMatch(difficulty);
   // Human seats are the low team ids (join hands out the lowest free one), so
   // this split is the same on every client without needing to be communicated.
@@ -1632,6 +1648,10 @@ async function startOnlineMatch(matchId, difficulty) {
     expectedPlayers: welcome.expectedPlayers,
     /** Flipped by the server's `begin`; until then the sim does not advance. */
     begun: false,
+    /** Last turn-aligned state digest, shown in the sync readout. */
+    checkpoint: null,
+    /** Turn the server last reported clients disagreeing, or null. */
+    desyncTurn: null,
     /** Set by the host when it owes somebody a snapshot. */
     resyncAtTurn: null,
     resyncTargets: [],
@@ -1670,7 +1690,11 @@ function onMatchTurn(inputs, turn) {
   }
 
   if (turn % HASH_EVERY_TURNS === 0) {
-    match.client.sendHash(turn, hashState({ vehicles, structures, game }, simClock.tick));
+    const hash = hashState({ vehicles, structures, game }, simClock.tick);
+    // Kept as well as sent: the on-screen readout shows this turn-aligned
+    // value so two devices are always comparing the same simulated moment.
+    match.checkpoint = { turn, hash: hash.split(':')[1] ?? hash };
+    match.client.sendHash(turn, hash);
   }
 
   // teamId is stamped by the server from the match roster, so this is the
@@ -1777,10 +1801,13 @@ function deployStartingForces() {
     // to aim that doesn't depend on the base station surviving.
     team.homePoint = { x: point.x, z: point.z };
 
-    // findEdgeSpawnPointAtAngle faces a vehicle back toward the map centre,
-    // which for the base station reads as facing out to sea — the same flip
-    // the picker's own base spawn applies.
-    vehicles.spawn(baseDef, point, heading + Math.PI, { activate: false, teamId: team.id });
+    // findEdgeSpawnPointAtAngle already returns a heading pointing from the
+    // coast back toward the island centre (`atan2(-dirZ, -dirX)`), so it is
+    // used as-is. It previously had Math.PI added, borrowed from the vehicle
+    // picker — but the picker spawns the base *beside another vehicle* via
+    // findSpawnPointNear, which faces it back at that vehicle and does need
+    // flipping. Applying the same flip here pointed every team out to sea.
+    vehicles.spawn(baseDef, point, heading, { activate: false, teamId: team.id });
 
     const beside = findSpawnPointNear(heightmap, point, {
       minRadius: baseDef.dims.hullLength / 2 + scoutDef.dims.hullLength / 2 + 4,
@@ -1788,7 +1815,10 @@ function deployStartingForces() {
       camera,
     });
     beside.point.y += 0.05;
-    vehicles.spawn(scoutDef, beside.point, beside.heading, {
+    // `beside.heading` faces the scout back at the base it was placed next to,
+    // which on a coastal spawn means facing the water as well. The whole team
+    // should open facing the island it has to cross.
+    vehicles.spawn(scoutDef, beside.point, heading, {
       // This client's own team, not "any human team". Online every player's
       // team is human, so activating on isHuman handed each client whichever
       // human scout spawned last — an enemy unit, whose orders the intent
@@ -2131,6 +2161,24 @@ function renderTick(dt) {
       controls.update();
     }
   });
+
+  if (match) {
+    updateNetDebug({
+      seed: heightmap.params.seed,
+      teamId: game.localTeamId,
+      turn: match.session.turn,
+      simTick: simClock.tick,
+      stalled: match.session.stalled,
+      begun: match.begun,
+      players: match.expectedPlayers,
+      connected: match.client.connected,
+      checkpoint: match.checkpoint,
+      desyncTurn: match.desyncTurn,
+      vehicles: vehicles.instances.filter((v) => !v.dead).length,
+      structures: structures.instances.filter((x) => !x.dead).length,
+      credits: game.teams.map((t) => Math.round(t.credits)),
+    });
+  }
 
   // A stalled match is normal and temporary, but an unexplained frozen world is
   // not. Re-toasting on a slow cadence keeps the message up for as long as the
