@@ -75,10 +75,18 @@ export function updateNetDebug(s) {
     : s.checkpoint
       ? 'SYNC OK'
       : 'no checkpoint yet';
-  node.style.color = s.desyncTurn != null ? '#fca5a5' : '#5eead4';
+  node.style.color = (s.desyncTurn != null || s.players === undefined) ? '#fca5a5' : '#5eead4';
 
   const cp = s.checkpoint ? `t${s.checkpoint.turn} ${s.checkpoint.hash}` : '—';
-  const state = !s.connected ? 'OFFLINE' : !s.begun ? `waiting ${s.players}p` : s.stalled ? 'STALLED' : 'running';
+  // `players` is undefined when the server predates the start barrier — show
+  // that as its own state rather than rendering the word "undefined".
+  const state = !s.connected
+    ? 'OFFLINE'
+    : s.players === undefined
+      ? 'SERVER OUT OF DATE'
+      : !s.begun
+        ? `waiting ${s.players}p`
+        : s.stalled ? 'STALLED' : 'running';
 
   node.textContent =
     `seed ${s.seed}  ·  team ${s.teamId}  ·  ${state}  ·  ${verdict}\n` +

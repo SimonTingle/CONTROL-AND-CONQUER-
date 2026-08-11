@@ -1660,10 +1660,27 @@ async function startOnlineMatch(matchId, difficulty) {
   // Deliberately no session.start() here — see the onBegin handler above. A
   // client that starts reporting on connect races every other client to the
   // turn clock, and the loser can never catch up.
-  showToast(
-    `Joined as team ${welcome.teamId} — waiting for ${welcome.expectedPlayers} players…`,
-    5000
-  );
+  // A server predating the start barrier never sends `begin`, and this client
+  // will not simulate without it — so the match would hang in silence forever.
+  // `expectedPlayers` is the marker for that build, so say so plainly rather
+  // than letting two players stare at a motionless world.
+  if (welcome.expectedPlayers === undefined) {
+    showToast(
+      'The game server is out of date and will never start this match — ' +
+      'redeploy the API, then try again.',
+      15000
+    );
+    console.error(
+      'match server predates the lockstep start barrier (no expectedPlayers in ' +
+      'welcome); it will never broadcast "begin" and this client will not ' +
+      'simulate without it. Redeploy server/.'
+    );
+  } else {
+    showToast(
+      `Joined as team ${welcome.teamId} — waiting for ${welcome.expectedPlayers} players…`,
+      5000
+    );
+  }
   return welcome;
 }
 
