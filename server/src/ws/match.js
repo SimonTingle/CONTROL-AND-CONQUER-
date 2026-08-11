@@ -21,8 +21,16 @@
  * A turn is only released when every player has reported for it. That makes the
  * slowest player the pacer (real lockstep), and it is why a disconnect must be
  * handled explicitly rather than ignored — a vanished player would otherwise
- * stall everyone forever. Past DROP_AFTER_MS a silent player is dropped and
- * clients hand their team to the AI commander.
+ * stall everyone forever. Past DROP_AFTER_MS a silent player is dropped so the
+ * remaining players can carry on. Their team then simply idles: handing it to
+ * an AI commander mid-match is a sensible follow-up but is not implemented.
+ *
+ * ## The start barrier
+ *
+ * Nothing is released until the whole roster has connected (see `maybeBegin`).
+ * Releasing turns to whoever arrives first is not a smaller version of working
+ * — it deadlocks the match outright, because a later arrival can never catch up
+ * to turns that were broadcast before it existed.
  *
  * ## Trust
  *
@@ -43,18 +51,38 @@ export const TICKS_PER_TURN = 6;
 export const INPUT_DELAY_TURNS = 2;
 /** A player silent this long is dropped so the rest of the match can continue. */
 const DROP_AFTER_MS = 15000;
+/**
+ * How long the first arrival waits for the rest of the roster before the match
+ * begins without them. Somebody who joined a lobby and then closed their tab
+ * must not be able to hang everyone else indefinitely.
+ */
+const START_GRACE_MS = Number(process.env.MATCH_START_GRACE_MS ?? 30000);
 /** Guard against a client flooding the relay; a turn's input is tiny. */
 const MAX_MESSAGE_BYTES = 64 * 1024;
 
 /** Live matches, keyed by match id. Purely in-memory: a restart ends matches. */
 const rooms = new Map();
 
-function roomFor(matchId, seed) {
+function roomFor(matchId, seed, expectedPlayers) {
   let room = rooms.get(matchId);
   if (!room) {
+    // A missing or malformed roster count must not become an unsatisfiable
+    // barrier: `players.size >= NaN` is false forever, which would leave the
+    // match hanging until the grace timeout with no indication why. Fall back
+    // to "just me", so the worst case is starting early rather than never.
+    if (!Number.isFinite(expectedPlayers) || expectedPlayers < 1) expectedPlayers = 1;
     room = {
       matchId,
       seed,
+      /**
+       * How many players the roster says to wait for. The turn clock must not
+       * start until they are all here — see `maybeBegin`.
+       */
+      expectedPlayers,
+      /** Set once the match has begun; nothing is released before it. */
+      started: false,
+      /** When the first client connected, for the grace timeout. */
+      firstJoinAt: Date.now(),
       /** userId -> { socket, teamId, displayName, lastSeen } */
       players: new Map(),
       /** turn -> Map(userId -> input[]) */
@@ -67,6 +95,36 @@ function roomFor(matchId, seed) {
     rooms.set(matchId, room);
   }
   return room;
+}
+
+/**
+ * Start the match once the whole roster is present — or once the grace window
+ * has expired and we accept that somebody is not coming.
+ *
+ * This barrier is not a nicety, it is what makes lockstep work at all. Without
+ * it the first client to connect reports turns 0..DELAY and the server, seeing
+ * only one connected player, releases them immediately; the client simulates
+ * away. When the second client arrives its own turn 0 is already behind
+ * `released`, so it is rejected and it waits forever for a broadcast that has
+ * already happened — while the first client waits for input from a peer that
+ * will never begin a turn. A mutual deadlock, and the reason both machines
+ * rendered a frozen world on the first real two-player match.
+ */
+function maybeBegin(room) {
+  if (room.started) return;
+  const everyoneHere = room.players.size >= room.expectedPlayers;
+  const graceExpired = Date.now() - room.firstJoinAt >= START_GRACE_MS;
+  if (!everyoneHere && !graceExpired) return;
+
+  room.started = true;
+  broadcast(room, {
+    t: 'begin',
+    players: rosterOf(room),
+    // Honest about which of the two paths got us here, so a client can say
+    // "starting without <n> player(s)" rather than silently proceeding short.
+    waitedOut: !everyoneHere,
+  });
+  releaseReadyTurns(room);
 }
 
 function send(socket, msg) {
@@ -100,9 +158,10 @@ function releaseReadyTurns(room) {
   for (;;) {
     const turn = room.released + 1;
     const reported = room.pending.get(turn);
-    // Nobody connected yet: nothing to release, and releasing an empty turn
-    // would let a lone client run away from a peer still connecting.
-    if (!room.players.size) return;
+    // The barrier: until the match has begun, nothing is released at all. This
+    // is what stops the first client to connect from advancing the turn clock
+    // on its own and leaving every later arrival permanently behind it.
+    if (!room.started || !room.players.size) return;
     if (!reported || reported.size < room.players.size) return;
 
     const inputs = [];
@@ -135,7 +194,12 @@ function reapSilent(room) {
 export async function matchSocket(app) {
   // One sweep for every room rather than a timer per connection.
   const reaper = setInterval(() => {
-    for (const room of rooms.values()) reapSilent(room);
+    for (const room of rooms.values()) {
+      // Begin first: a room still waiting on an absent player has no live
+      // players to reap, and the grace window is what unblocks it.
+      maybeBegin(room);
+      reapSilent(room);
+    }
   }, 5000);
   app.addHook('onClose', async () => clearInterval(reaper));
 
@@ -182,7 +246,8 @@ async function handleMatchSocket(socket, req) {
 
   const matchId = req.params.id;
   const { rows } = await query(
-    `select m.seed, m.status, m.host_user_id, p.team_id
+    `select m.seed, m.status, m.host_user_id, p.team_id,
+            (select count(*) from match_players mp where mp.match_id = m.id) as roster_size
        from matches m
        join match_players p on p.match_id = m.id and p.user_id = $2
       where m.id = $1`,
@@ -195,8 +260,8 @@ async function handleMatchSocket(socket, req) {
     socket.close(4003, 'not a member');
     return;
   }
-  const { seed, team_id: teamId, host_user_id: hostUserId } = rows[0];
-  const room = roomFor(matchId, Number(seed));
+  const { seed, team_id: teamId, host_user_id: hostUserId, roster_size: rosterSize } = rows[0];
+  const room = roomFor(matchId, Number(seed), Number(rosterSize));
 
   // A second socket for the same user replaces the first — a reload should
   // reclaim the seat rather than leave a ghost the match waits on forever.
@@ -222,6 +287,10 @@ async function handleMatchSocket(socket, req) {
     // and does not simulate on anyone else's behalf.
     hostUserId,
     isHost: user.id === hostUserId,
+    // The client holds off reporting input until `begin`; this lets it say
+    // what it is waiting for instead of showing a motionless world.
+    expectedPlayers: room.expectedPlayers,
+    started: room.started,
     ticksPerTurn: TICKS_PER_TURN,
     inputDelayTurns: INPUT_DELAY_TURNS,
     // Where the match already is, so a reconnecting client knows it must
@@ -230,6 +299,8 @@ async function handleMatchSocket(socket, req) {
     players: rosterOf(room),
   });
   broadcast(room, { t: 'playerJoined', userId: user.id, teamId, displayName: user.display_name }, user.id);
+  // This arrival may have been the one everyone was waiting for.
+  maybeBegin(room);
 
   socket.on('message', (raw) => {
     const player = room.players.get(user.id);

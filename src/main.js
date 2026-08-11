@@ -626,7 +626,7 @@ canvas.addEventListener('pointerup', (e) => {
       // spot stays in placement mode; the placement itself is queued, and
       // re-validated on apply in case the ground was taken meanwhile.
       if (structures.canPlaceAt(pad, def, snapped.x, snapped.z)) {
-        submitIntent(Intent.build(def.id, pad.id, snapped.x, snapped.z, pad.teamId ?? PLAYER_TEAM_ID));
+        submitIntent(Intent.build(def.id, pad.id, snapped.x, snapped.z, pad.teamId ?? game.localTeamId));
         cancelPlacementMode();
       }
     }
@@ -1544,6 +1544,8 @@ const RESYNC_LEAD_TURNS = 3;
 
 /** The live match, or null in single player. */
 let match = null;
+/** Seconds since the last "waiting…" notice, so a stall explains itself once a second. */
+let matchWaitTimer = 0;
 
 function endOnlineMatch(reason) {
   if (!match) return;
@@ -1562,6 +1564,19 @@ function endOnlineMatch(reason) {
 async function startOnlineMatch(matchId, difficulty) {
   const { match: info } = await api.getMatch(matchId);
   const client = new MatchClient(matchId, {
+    // The server holds every client at the gate until the roster is complete;
+    // reporting input before that is what used to deadlock the match.
+    onBegin: (msg) => {
+      if (!match || match.begun) return;
+      match.begun = true;
+      match.session.start();
+      showToast(
+        msg.waitedOut
+          ? 'Starting without everyone — a player did not connect.'
+          : 'All players connected — match starting.',
+        4000
+      );
+    },
     onTurn: (turn, inputs) => match?.session.receiveTurn(turn, inputs),
     onDesync: (msg) => handleDesync(msg),
     onSnapshot: (msg) => {
@@ -1608,13 +1623,21 @@ async function startOnlineMatch(matchId, difficulty) {
     session,
     isHost: welcome.isHost,
     userId: welcome.userId,
+    expectedPlayers: welcome.expectedPlayers,
+    /** Flipped by the server's `begin`; until then the sim does not advance. */
+    begun: false,
     /** Set by the host when it owes somebody a snapshot. */
     resyncAtTurn: null,
     resyncTargets: [],
     pendingSnapshot: null,
   };
-  session.start();
-  showToast(`Match joined — you are team ${welcome.teamId}`, 4000);
+  // Deliberately no session.start() here — see the onBegin handler above. A
+  // client that starts reporting on connect races every other client to the
+  // turn clock, and the loser can never catch up.
+  showToast(
+    `Joined as team ${welcome.teamId} — waiting for ${welcome.expectedPlayers} players…`,
+    5000
+  );
   return welcome;
 }
 
@@ -1760,7 +1783,11 @@ function deployStartingForces() {
     });
     beside.point.y += 0.05;
     vehicles.spawn(scoutDef, beside.point, beside.heading, {
-      activate: team.isHuman,
+      // This client's own team, not "any human team". Online every player's
+      // team is human, so activating on isHuman handed each client whichever
+      // human scout spawned last — an enemy unit, whose orders the intent
+      // applier then correctly refused.
+      activate: team.id === game.localTeamId,
       teamId: team.id,
     });
   });
@@ -2008,12 +2035,12 @@ function simTick(dt) {
   p.time('fogReveal', () => {
     fogRevealCounter = (fogRevealCounter + 1) % FOG_STAGGER_PERIOD;
     for (const v of vehicles.instances) {
-      if (v.teamId !== PLAYER_TEAM_ID && v.teamId % FOG_STAGGER_PERIOD !== fogRevealCounter) continue;
+      if (v.teamId !== game.localTeamId && v.teamId % FOG_STAGGER_PERIOD !== fogRevealCounter) continue;
       const mask = game.fogFor(v.teamId);
       if (mask) mask.reveal(v.group.position.x, v.group.position.z, v.def.sightRadius, v);
     }
     for (const s of structures.instances) {
-      if (s.teamId !== PLAYER_TEAM_ID && s.teamId % FOG_STAGGER_PERIOD !== fogRevealCounter) continue;
+      if (s.teamId !== game.localTeamId && s.teamId % FOG_STAGGER_PERIOD !== fogRevealCounter) continue;
       const mask = game.fogFor(s.teamId);
       if (mask) mask.reveal(s.x, s.z, s.def.sightRadius, s);
     }
@@ -2050,16 +2077,6 @@ function simTick(dt) {
     mask.commit();
   });
 
-  p.time('cameraControls', () => {
-    if (isChasing()) {
-      // MapControls would fight the chase rig for the camera transform.
-      controls.enabled = false;
-      chase.update(dt, vehicles.active);
-    } else {
-      controls.enabled = true;
-      controls.update();
-    }
-  });
 
   // After the camera has settled, so the menu projects against this frame's
   // view rather than lagging it by one.
@@ -2093,6 +2110,39 @@ function simTick(dt) {
  */
 function renderTick(dt) {
   const p = tickProfiler;
+
+  // The camera lives here rather than in simTick because it is presentation,
+  // and because MapControls' damping only applies while update() is called —
+  // leaving it in the simulation meant a lockstep stall froze the view, so a
+  // match waiting on a peer looked like a hung game rather than a paused one.
+  p.time('cameraControls', () => {
+    if (isChasing()) {
+      // MapControls would fight the chase rig for the camera transform.
+      controls.enabled = false;
+      chase.update(dt, vehicles.active);
+    } else {
+      controls.enabled = true;
+      controls.update();
+    }
+  });
+
+  // A stalled match is normal and temporary, but an unexplained frozen world is
+  // not. Re-toasting on a slow cadence keeps the message up for as long as the
+  // wait lasts and clears itself shortly after play resumes.
+  if (match && match.session.stalled && match.session.stallSteps > 0) {
+    matchWaitTimer += dt;
+    if (matchWaitTimer >= 1) {
+      matchWaitTimer = 0;
+      showToast(
+        match.begun
+          ? 'Waiting for the other player…'
+          : `Waiting for ${match.expectedPlayers} players to connect…`,
+        2000
+      );
+    }
+  } else {
+    matchWaitTimer = 0;
+  }
 
   p.time('updateTracers', () => updateTracers(dt));
   // Per-frame, unlike the rest of the HUD's half-second poll — see

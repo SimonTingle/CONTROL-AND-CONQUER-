@@ -21,7 +21,7 @@ function socketUrl(matchId) {
 export class MatchClient {
   /**
    * @param {string} matchId
-   * @param {object} handlers `onWelcome, onTurn, onDesync, onSnapshot,
+   * @param {object} handlers `onWelcome, onBegin, onTurn, onDesync, onSnapshot,
    *   onPlayerJoined, onPlayerLeft, onError, onClose`
    */
   constructor(matchId, handlers = {}) {
@@ -64,6 +64,11 @@ export class MatchClient {
             this.handlers.onWelcome?.(msg);
             if (!settled) { settled = true; resolve(msg); }
             return;
+          case 'begin':
+            // The roster is complete (or the server waited long enough). Until
+            // this lands the client must not report input — see the start
+            // barrier in server/src/ws/match.js.
+            return void this.handlers.onBegin?.(msg);
           case 'turn':
             return void this.handlers.onTurn?.(msg.turn, msg.inputs);
           case 'desync':
