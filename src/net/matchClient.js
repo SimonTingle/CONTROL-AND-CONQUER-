@@ -21,7 +21,7 @@ function socketUrl(matchId) {
 export class MatchClient {
   /**
    * @param {string} matchId
-   * @param {object} handlers `onWelcome, onTurn, onDesync, onSnapshot,
+   * @param {object} handlers `onWelcome, onBegin, onTurn, onDesync, onSnapshot,
    *   onPlayerJoined, onPlayerLeft, onError, onClose`
    */
   constructor(matchId, handlers = {}) {
@@ -64,6 +64,11 @@ export class MatchClient {
             this.handlers.onWelcome?.(msg);
             if (!settled) { settled = true; resolve(msg); }
             return;
+          case 'begin':
+            // The roster is complete (or the server waited long enough). Until
+            // this lands the client must not report input — see the start
+            // barrier in server/src/ws/match.js.
+            return void this.handlers.onBegin?.(msg);
           case 'turn':
             return void this.handlers.onTurn?.(msg.turn, msg.inputs);
           case 'desync':
@@ -93,7 +98,16 @@ export class MatchClient {
       });
 
       ws.addEventListener('error', () => {
-        if (!settled) { settled = true; reject(new Error('socket error')); }
+        // The browser deliberately does not expose the HTTP status of a failed
+        // handshake, so this is all we can ever know locally — say what it
+        // usually means rather than the bare "socket error" the event gives us.
+        if (!settled) {
+          settled = true;
+          reject(new Error(
+            'the server refused the WebSocket connection (it may be down, or a ' +
+            'proxy in front of it may not be forwarding WebSocket upgrades)'
+          ));
+        }
       });
     });
   }
