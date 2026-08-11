@@ -21,6 +21,25 @@ export function buildSchema(world, view, game) {
     type: 'slider', label, min, max, step, get, set, ...opts,
   });
   const toggle = (label, get, set) => ({ type: 'toggle', label, get, set });
+
+  /**
+   * Mark a control that writes *simulation* state (not just how the world is
+   * drawn) so the menu disables it during an online match.
+   *
+   * These are authoring and debug affordances. In single player they are
+   * harmless; in a match they mutate state the other client has no way of
+   * learning about, and the peers silently diverge — a scrubbed sun changes
+   * `cycle.phase`, which changes the `sunElevation` fed to blooms.update, which
+   * changes crystal regrowth. Regenerating terrain is worse still: every spawn
+   * point is derived from the heightmap.
+   *
+   * Disabling beats syncing them: nothing here is gameplay, and replicating a
+   * terrain rebuild mid-match would mean re-deriving the entire world.
+   */
+  const simState = (control) =>
+    game?.mode === 'multiplayer-online'
+      ? { ...control, locked: true, lockHint: 'Locked during an online match — it would desync the other player.' }
+      : control;
   const color = (label, get, set) => ({ type: 'color', label, get, set });
   // opts: { placeholder, saveLabel, loadLabel, refresh } — refresh is only
   // needed by fields whose list isn't already synchronous (cloud saves).
@@ -146,19 +165,19 @@ export function buildSchema(world, view, game) {
         // back, which is exactly what it used to do. Azimuth is still derived
         // from phase, so it follows the scrub and its own slider only bites
         // once the cycle is switched off.
-        toggle('Day/night cycle', () => atmo.cycle.enabled, (v) => (atmo.cycle.enabled = v)),
+        simState(toggle('Day/night cycle', () => atmo.cycle.enabled, (v) => (atmo.cycle.enabled = v))),
         // A full day defaults to 30 minutes, which means ~13 minutes of play
         // before dusk — long enough that the cycle looks broken when you're
         // testing. Shorten this to watch a whole day (and the headlights coming
         // on by themselves) in seconds.
-        slider('Day length (min)', 0.5, 30, 0.5,
-          () => atmo.cycle.periodSeconds / 60, (v) => (atmo.cycle.periodSeconds = v * 60)),
+        simState(slider('Day length (min)', 0.5, 30, 0.5,
+          () => atmo.cycle.periodSeconds / 60, (v) => (atmo.cycle.periodSeconds = v * 60))),
         // Scrubs time of day while the cycle runs; a plain direct set once it's
         // off. Note the sun's arc peaks at 70°, so the top of this range clamps
         // while cycling.
-        slider('Sun elevation', -10, 90, 0.5,
+        simState(slider('Sun elevation', -10, 90, 0.5,
           () => atmo.params.elevation,
-          (v) => (atmo.cycle.enabled ? atmo.scrubToElevation(v) : atmo.set({ elevation: v }))),
+          (v) => (atmo.cycle.enabled ? atmo.scrubToElevation(v) : atmo.set({ elevation: v })))),
         slider('Sun azimuth', 0, 360, 1,
           () => atmo.params.azimuth, (v) => atmo.set({ azimuth: v })),
         slider('Haze / turbidity', 0, 20, 0.1,
@@ -184,31 +203,31 @@ export function buildSchema(world, view, game) {
     {
       title: 'Terrain shape',
       controls: [
-        { type: 'button', label: 'New random world', action: () => view.regenerate({ seed: (Math.random() * 1e9) | 0 }) },
-        slider('Seed', 0, 100000, 1,
-          () => terrain.seed % 100000, (v) => view.regenerate({ seed: v }), { rebuild: true }),
-        slider('Amplitude', 10, 220, 1,
+        simState({ type: 'button', label: 'New random world', action: () => view.regenerate({ seed: (Math.random() * 1e9) | 0 }) }),
+        simState(slider('Seed', 0, 100000, 1,
+          () => terrain.seed % 100000, (v) => view.regenerate({ seed: v }), { rebuild: true })),
+        simState(slider('Amplitude', 10, 220, 1,
           () => terrain.amplitude, (v) => {
             terrain.amplitude = v;
             tu.uAmplitude.value = v;
             world.water.updateLevel();
-          }),
-        slider('Frequency', 0.4, 5, 0.05,
-          () => terrain.frequency, (v) => view.regenerate({ frequency: v }), { rebuild: true }),
-        slider('Octaves', 1, 9, 1,
-          () => terrain.octaves, (v) => view.regenerate({ octaves: v }), { rebuild: true }),
-        slider('Ridges ↔ rolling', 0, 1, 0.01,
-          () => terrain.ridgeBlend, (v) => view.regenerate({ ridgeBlend: v }), { rebuild: true }),
-        slider('Domain warp', 0, 1.2, 0.01,
-          () => terrain.warp, (v) => view.regenerate({ warp: v }), { rebuild: true }),
-        slider('Plateau (buildable)', 0, 1, 0.01,
-          () => terrain.plateau, (v) => view.regenerate({ plateau: v }), { rebuild: true }),
-        slider('Sea level', 0, 0.6, 0.005,
+          })),
+        simState(slider('Frequency', 0.4, 5, 0.05,
+          () => terrain.frequency, (v) => view.regenerate({ frequency: v }), { rebuild: true })),
+        simState(slider('Octaves', 1, 9, 1,
+          () => terrain.octaves, (v) => view.regenerate({ octaves: v }), { rebuild: true })),
+        simState(slider('Ridges ↔ rolling', 0, 1, 0.01,
+          () => terrain.ridgeBlend, (v) => view.regenerate({ ridgeBlend: v }), { rebuild: true })),
+        simState(slider('Domain warp', 0, 1.2, 0.01,
+          () => terrain.warp, (v) => view.regenerate({ warp: v }), { rebuild: true })),
+        simState(slider('Plateau (buildable)', 0, 1, 0.01,
+          () => terrain.plateau, (v) => view.regenerate({ plateau: v }), { rebuild: true })),
+        simState(slider('Sea level', 0, 0.6, 0.005,
           () => terrain.seaLevel, (v) => {
             terrain.seaLevel = v;
             tu.uSeaLevel.value = v;
             world.water.updateLevel();
-          }),
+          })),
       ],
     },
     {

@@ -128,6 +128,25 @@ export class Menu {
       control._sync = () => (input.value = `#${control.get().getHexString()}`);
     }
 
+    // Controls flagged `locked` write simulation state (see controlSchema's
+    // `simState`). Disabled at the element level rather than merely dimmed, so
+    // a stray tap on a phone cannot desync a match through a control that only
+    // *looks* unavailable.
+    if (control.locked) {
+      row.classList.add('control-locked');
+      row.style.opacity = '0.45';
+      for (const el of row.querySelectorAll('input, button, select')) el.disabled = true;
+      if (control.lockHint) {
+        const hint = document.createElement('div');
+        hint.className = 'hint';
+        hint.textContent = control.lockHint;
+        row.appendChild(hint);
+      }
+      // Skip _sync: refreshValues() would otherwise keep writing values into
+      // inputs nobody can change, which is noise at best.
+      control._sync = null;
+    }
+
     this.controls = this.controls || [];
     this.controls.push(control);
     return row;

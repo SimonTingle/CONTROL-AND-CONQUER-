@@ -21,8 +21,8 @@ function socketUrl(matchId) {
 export class MatchClient {
   /**
    * @param {string} matchId
-   * @param {object} handlers `onWelcome, onBegin, onTurn, onDesync, onSnapshot,
-   *   onPlayerJoined, onPlayerLeft, onError, onClose`
+   * @param {object} handlers `onWelcome, onBegin, onTurn, onAgreed, onDesync,
+   *   onSnapshot, onPlayerJoined, onPlayerLeft, onError, onClose`
    */
   constructor(matchId, handlers = {}) {
     this.matchId = matchId;
@@ -71,6 +71,10 @@ export class MatchClient {
             return void this.handlers.onBegin?.(msg);
           case 'turn':
             return void this.handlers.onTurn?.(msg.turn, msg.inputs);
+          case 'agreed':
+            // A positive verdict from a real comparison — distinct from the
+            // server merely not having complained.
+            return void this.handlers.onAgreed?.(msg);
           case 'desync':
             return void this.handlers.onDesync?.(msg);
           case 'snapshot':

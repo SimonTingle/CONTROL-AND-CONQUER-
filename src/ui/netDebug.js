@@ -60,6 +60,9 @@ export function hideNetDebug() {
  * @param {boolean} s.connected      socket state
  * @param {{turn:number,hash:string}|null} s.checkpoint last turn-aligned digest
  * @param {number|null} s.desyncTurn turn the server last reported a disagreement
+ * @param {number|null} s.agreedTurn  last turn the server actually compared and
+ *   found matching — the only basis for claiming the devices agree
+ * @param {number} s.agreedPeers      how many clients that comparison covered
  * @param {number} s.vehicles        live vehicle count
  * @param {number} s.structures      live structure count
  * @param {number[]} s.credits       per-team credits, in team order
@@ -68,14 +71,23 @@ export function updateNetDebug(s) {
   const node = ensureEl();
   node.style.display = '';
 
-  // The server compares every client's checkpoint hash and says so when they
-  // disagree — a far more trustworthy verdict than two people eyeballing hex.
+  // Only ever claim agreement the server actually verified. "Nobody has
+  // complained" and "two clients were compared and matched" are different
+  // statements, and the earlier version conflated them — it showed SYNC OK
+  // through a real divergence, because the comparison had never run.
   const verdict = s.desyncTurn != null
     ? `DESYNC @t${s.desyncTurn}`
-    : s.checkpoint
-      ? 'SYNC OK'
-      : 'no checkpoint yet';
-  node.style.color = (s.desyncTurn != null || s.players === undefined) ? '#fca5a5' : '#5eead4';
+    : s.agreedTurn != null
+      ? `AGREED @t${s.agreedTurn} (${s.agreedPeers})`
+      : s.checkpoint
+        ? 'unverified — no peer compare yet'
+        : 'no checkpoint yet';
+  node.style.color =
+    s.desyncTurn != null || s.players === undefined
+      ? '#fca5a5'                       // red: something is actually wrong
+      : s.agreedTurn != null
+        ? '#5eead4'                     // teal: verified agreement
+        : '#fcd34d';                    // amber: not yet compared — not a pass
 
   const cp = s.checkpoint ? `t${s.checkpoint.turn} ${s.checkpoint.hash}` : '—';
   // `players` is undefined when the server predates the start barrier — show
