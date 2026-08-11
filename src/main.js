@@ -785,7 +785,13 @@ addEventListener('keydown', (e) => {
   // does not exist yet.
   const overlayOpen =
     game.portalScreen?.open || game.difficultyScreen?.open || game.aiDifficultyScreen?.open;
-  if (k in driveKeys && !isTextInputFocused() && !overlayOpen) driveKeys[k] = true;
+  if (k in driveKeys && !isTextInputFocused() && !overlayOpen) {
+    driveKeys[k] = true;
+    // Drive state is latched on the vehicle and only sent when it changes, so
+    // a key going down has to emit here. Without this nothing ever applies
+    // throttle at all — the per-tick polling it replaced is gone.
+    syncDriveIntent();
+  }
   if (e.key === 'Escape' && commandContext.buildPlacementMode) cancelPlacementMode();
   if (e.key === 'Escape' && commandContext.targetSelectMode) commandContext.targetSelectMode = null;
   // Debug: destroy whatever's under the cursor — 2B's destroy pipeline has
