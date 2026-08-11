@@ -2159,10 +2159,18 @@ function simTick(dt) {
   // Before the render-only early return, same reasoning as updateRespawns
   // above: this has to fire correctly under window.__step's headless
   // fast-forward, not just real animate() frames.
-  autosaveTimer += dt;
-  if (autosaveTimer >= AUTOSAVE_INTERVAL_SECONDS) {
-    autosaveTimer = 0;
-    autosave();
+  //
+  // Skipped entirely in an online match: a local save only ever captures this
+  // one client's world, and loading it back can't reconnect to the lockstep
+  // session or the other player — so it would neither resume the match nor
+  // even agree with what the other player has. It would just be a stray
+  // toast and a save-slot nobody can use.
+  if (game.mode !== 'multiplayer-online') {
+    autosaveTimer += dt;
+    if (autosaveTimer >= AUTOSAVE_INTERVAL_SECONDS) {
+      autosaveTimer = 0;
+      autosave();
+    }
   }
 
 }
