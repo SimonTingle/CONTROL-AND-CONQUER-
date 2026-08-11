@@ -93,7 +93,16 @@ export class MatchClient {
       });
 
       ws.addEventListener('error', () => {
-        if (!settled) { settled = true; reject(new Error('socket error')); }
+        // The browser deliberately does not expose the HTTP status of a failed
+        // handshake, so this is all we can ever know locally — say what it
+        // usually means rather than the bare "socket error" the event gives us.
+        if (!settled) {
+          settled = true;
+          reject(new Error(
+            'the server refused the WebSocket connection (it may be down, or a ' +
+            'proxy in front of it may not be forwarding WebSocket upgrades)'
+          ));
+        }
       });
     });
   }

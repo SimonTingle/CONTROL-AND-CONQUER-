@@ -139,144 +139,172 @@ export async function matchSocket(app) {
   }, 5000);
   app.addHook('onClose', async () => clearInterval(reaper));
 
-  app.get('/ws/match/:id', { websocket: true }, async (socket, req) => {
-    // `onRequest` already resolved the session cookie for this upgrade, but fall
-    // back to reading it directly so this does not silently depend on plugin
-    // ordering — an unauthenticated socket is the one failure worth being loud
-    // about.
-    const user = req.user ?? (await userForToken(req.cookies?.[SESSION_COOKIE]));
-    if (!user) {
-      send(socket, { t: 'error', error: 'authentication_required' });
-      socket.close(4001, 'authentication required');
+  // Declared as `wsHandler` + `handler` rather than the shorter
+  // `{ websocket: true }` form, purely so a non-upgrade request gets a useful
+  // answer. `websocket: true` makes @fastify/websocket install its own HTTP
+  // fallback of `reply.code(404).send()` — a bare, bodyless 404 — which is
+  // indistinguishable from the route not existing at all. That cost real
+  // debugging time once: a reverse proxy that silently drops the
+  // Upgrade/Connection headers turns every connection attempt into exactly
+  // that 404, and nothing anywhere says so.
+  app.get('/ws/match/:id', {
+    handler: (req, reply) =>
+      reply.code(426).send({
+        error: 'websocket_upgrade_required',
+        hint:
+          'This endpoint only serves WebSocket connections. Seeing this from a ' +
+          'browser or curl means the request arrived without Upgrade/Connection ' +
+          'headers — usually a reverse proxy in front of the API that is not ' +
+          'configured to forward WebSocket upgrades (on CapRover: enable ' +
+          '"Websocket Support" in the app\'s HTTP Settings).',
+      }),
+    wsHandler: (socket, req) => handleMatchSocket(socket, req),
+  });
+}
+
+/**
+ * One player's socket, for the lifetime of their connection to a match.
+ *
+ * Split out of the route declaration so the route can carry both a wsHandler
+ * and an HTTP fallback without burying either in the other's indentation.
+ */
+async function handleMatchSocket(socket, req) {
+  // `onRequest` already resolved the session cookie for this upgrade, but fall
+  // back to reading it directly so this does not silently depend on plugin
+  // ordering — an unauthenticated socket is the one failure worth being loud
+  // about.
+  const user = req.user ?? (await userForToken(req.cookies?.[SESSION_COOKIE]));
+  if (!user) {
+    send(socket, { t: 'error', error: 'authentication_required' });
+    socket.close(4001, 'authentication required');
+    return;
+  }
+
+  const matchId = req.params.id;
+  const { rows } = await query(
+    `select m.seed, m.status, m.host_user_id, p.team_id
+       from matches m
+       join match_players p on p.match_id = m.id and p.user_id = $2
+      where m.id = $1`,
+    [matchId, user.id]
+  );
+  // Membership decides access, and it is a join in SQL — a non-member cannot
+  // open a socket to a match at all, whatever id they supply.
+  if (!rows.length) {
+    send(socket, { t: 'error', error: 'not_a_member' });
+    socket.close(4003, 'not a member');
+    return;
+  }
+  const { seed, team_id: teamId, host_user_id: hostUserId } = rows[0];
+  const room = roomFor(matchId, Number(seed));
+
+  // A second socket for the same user replaces the first — a reload should
+  // reclaim the seat rather than leave a ghost the match waits on forever.
+  const previous = room.players.get(user.id);
+  if (previous) {
+    try { previous.socket.close(4009, 'replaced by a new connection'); } catch { /* gone */ }
+  }
+  room.players.set(user.id, {
+    socket,
+    teamId,
+    displayName: user.display_name,
+    lastSeen: Date.now(),
+  });
+
+  send(socket, {
+    t: 'welcome',
+    matchId,
+    seed: room.seed,
+    teamId,
+    userId: user.id,
+    // Who supplies the snapshot when someone diverges. The host is simply the
+    // designated source of truth for a resync — it has no other authority,
+    // and does not simulate on anyone else's behalf.
+    hostUserId,
+    isHost: user.id === hostUserId,
+    ticksPerTurn: TICKS_PER_TURN,
+    inputDelayTurns: INPUT_DELAY_TURNS,
+    // Where the match already is, so a reconnecting client knows it must
+    // catch up rather than start from turn 0.
+    releasedTurn: room.released,
+    players: rosterOf(room),
+  });
+  broadcast(room, { t: 'playerJoined', userId: user.id, teamId, displayName: user.display_name }, user.id);
+
+  socket.on('message', (raw) => {
+    const player = room.players.get(user.id);
+    if (!player || player.socket !== socket) return; // superseded connection
+    if (raw.length > MAX_MESSAGE_BYTES) {
+      send(socket, { t: 'error', error: 'message_too_large' });
+      return;
+    }
+    player.lastSeen = Date.now();
+
+    let msg;
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      send(socket, { t: 'error', error: 'malformed_message' });
       return;
     }
 
-    const matchId = req.params.id;
-    const { rows } = await query(
-      `select m.seed, m.status, m.host_user_id, p.team_id
-         from matches m
-         join match_players p on p.match_id = m.id and p.user_id = $2
-        where m.id = $1`,
-      [matchId, user.id]
-    );
-    // Membership decides access, and it is a join in SQL — a non-member cannot
-    // open a socket to a match at all, whatever id they supply.
-    if (!rows.length) {
-      send(socket, { t: 'error', error: 'not_a_member' });
-      socket.close(4003, 'not a member');
-      return;
-    }
-    const { seed, team_id: teamId, host_user_id: hostUserId } = rows[0];
-    const room = roomFor(matchId, Number(seed));
-
-    // A second socket for the same user replaces the first — a reload should
-    // reclaim the seat rather than leave a ghost the match waits on forever.
-    const previous = room.players.get(user.id);
-    if (previous) {
-      try { previous.socket.close(4009, 'replaced by a new connection'); } catch { /* gone */ }
-    }
-    room.players.set(user.id, {
-      socket,
-      teamId,
-      displayName: user.display_name,
-      lastSeen: Date.now(),
-    });
-
-    send(socket, {
-      t: 'welcome',
-      matchId,
-      seed: room.seed,
-      teamId,
-      userId: user.id,
-      // Who supplies the snapshot when someone diverges. The host is simply the
-      // designated source of truth for a resync — it has no other authority,
-      // and does not simulate on anyone else's behalf.
-      hostUserId,
-      isHost: user.id === hostUserId,
-      ticksPerTurn: TICKS_PER_TURN,
-      inputDelayTurns: INPUT_DELAY_TURNS,
-      // Where the match already is, so a reconnecting client knows it must
-      // catch up rather than start from turn 0.
-      releasedTurn: room.released,
-      players: rosterOf(room),
-    });
-    broadcast(room, { t: 'playerJoined', userId: user.id, teamId, displayName: user.display_name }, user.id);
-
-    socket.on('message', (raw) => {
-      const player = room.players.get(user.id);
-      if (!player || player.socket !== socket) return; // superseded connection
-      if (raw.length > MAX_MESSAGE_BYTES) {
-        send(socket, { t: 'error', error: 'message_too_large' });
+    switch (msg.t) {
+      case 'input': {
+        const turn = Number(msg.turn);
+        // A turn already broadcast cannot be amended — accepting late input
+        // would mean some clients had simulated it and others had not.
+        if (!Number.isInteger(turn) || turn <= room.released) {
+          send(socket, { t: 'error', error: 'turn_already_released', turn });
+          return;
+        }
+        if (!room.pending.has(turn)) room.pending.set(turn, new Map());
+        // teamId is attached at release time from the roster, so anything the
+        // client claims about ownership here is ignored by construction.
+        room.pending.get(turn).set(user.id, Array.isArray(msg.inputs) ? msg.inputs : []);
+        releaseReadyTurns(room);
         return;
       }
-      player.lastSeen = Date.now();
-
-      let msg;
-      try {
-        msg = JSON.parse(raw.toString());
-      } catch {
-        send(socket, { t: 'error', error: 'malformed_message' });
+      case 'hash': {
+        // Desync detection (4D). Recorded per turn; a disagreement is
+        // reported to everyone so the host can offer a resync.
+        room.hashes.set(user.id, { turn: msg.turn, hash: msg.hash });
+        const seen = new Map();
+        for (const [uid, h] of room.hashes) {
+          if (h.turn !== msg.turn) continue;
+          seen.set(h.hash, [...(seen.get(h.hash) ?? []), uid]);
+        }
+        if (seen.size > 1) {
+          broadcast(room, {
+            t: 'desync',
+            turn: msg.turn,
+            groups: [...seen.entries()].map(([hash, users]) => ({ hash, users })),
+          });
+        }
         return;
       }
-
-      switch (msg.t) {
-        case 'input': {
-          const turn = Number(msg.turn);
-          // A turn already broadcast cannot be amended — accepting late input
-          // would mean some clients had simulated it and others had not.
-          if (!Number.isInteger(turn) || turn <= room.released) {
-            send(socket, { t: 'error', error: 'turn_already_released', turn });
-            return;
-          }
-          if (!room.pending.has(turn)) room.pending.set(turn, new Map());
-          // teamId is attached at release time from the roster, so anything the
-          // client claims about ownership here is ignored by construction.
-          room.pending.get(turn).set(user.id, Array.isArray(msg.inputs) ? msg.inputs : []);
-          releaseReadyTurns(room);
-          return;
-        }
-        case 'hash': {
-          // Desync detection (4D). Recorded per turn; a disagreement is
-          // reported to everyone so the host can offer a resync.
-          room.hashes.set(user.id, { turn: msg.turn, hash: msg.hash });
-          const seen = new Map();
-          for (const [uid, h] of room.hashes) {
-            if (h.turn !== msg.turn) continue;
-            seen.set(h.hash, [...(seen.get(h.hash) ?? []), uid]);
-          }
-          if (seen.size > 1) {
-            broadcast(room, {
-              t: 'desync',
-              turn: msg.turn,
-              groups: [...seen.entries()].map(([hash, users]) => ({ hash, users })),
-            });
-          }
-          return;
-        }
-        case 'snapshot': {
-          // The host answering a resync request: relayed verbatim to the one
-          // client that needs it. The server never inspects or stores it.
-          const target = room.players.get(msg.toUserId);
-          if (target) send(target.socket, { t: 'snapshot', payload: msg.payload, turn: msg.turn });
-          return;
-        }
-        case 'ping':
-          send(socket, { t: 'pong', at: msg.at });
-          return;
-        default:
-          send(socket, { t: 'error', error: 'unknown_message_type' });
+      case 'snapshot': {
+        // The host answering a resync request: relayed verbatim to the one
+        // client that needs it. The server never inspects or stores it.
+        const target = room.players.get(msg.toUserId);
+        if (target) send(target.socket, { t: 'snapshot', payload: msg.payload, turn: msg.turn });
+        return;
       }
-    });
+      case 'ping':
+        send(socket, { t: 'pong', at: msg.at });
+        return;
+      default:
+        send(socket, { t: 'error', error: 'unknown_message_type' });
+    }
+  });
 
-    socket.on('close', () => {
-      const current = room.players.get(user.id);
-      // Only clear the seat if this socket still owns it — otherwise a
-      // just-replaced connection's close event would evict its replacement.
-      if (current?.socket !== socket) return;
-      room.players.delete(user.id);
-      broadcast(room, { t: 'playerLeft', userId: user.id, teamId, reason: 'closed' });
-      if (room.players.size === 0) rooms.delete(matchId);
-      else releaseReadyTurns(room); // they may have been the turn we waited on
-    });
+  socket.on('close', () => {
+    const current = room.players.get(user.id);
+    // Only clear the seat if this socket still owns it — otherwise a
+    // just-replaced connection's close event would evict its replacement.
+    if (current?.socket !== socket) return;
+    room.players.delete(user.id);
+    broadcast(room, { t: 'playerLeft', userId: user.id, teamId, reason: 'closed' });
+    if (room.players.size === 0) rooms.delete(matchId);
+    else releaseReadyTurns(room); // they may have been the turn we waited on
   });
 }

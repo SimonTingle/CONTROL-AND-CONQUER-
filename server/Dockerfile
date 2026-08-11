@@ -10,6 +10,14 @@
 # The /health and /health/ready routes exist for manual checks and for a
 # separate non-CapRover Swarm deploy — just don't wire them up as a
 # Docker HEALTHCHECK when CapRover is the deploy target.
+#
+# ALSO IMPORTANT: this app terminates WebSockets (/ws/match/:id, the lockstep
+# match relay). CapRover's nginx does not forward the Upgrade/Connection
+# headers unless "Websocket Support" is ticked in the app's HTTP Settings —
+# without it every connection attempt arrives as an ordinary GET and the route
+# answers 426 (it used to answer a bare, bodyless 404, which is why this note
+# exists). Nothing else about the app misbehaves: REST, auth and saves all work
+# normally, so the only symptom is that online matches never connect.
 
 FROM node:20-alpine
 
