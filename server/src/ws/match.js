@@ -153,7 +153,7 @@ export async function matchSocket(app) {
 
     const matchId = req.params.id;
     const { rows } = await query(
-      `select m.seed, m.status, p.team_id
+      `select m.seed, m.status, m.host_user_id, p.team_id
          from matches m
          join match_players p on p.match_id = m.id and p.user_id = $2
         where m.id = $1`,
@@ -166,7 +166,7 @@ export async function matchSocket(app) {
       socket.close(4003, 'not a member');
       return;
     }
-    const { seed, team_id: teamId } = rows[0];
+    const { seed, team_id: teamId, host_user_id: hostUserId } = rows[0];
     const room = roomFor(matchId, Number(seed));
 
     // A second socket for the same user replaces the first — a reload should
@@ -187,6 +187,12 @@ export async function matchSocket(app) {
       matchId,
       seed: room.seed,
       teamId,
+      userId: user.id,
+      // Who supplies the snapshot when someone diverges. The host is simply the
+      // designated source of truth for a resync — it has no other authority,
+      // and does not simulate on anyone else's behalf.
+      hostUserId,
+      isHost: user.id === hostUserId,
       ticksPerTurn: TICKS_PER_TURN,
       inputDelayTurns: INPUT_DELAY_TURNS,
       // Where the match already is, so a reconnecting client knows it must

@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 import { execSync } from 'node:child_process';
 
 /**
@@ -19,7 +19,13 @@ function commitHash() {
   }
 }
 
-export default defineConfig({
+export default defineConfig(({ mode }) => {
+  // loadEnv rather than process.env alone: Vite does not put .env values on
+  // process.env, so without this the only way to point a dev build at a local
+  // API server is to prefix every command with it. `.env` is gitignored (the
+  // committed template is server/.env.example), so this stays a local override.
+  const env = { ...loadEnv(mode, process.cwd(), ''), ...process.env };
+  return {
   define: {
     __APP_VERSION__: JSON.stringify(commitHash()),
     __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
@@ -30,6 +36,7 @@ export default defineConfig({
     // Empty string is the deliberate default and means "no backend": the game
     // must stay fully playable — sandbox, AI matches, local saves — without
     // one. Only cloud saves and online multiplayer need this set.
-    __API_URL__: JSON.stringify(process.env.VITE_API_URL ?? ''),
+    __API_URL__: JSON.stringify(env.VITE_API_URL ?? ''),
   },
+  };
 });

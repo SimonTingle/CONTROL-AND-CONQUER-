@@ -1,8 +1,8 @@
 /**
  * Landing screen, shown before anything else. Routes to one of the game's
- * three modes. "Multiplayer Online" has no destination yet — it swaps the
- * grid for a "Coming soon" message in place rather than firing onChoose, so
- * there is nothing downstream that has to pretend that mode works.
+ * three modes — all of which now have somewhere to go; Multiplayer Online
+ * routes to the lobby, which handles "no backend" and "not signed in" itself
+ * rather than the portal having to know about either.
  */
 export const PORTAL_MODES = [
   {
@@ -25,8 +25,7 @@ export const PORTAL_MODES = [
 export class PortalScreen {
   /**
    * @param {(modeId: string) => void} onChoose called once, with the picked
-   *   mode's id — never called for 'multiplayer-online', which has no
-   *   destination to route to yet.
+   *   mode's id.
    * @param {object} [account] account UI wiring, all optional. Omitting it
    *   (or leaving `isConfigured` false) renders the portal exactly as before
    *   — this is the first screen every player sees, so a backend-less build
@@ -115,10 +114,6 @@ export class PortalScreen {
 
   choose(modeId) {
     if (!this.open) return;
-    if (modeId === 'multiplayer-online') {
-      this.showComingSoon();
-      return;
-    }
     this.open = false;
     this.root.classList.add('hidden');
     this.onChoose?.(modeId);
