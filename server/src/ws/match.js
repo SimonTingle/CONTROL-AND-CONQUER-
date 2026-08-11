@@ -57,6 +57,11 @@ const DROP_AFTER_MS = 15000;
  * must not be able to hang everyone else indefinitely.
  */
 const START_GRACE_MS = Number(process.env.MATCH_START_GRACE_MS ?? 30000);
+/**
+ * How many turns of state digests to keep. A bucket is only needed until every
+ * client has reported that turn; a few turns of slack covers ordinary jitter.
+ */
+const HASH_HISTORY_TURNS = 40;
 /** Guard against a client flooding the relay; a turn's input is tiny. */
 const MAX_MESSAGE_BYTES = 64 * 1024;
 
@@ -89,7 +94,7 @@ function roomFor(matchId, seed, expectedPlayers) {
       pending: new Map(),
       /** Highest turn already broadcast. Clients may not run past it. */
       released: -1,
-      /** Latest state hash reported per user, for desync detection (4D). */
+      /** turn -> Map(userId -> hash), for desync detection (4D). */
       hashes: new Map(),
     };
     rooms.set(matchId, room);
@@ -336,20 +341,45 @@ async function handleMatchSocket(socket, req) {
         return;
       }
       case 'hash': {
-        // Desync detection (4D). Recorded per turn; a disagreement is
-        // reported to everyone so the host can offer a resync.
-        room.hashes.set(user.id, { turn: msg.turn, hash: msg.hash });
-        const seen = new Map();
-        for (const [uid, h] of room.hashes) {
-          if (h.turn !== msg.turn) continue;
-          seen.set(h.hash, [...(seen.get(h.hash) ?? []), uid]);
+        const turn = Number(msg.turn);
+        if (!Number.isInteger(turn)) return;
+
+        // Bucketed by turn, not by user. Keeping only each user's latest hash
+        // (as this did) means a peer reporting turn 10 then 20 before the other
+        // reports turn 10 destroys the only value the comparison needed — the
+        // set ends up with one member, nothing is compared, and the match is
+        // declared healthy on the strength of a check that never ran.
+        let bucket = room.hashes.get(turn);
+        if (!bucket) {
+          bucket = new Map();
+          room.hashes.set(turn, bucket);
         }
-        if (seen.size > 1) {
-          broadcast(room, {
-            t: 'desync',
-            turn: msg.turn,
-            groups: [...seen.entries()].map(([hash, users]) => ({ hash, users })),
-          });
+        bucket.set(user.id, msg.hash);
+
+        // A single report proves nothing; only compare once two clients have
+        // described the same simulated moment.
+        if (bucket.size >= 2) {
+          const groups = new Map();
+          for (const [uid, hash] of bucket) {
+            groups.set(hash, [...(groups.get(hash) ?? []), uid]);
+          }
+          if (groups.size > 1) {
+            broadcast(room, {
+              t: 'desync',
+              turn,
+              groups: [...groups.entries()].map(([hash, users]) => ({ hash, users })),
+            });
+          } else {
+            // Say so explicitly. "No desync reported" and "verified agreement"
+            // are different claims and the readout must not conflate them.
+            broadcast(room, { t: 'agreed', turn, peers: bucket.size });
+          }
+        }
+
+        // Buckets are only useful until compared; drop anything well behind the
+        // newest turn so a long match cannot grow this without bound.
+        for (const t of room.hashes.keys()) {
+          if (t < turn - HASH_HISTORY_TURNS) room.hashes.delete(t);
         }
         return;
       }

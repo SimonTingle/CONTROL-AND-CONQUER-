@@ -1587,6 +1587,14 @@ async function startOnlineMatch(matchId, difficulty) {
       );
     },
     onTurn: (turn, inputs) => match?.session.receiveTurn(turn, inputs),
+    onAgreed: (msg) => {
+      if (!match) return;
+      match.agreedTurn = msg.turn;
+      match.agreedPeers = msg.peers;
+      // A later verified agreement supersedes an earlier disagreement: the
+      // resync worked, or the drift was transient.
+      if (match.desyncTurn != null && msg.turn > match.desyncTurn) match.desyncTurn = null;
+    },
     onDesync: (msg) => {
       // The server's comparison is the authority on agreement; every client
       // shows it, while only the host acts on it.
@@ -1652,6 +1660,10 @@ async function startOnlineMatch(matchId, difficulty) {
     checkpoint: null,
     /** Turn the server last reported clients disagreeing, or null. */
     desyncTurn: null,
+    /** Last turn the server actually COMPARED and found agreement. */
+    agreedTurn: null,
+    /** How many clients that comparison covered. */
+    agreedPeers: 0,
     /** Set by the host when it owes somebody a snapshot. */
     resyncAtTurn: null,
     resyncTargets: [],
@@ -2191,6 +2203,8 @@ function renderTick(dt) {
       connected: match.client.connected,
       checkpoint: match.checkpoint,
       desyncTurn: match.desyncTurn,
+      agreedTurn: match.agreedTurn,
+      agreedPeers: match.agreedPeers,
       vehicles: vehicles.instances.filter((v) => !v.dead).length,
       structures: structures.instances.filter((x) => !x.dead).length,
       credits: game.teams.map((t) => Math.round(t.credits)),
