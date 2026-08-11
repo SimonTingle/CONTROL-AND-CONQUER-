@@ -32,6 +32,7 @@ import { AiCommander } from './vehicles/aiCommander.js';
 import { CombatController } from './vehicles/combatController.js';
 import { MatchEndScreen } from './ui/matchEndScreen.js';
 import { Terraform } from './core/terraform.js';
+import { DEFAULT_TERRAIN } from './terrain/heightmap.js';
 import { SIM_DT, simClock, advanceSimClock, resetSimClock } from './core/simClock.js';
 import { hashState } from './core/stateHash.js';
 import { Intent, IntentQueue, applyIntent } from './net/intents.js';
@@ -1609,7 +1610,15 @@ async function startOnlineMatch(matchId, difficulty) {
   game.aiMatch = { teamCount: totalTeams - 1, buildDelaySeconds: 5 };
 
   // Same island for everyone, from the seed the lobby fixed at creation.
-  world.regenerate({ ...heightmap.params, seed: welcome.seed });
+  // Defaults plus the shared seed — deliberately NOT this client's current
+  // params. Spreading `heightmap.params` here meant the island was built from
+  // whatever world sliders each player happened to have set locally, so two
+  // clients could generate entirely different terrain from the same seed. Every
+  // spawn point is derived from the heightmap, so that diverges the match from
+  // its first tick: each player sees their own island with the other team's
+  // vehicles at coordinates that mean nothing on it (a base station left
+  // hovering over the wrong ground is the classic tell).
+  world.regenerate({ ...DEFAULT_TERRAIN, seed: welcome.seed });
   beginMatch(difficulty);
   // Human seats are the low team ids (join hands out the lowest free one), so
   // this split is the same on every client without needing to be communicated.
