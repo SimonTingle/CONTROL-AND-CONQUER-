@@ -1777,10 +1777,13 @@ function deployStartingForces() {
     // to aim that doesn't depend on the base station surviving.
     team.homePoint = { x: point.x, z: point.z };
 
-    // findEdgeSpawnPointAtAngle faces a vehicle back toward the map centre,
-    // which for the base station reads as facing out to sea — the same flip
-    // the picker's own base spawn applies.
-    vehicles.spawn(baseDef, point, heading + Math.PI, { activate: false, teamId: team.id });
+    // findEdgeSpawnPointAtAngle already returns a heading pointing from the
+    // coast back toward the island centre (`atan2(-dirZ, -dirX)`), so it is
+    // used as-is. It previously had Math.PI added, borrowed from the vehicle
+    // picker — but the picker spawns the base *beside another vehicle* via
+    // findSpawnPointNear, which faces it back at that vehicle and does need
+    // flipping. Applying the same flip here pointed every team out to sea.
+    vehicles.spawn(baseDef, point, heading, { activate: false, teamId: team.id });
 
     const beside = findSpawnPointNear(heightmap, point, {
       minRadius: baseDef.dims.hullLength / 2 + scoutDef.dims.hullLength / 2 + 4,
@@ -1788,7 +1791,10 @@ function deployStartingForces() {
       camera,
     });
     beside.point.y += 0.05;
-    vehicles.spawn(scoutDef, beside.point, beside.heading, {
+    // `beside.heading` faces the scout back at the base it was placed next to,
+    // which on a coastal spawn means facing the water as well. The whole team
+    // should open facing the island it has to cross.
+    vehicles.spawn(scoutDef, beside.point, heading, {
       // This client's own team, not "any human team". Online every player's
       // team is human, so activating on isHuman handed each client whichever
       // human scout spawned last — an enemy unit, whose orders the intent
