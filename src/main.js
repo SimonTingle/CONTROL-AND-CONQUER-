@@ -39,6 +39,7 @@ import { Intent, IntentQueue, applyIntent } from './net/intents.js';
 import { LockstepSession } from './net/lockstep.js';
 import { MatchClient } from './net/matchClient.js';
 import { LobbyScreen } from './ui/lobbyScreen.js';
+import { updateNetDebug, hideNetDebug } from './ui/netDebug.js';
 import { StructureController } from './structures/structures.js';
 import { Entities } from './core/entities.js';
 import { NavGrid } from './core/navGrid.js';
@@ -1558,6 +1559,7 @@ function endOnlineMatch(reason) {
   if (!match) return;
   match.client.close();
   match = null;
+  hideNetDebug();
   if (reason) showToast(reason, 5000);
 }
 
@@ -1585,7 +1587,12 @@ async function startOnlineMatch(matchId, difficulty) {
       );
     },
     onTurn: (turn, inputs) => match?.session.receiveTurn(turn, inputs),
-    onDesync: (msg) => handleDesync(msg),
+    onDesync: (msg) => {
+      // The server's comparison is the authority on agreement; every client
+      // shows it, while only the host acts on it.
+      if (match) match.desyncTurn = msg.turn;
+      handleDesync(msg);
+    },
     onSnapshot: (msg) => {
       // Buffered, not applied here: it has to land exactly at its turn
       // boundary, which is the one moment both machines agree on.
@@ -1641,6 +1648,10 @@ async function startOnlineMatch(matchId, difficulty) {
     expectedPlayers: welcome.expectedPlayers,
     /** Flipped by the server's `begin`; until then the sim does not advance. */
     begun: false,
+    /** Last turn-aligned state digest, shown in the sync readout. */
+    checkpoint: null,
+    /** Turn the server last reported clients disagreeing, or null. */
+    desyncTurn: null,
     /** Set by the host when it owes somebody a snapshot. */
     resyncAtTurn: null,
     resyncTargets: [],
@@ -1679,7 +1690,11 @@ function onMatchTurn(inputs, turn) {
   }
 
   if (turn % HASH_EVERY_TURNS === 0) {
-    match.client.sendHash(turn, hashState({ vehicles, structures, game }, simClock.tick));
+    const hash = hashState({ vehicles, structures, game }, simClock.tick);
+    // Kept as well as sent: the on-screen readout shows this turn-aligned
+    // value so two devices are always comparing the same simulated moment.
+    match.checkpoint = { turn, hash: hash.split(':')[1] ?? hash };
+    match.client.sendHash(turn, hash);
   }
 
   // teamId is stamped by the server from the match roster, so this is the
@@ -2146,6 +2161,24 @@ function renderTick(dt) {
       controls.update();
     }
   });
+
+  if (match) {
+    updateNetDebug({
+      seed: heightmap.params.seed,
+      teamId: game.localTeamId,
+      turn: match.session.turn,
+      simTick: simClock.tick,
+      stalled: match.session.stalled,
+      begun: match.begun,
+      players: match.expectedPlayers,
+      connected: match.client.connected,
+      checkpoint: match.checkpoint,
+      desyncTurn: match.desyncTurn,
+      vehicles: vehicles.instances.filter((v) => !v.dead).length,
+      structures: structures.instances.filter((x) => !x.dead).length,
+      credits: game.teams.map((t) => Math.round(t.credits)),
+    });
+  }
 
   // A stalled match is normal and temporary, but an unexplained frozen world is
   // not. Re-toasting on a slow cadence keeps the message up for as long as the
