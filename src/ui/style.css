@@ -836,7 +836,9 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
 
 /* ---- portal (landing screen) ---- */
 
-#portal {
+/* The lobby is the same kind of overlay as the portal and deliberately shares
+   its chrome — one place to change how a full-screen screen looks. */
+#portal, #lobby {
   position: fixed;
   inset: 0;
   z-index: 32; /* above the difficulty/AI-difficulty screens it routes to */
@@ -849,7 +851,7 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
   transition: opacity 0.35s ease;
 }
 
-#portal.hidden { opacity: 0; pointer-events: none; }
+#portal.hidden, #lobby.hidden { opacity: 0; pointer-events: none; }
 
 .portal-panel {
   width: 100%;

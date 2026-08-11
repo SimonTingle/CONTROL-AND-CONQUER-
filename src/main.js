@@ -35,6 +35,9 @@ import { Terraform } from './core/terraform.js';
 import { SIM_DT, simClock, advanceSimClock, resetSimClock } from './core/simClock.js';
 import { hashState } from './core/stateHash.js';
 import { Intent, IntentQueue, applyIntent } from './net/intents.js';
+import { LockstepSession } from './net/lockstep.js';
+import { MatchClient } from './net/matchClient.js';
+import { LobbyScreen } from './ui/lobbyScreen.js';
 import { StructureController } from './structures/structures.js';
 import { Entities } from './core/entities.js';
 import { NavGrid } from './core/navGrid.js';
@@ -795,11 +798,15 @@ addEventListener('keydown', (e) => {
 });
 addEventListener('keyup', (e) => {
   const k = e.key.toLowerCase();
-  if (k in driveKeys) driveKeys[k] = false;
+  if (k in driveKeys) {
+    driveKeys[k] = false;
+    syncDriveIntent();
+  }
 });
 // Keys held while the window loses focus would otherwise stick down.
 addEventListener('blur', () => {
   for (const k in driveKeys) driveKeys[k] = false;
+  syncDriveIntent();
 });
 
 function isTextInputFocused() {
@@ -823,6 +830,10 @@ function submitIntent(intent) {
 }
 
 function drainIntents() {
+  // In a match the queue belongs to the lockstep session, which drains it when
+  // it sends. Applying locally as well would execute every order twice on the
+  // issuing client and once everywhere else.
+  if (match) return;
   const batch = intentQueue.drain();
   if (!batch.length) return;
   // Local play passes teamId null: there is one human team, and the ownership
@@ -830,10 +841,29 @@ function drainIntents() {
   for (const intent of batch) applyIntent(intent, commandContext, null);
 }
 
-function applyDriveInput() {
+/**
+ * Emit a drive intent, but only when the driving actually changed.
+ *
+ * Drive state is latched on the vehicle rather than re-sent every step, so
+ * holding W is two intents (press, release) instead of sixty a second. That is
+ * what keeps the wire cost of continuous input negligible, and it is why the
+ * *change* has to be detected here rather than at the key handler alone — the
+ * player switching vehicle changes who is being driven without any key moving.
+ */
+let lastDrive = { instanceId: null, throttle: 0, steer: 0 };
+
+function syncDriveIntent() {
+  const active = vehicles.active;
+  const id = active && !active.dead ? active.id : null;
   const throttle = (driveKeys.w ? 1 : 0) - (driveKeys.s ? 1 : 0);
   const steer = (driveKeys.d ? 1 : 0) - (driveKeys.a ? 1 : 0);
-  vehicles.driveActive(throttle, steer);
+  if (id === lastDrive.instanceId && throttle === lastDrive.throttle && steer === lastDrive.steer) {
+    return;
+  }
+  lastDrive = { instanceId: id, throttle, steer };
+  // setActive already zeroes the vehicle being left behind, so a handover only
+  // needs the incoming vehicle told what the keys are currently doing.
+  if (id !== null) submitIntent(Intent.drive(id, throttle, steer));
 }
 
 /**
@@ -909,8 +939,16 @@ const game = {
   // Sandbox is a one-team match, so this is never empty and nothing has to
   // special-case "no teams". Rebuilt by beginMatch once the mode is known.
   teams: createTeams(0),
+  /**
+   * Which team this client drives.
+   *
+   * Always 0 in sandbox and against AI, but online the server assigns a seat —
+   * the second player into a lobby is team 1, and everything that used to
+   * assume "the human is team 0" has to ask this instead.
+   */
+  localTeamId: PLAYER_TEAM_ID,
   get playerTeam() {
-    return this.teams[PLAYER_TEAM_ID];
+    return this.teams[this.localTeamId] ?? this.teams[PLAYER_TEAM_ID];
   },
   /**
    * The owning team of any vehicle, structure or pad.
@@ -921,11 +959,11 @@ const game = {
    * cannot happen.
    */
   teamOf(entity) {
-    return this.teams[entity?.teamId ?? PLAYER_TEAM_ID] ?? this.playerTeam;
+    return this.teams[entity?.teamId ?? this.localTeamId] ?? this.playerTeam;
   },
   /** The fog mask a team reveals into. */
   fogFor(teamId) {
-    return this.teams[teamId ?? PLAYER_TEAM_ID]?.fog ?? this.playerTeam.fog;
+    return this.teams[teamId ?? this.localTeamId]?.fog ?? this.playerTeam.fog;
   },
   /**
    * The full world state — terrain params, pads, teams, every vehicle and
@@ -1490,6 +1528,150 @@ function updateProgression(explored) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Online match session
+// ---------------------------------------------------------------------------
+
+/** Turns between state-hash reports. 10 turns = ~1s at 10 turns/sec. */
+const HASH_EVERY_TURNS = 10;
+/**
+ * How far ahead the host schedules a resync snapshot. It has to serialise at a
+ * turn the diverged client has not reached yet — a snapshot of a turn already
+ * simulated cannot be applied without replaying input the client has consumed
+ * and the server will not resend.
+ */
+const RESYNC_LEAD_TURNS = 3;
+
+/** The live match, or null in single player. */
+let match = null;
+
+function endOnlineMatch(reason) {
+  if (!match) return;
+  match.client.close();
+  match = null;
+  if (reason) showToast(reason, 5000);
+}
+
+/**
+ * Join a match and hand the simulation's clock to the lockstep session.
+ *
+ * Everything about the world is derived, not received: the seed comes from the
+ * lobby row, terrain regenerates from it, and both clients deploy identical
+ * starting forces because `deployStartingForces` is itself deterministic.
+ */
+async function startOnlineMatch(matchId, difficulty) {
+  const { match: info } = await api.getMatch(matchId);
+  const client = new MatchClient(matchId, {
+    onTurn: (turn, inputs) => match?.session.receiveTurn(turn, inputs),
+    onDesync: (msg) => handleDesync(msg),
+    onSnapshot: (msg) => {
+      // Buffered, not applied here: it has to land exactly at its turn
+      // boundary, which is the one moment both machines agree on.
+      if (match) match.pendingSnapshot = msg;
+    },
+    onPlayerLeft: (msg) => {
+      // Their team carries on under AI rather than freezing — the same
+      // commander the AI-match mode already uses, so nothing new to build.
+      showToast(`${msg.teamId === game.localTeamId ? 'You' : 'A player'} left the match`, 4000);
+    },
+    onClose: () => endOnlineMatch('Disconnected from the match.'),
+  });
+
+  const welcome = await client.connect();
+
+  game.mode = 'multiplayer-online';
+  game.localTeamId = welcome.teamId;
+  // Team count comes from the lobby row rather than from who happens to be
+  // connected: a client that joins the socket late must still build the same
+  // number of teams as everyone else, or it diverges before it starts.
+  const totalTeams = info.maxPlayers + info.aiCount;
+  game.aiMatch = { teamCount: totalTeams - 1, buildDelaySeconds: 5 };
+
+  // Same island for everyone, from the seed the lobby fixed at creation.
+  world.regenerate({ ...heightmap.params, seed: welcome.seed });
+  beginMatch(difficulty);
+  // Human seats are the low team ids (join hands out the lowest free one), so
+  // this split is the same on every client without needing to be communicated.
+  for (const team of game.teams) team.isHuman = team.id < info.maxPlayers;
+  game.aiCommanders = game.aiCommanders.filter((c) => !c.team.isHuman);
+
+  const session = new LockstepSession({
+    ticksPerTurn: welcome.ticksPerTurn,
+    inputDelayTurns: welcome.inputDelayTurns,
+    queue: intentQueue,
+    send: (turn, inputs) => client.sendInput(turn, inputs),
+    onTurn: (inputs, turn) => onMatchTurn(inputs, turn),
+  });
+
+  match = {
+    client,
+    session,
+    isHost: welcome.isHost,
+    userId: welcome.userId,
+    /** Set by the host when it owes somebody a snapshot. */
+    resyncAtTurn: null,
+    resyncTargets: [],
+    pendingSnapshot: null,
+  };
+  session.start();
+  showToast(`Match joined — you are team ${welcome.teamId}`, 4000);
+  return welcome;
+}
+
+/**
+ * The start of one turn: the single point where every client is provably at the
+ * same simulated instant. Hashing, resync and input application all happen here
+ * for exactly that reason.
+ */
+function onMatchTurn(inputs, turn) {
+  // A snapshot scheduled for this turn replaces local state before anything
+  // else touches it, so the turn's inputs then apply to the corrected world.
+  if (match.pendingSnapshot?.turn === turn) {
+    deserialize(snapshotContext(), match.pendingSnapshot.payload);
+    match.pendingSnapshot = null;
+    showToast('Resynchronised with the host.', 4000);
+  }
+
+  // Host side of the same handshake: serialise at the turn it promised.
+  if (match.isHost && match.resyncAtTurn === turn) {
+    const payload = serialize(snapshotContext());
+    for (const userId of match.resyncTargets) match.client.sendSnapshot(userId, turn, payload);
+    match.resyncAtTurn = null;
+    match.resyncTargets = [];
+  }
+
+  if (turn % HASH_EVERY_TURNS === 0) {
+    match.client.sendHash(turn, hashState({ vehicles, structures, game }, simClock.tick));
+  }
+
+  // teamId is stamped by the server from the match roster, so this is the
+  // ownership the applier enforces — not anything the sender claimed.
+  for (const intent of inputs) applyIntent(intent, commandContext, intent.teamId);
+}
+
+/**
+ * Somebody's simulation has drifted. Only the host acts: it schedules a
+ * snapshot a few turns out and sends it to every client outside its own group.
+ */
+function handleDesync(msg) {
+  if (!match?.isHost || match.resyncAtTurn !== null) return;
+  const mine = msg.groups.find((g) => g.users.includes(match.userId));
+  const targets = msg.groups.filter((g) => g !== mine).flatMap((g) => g.users);
+  if (!targets.length) return;
+  match.resyncAtTurn = match.session.turn + RESYNC_LEAD_TURNS;
+  match.resyncTargets = targets;
+  console.warn(`desync at turn ${msg.turn}; resyncing ${targets.length} client(s)`);
+}
+
+/**
+ * Is this a multi-team match on a shared island (versus AI, versus people, or
+ * both)? Those all open the same way — every team on the board at once — as
+ * opposed to sandbox's explore-to-unlock pacing.
+ */
+function isSkirmish() {
+  return game.mode === 'multiplayer-ai' || game.mode === 'multiplayer-online';
+}
+
 /** Shared by every mode's difficulty pick — only the difficulty source and
  * any per-mode extras (like the AI match config) differ. */
 function beginMatch(difficulty) {
@@ -1504,17 +1686,21 @@ function beginMatch(difficulty) {
   // The player keeps the mask the world already built (the shaders point at
   // its texture and must not be re-pointed). Every AI team gets a CPU-only
   // one — they scout for themselves and nothing draws their view.
+  // The rendered mask belongs to *this* client's team — online that may not be
+  // team 0. Everyone else gets a CPU-only mask: they scout for themselves and
+  // nothing draws their view.
   game.playerTeam.fog = world.fog;
   world.fogMasks.length = 1;
   for (const team of game.teams) {
-    if (team.isHuman) continue;
+    if (team === game.playerTeam) continue;
     team.fog = new FogMask(world.fogTerrain);
     world.fogMasks.push(team.fog);
   }
+  vehiclePicker.playerTeamId = game.localTeamId;
   // Sandbox keeps the explore-to-unlock pacing untouched. An AI match starts
   // every team on equal footing — making the human scout first while AI
   // teams build from tick one would not be a fair opening.
-  if (game.mode === 'multiplayer-ai') {
+  if (isSkirmish()) {
     game.unlocked = true;
     for (const def of VEHICLE_CATALOG) {
       if (def.unlock === 'exploration') vehiclePicker.setUnlocked(def.id, true);
@@ -1538,7 +1724,7 @@ function beginMatch(difficulty) {
   for (const def of VEHICLE_CATALOG) vehiclePicker.applyLockState(def.id);
   // The drawer is only the opening move in sandbox; an AI match has already
   // put everyone on the board.
-  if (game.mode !== 'multiplayer-ai') vehiclePicker.setOpen(true);
+  if (!isSkirmish()) vehiclePicker.setOpen(true);
 }
 
 /**
@@ -1627,10 +1813,32 @@ game.signOut = async () => {
   game.portalScreen?.refreshAccount();
 };
 
+game.lobbyScreen = new LobbyScreen({
+  api,
+  // The lobby hands back a match id once it is running; from here the world is
+  // built entirely from the seed on that match row.
+  onStart: (matchId) => {
+    startOnlineMatch(matchId, DIFFICULTIES.find((d) => d.id === 'normal') ?? DIFFICULTIES[0])
+      .catch((err) => {
+        console.error('could not join match', err);
+        showToast(`Could not join the match: ${err.message}`, 6000);
+        game.portalScreen.buildGrid();
+        game.portalScreen.open = true;
+        game.portalScreen.root.classList.remove('hidden');
+      });
+  },
+  onBack: () => {
+    game.portalScreen.buildGrid();
+    game.portalScreen.open = true;
+    game.portalScreen.root.classList.remove('hidden');
+  },
+});
+
 game.portalScreen = new PortalScreen(
   (modeId) => {
     if (modeId === 'sandbox') game.difficultyScreen.show();
     else if (modeId === 'multiplayer-ai') game.aiDifficultyScreen.show();
+    else if (modeId === 'multiplayer-online') game.lobbyScreen.show();
   },
   {
     isConfigured: api.isConfigured,
@@ -1742,8 +1950,6 @@ function simTick(dt) {
   // whenever they like; a simulation that must match another machine's cannot
   // be at the mercy of that.
   drainIntents();
-  // Vehicles move first so the camera frames where they actually ended up.
-  applyDriveInput();
   p.time('world', () => world.update(dt, camera, p));
   // Between the input and the fleet: the AI must see this frame's keys before
   // deciding (so it never issues an order the player just cancelled) and set
@@ -2002,10 +2208,19 @@ function animate() {
 
   let steps = 0;
   while (simAccumulator >= SIM_DT && steps < MAX_CATCHUP_STEPS) {
+    // In a match the session decides when a step is allowed: if the inputs for
+    // the current turn have not arrived, the simulation waits rather than
+    // running ahead and reconciling. Rendering continues either way, so a stall
+    // reads as the world pausing, not as the game freezing.
+    if (match && !match.session.beginStep()) break;
     simAccumulator -= SIM_DT;
     steps++;
     simTick(SIM_DT);
+    match?.session.endStep();
   }
+  // Time spent stalled is not a debt to repay in a burst — the match paused for
+  // everyone, so drop the backlog rather than fast-forwarding out of it.
+  if (match?.session.stalled) simAccumulator = Math.min(simAccumulator, SIM_DT);
   // If we hit the cap the machine cannot keep up; keeping the backlog would
   // make every subsequent frame run the cap too and never recover (the classic
   // spiral of death). Drop the debt instead and let the match run slow.
@@ -2059,6 +2274,42 @@ window.__hashState = () => hashState({ vehicles, structures, game }, simClock.ti
  * scripted determinism run needs.
  */
 window.__intent = { submit: submitIntent, Intent };
+
+/**
+ * The live match, for debugging a stall or a desync from the console.
+ *
+ * `stalled` is the field to look at first: a frozen world in a match is almost
+ * always "waiting for a peer's input", which looks identical to a hang from the
+ * outside and is completely different in cause.
+ */
+window.__match = () => (match ? {
+  turn: match.session.turn,
+  tickInTurn: match.session.tickInTurn,
+  stalled: match.session.stalled,
+  stallSteps: match.session.stallSteps,
+  bufferedTurns: [...match.session.received.keys()],
+  sentThrough: match.session.sentThrough,
+  isHost: match.isHost,
+  connected: match.client.connected,
+  simTick: simClock.tick,
+} : null);
+
+/**
+ * Drive a networked match forward without requestAnimationFrame — the headless
+ * test pane suspends rAF, so this is the only way to exercise the real lockstep
+ * gating there. Mirrors animate()'s loop exactly.
+ */
+window.__stepMatch = (steps = 60) => {
+  if (!match) return { error: 'not in a match' };
+  let ran = 0;
+  for (let i = 0; i < steps; i++) {
+    if (!match.session.beginStep()) break;
+    simTick(SIM_DT);
+    match.session.endStep();
+    ran++;
+  }
+  return { ran, ...window.__match() };
+};
 
 window.__determinismCheck = ({ ticks = 900, sampleEvery = 60 } = {}) => {
   if (!game.teams?.length) return { ok: false, error: 'Start a match first.' };

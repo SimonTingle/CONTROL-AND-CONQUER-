@@ -96,6 +96,17 @@ export const api = {
   // Cloud saves — each throws ApiError on failure; callers decide how to
   // surface that, since "no backend" and "not signed in" and "save too big"
   // all want different messages.
+  // Multiplayer lobbies. The match itself runs over a websocket
+  // (net/matchClient.js); these only get a player in and out of a lobby.
+  listMatches: () => request('/matches').then((r) => r.matches),
+  getMatch: (id) => request(`/matches/${id}`),
+  createMatch: (body) => request('/matches', { method: 'POST', body }).then((r) => r.match),
+  // No body: the server assigns the team, so there is nothing for a client to
+  // ask for. Re-joining returns the seat already held rather than erroring.
+  joinMatch: (id) => request(`/matches/${id}/join`, { method: 'POST' }),
+  startMatch: (id) => request(`/matches/${id}/start`, { method: 'POST' }).then((r) => r.match),
+  leaveMatch: (id) => request(`/matches/${id}/leave`, { method: 'POST' }),
+
   listSaves: () => request('/saves').then((r) => r.saves),
   getSave: (id) => request(`/saves/${id}`).then((r) => r.save),
   putSave: (name, mode, schemaVersion, payload) =>
