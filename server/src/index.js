@@ -39,6 +39,21 @@ export async function build() {
     bodyLimit: 9 * 1024 * 1024,
   });
 
+  // A live API key plus the sandbox sender is the one combination that looks
+  // like working email and isn't: Resend accepts the key, then refuses every
+  // recipient except the account owner with a 403. Nothing downstream can say
+  // so — /auth/forgot-password always answers { ok: true } on purpose, so the
+  // browser cannot tell, and the rejection only ever surfaced as one line
+  // buried in the request log. Say it once, loudly, at boot.
+  if (config.resendApiKey && config.usingSandboxSender) {
+    app.log.warn(
+      `[email] EMAIL_FROM is still Resend's sandbox sender (${config.emailFrom}). ` +
+        'Password reset mail can only reach the Resend account owner; every other ' +
+        'recipient is rejected with a 403. Verify a domain at resend.com/domains ' +
+        'and set EMAIL_FROM to an address on it.'
+    );
+  }
+
   await app.register(cors, {
     origin: config.corsOrigin,
     // The session cookie only travels on credentialed requests, which in turn
