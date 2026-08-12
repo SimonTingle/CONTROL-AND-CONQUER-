@@ -37,6 +37,15 @@ function cookieSameSite() {
 const isProduction = process.env.NODE_ENV === 'production';
 const sameSite = cookieSameSite();
 
+// Resend's shared sandbox sender. Needs no DNS setup at all, which makes it the
+// right default for a first run — but it can only ever deliver to the address
+// that owns the Resend account. Every other recipient is refused with a 403
+// that, by design, never reaches the caller (/auth/forgot-password always
+// answers { ok: true } so it can't be used to enumerate accounts). index.js
+// warns at boot when this is still in use with a live API key.
+const SANDBOX_EMAIL_FROM = 'Procedural Terrain <onboarding@resend.dev>';
+const emailFrom = process.env.EMAIL_FROM ?? SANDBOX_EMAIL_FROM;
+
 // SameSite=None without Secure is rejected outright by every modern browser —
 // the cookie would simply never arrive, silently. isProduction is what gates
 // Secure (see below), so this configuration can never work and should never
@@ -82,10 +91,13 @@ export const config = {
   // follows for the backend as a whole. /auth/forgot-password checks this
   // itself and logs a clear warning rather than silently pretending to send.
   resendApiKey: process.env.RESEND_API_KEY ?? '',
-  // Resend's shared sending domain — works with no DNS/domain verification,
-  // the right default to get password reset working before anyone has set
-  // up a verified sending domain. Override once one exists.
-  emailFrom: process.env.EMAIL_FROM ?? 'Procedural Terrain <onboarding@resend.dev>',
+  // Defaults to the sandbox sender described above; override once a real
+  // sending domain is verified in Resend.
+  emailFrom,
+  // Substring rather than an exact match against SANDBOX_EMAIL_FROM: any
+  // resend.dev address carries the same one-recipient restriction, not just
+  // the particular default spelling above.
+  usingSandboxSender: emailFrom.includes('resend.dev'),
 
   // Where the reset link points — the same origin CORS is already locked to,
   // since that origin *is* the frontend serving the page that reads the
