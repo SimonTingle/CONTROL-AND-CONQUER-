@@ -19,6 +19,7 @@ import {
 import { createPasswordReset, userForResetToken, consumePasswordReset } from '../auth/passwordResets.js';
 import { sendEmail, passwordResetEmail } from '../email/resend.js';
 import { config } from '../config.js';
+import { shouldThrottle } from '../auth/accountRateLimit.js';
 
 const credentials = z.object({
   email: z.string().email().max(254),
@@ -101,6 +102,13 @@ export async function authRoutes(app) {
     }
     const { email, password } = parsed.data;
 
+    // Per-IP (authLimit, above) doesn't bound a distributed attack aimed at
+    // one account; this closes that without introducing a lockout an
+    // attacker could weaponise against a victim — see accountRateLimit.js.
+    if (shouldThrottle(email)) {
+      return reply.code(429).send({ error: 'too_many_attempts' });
+    }
+
     const { rows } = await query(
       'select id, email, display_name, password_hash, created_at from users where email = $1',
       [email]
@@ -123,7 +131,7 @@ export async function authRoutes(app) {
     return reply.send({ user: publicUser(user) });
   });
 
-  app.post('/auth/logout', async (req, reply) => {
+  app.post('/auth/logout', { onRequest: app.csrfProtection }, async (req, reply) => {
     await revokeSession(req.cookies[SESSION_COOKIE]);
     // Clear with the same attributes it was set with, or the browser keeps
     // the original cookie and "logout" only appears to work.
@@ -135,9 +143,15 @@ export async function authRoutes(app) {
    * Who am I? Returns `{ user: null }` rather than 401 when signed out —
    * being signed out is a normal, expected state for this game, not an error,
    * and the frontend calls this on every load to decide which UI to show.
+   *
+   * Also mints the CSRF token here, since this is already the first call the
+   * frontend makes on every load — one round trip covers both "am I signed
+   * in" and "here is the token to echo back on the next state change",
+   * whether or not the visitor is signed in yet (a password-reset link lands
+   * signed out and still needs one).
    */
-  app.get('/auth/me', async (req) => {
-    return { user: req.user ? publicUser(req.user) : null };
+  app.get('/auth/me', async (req, reply) => {
+    return { user: req.user ? publicUser(req.user) : null, csrfToken: await reply.generateCsrf() };
   });
 
   const forgotPasswordBody = z.object({ email: z.string().email().max(254) });
@@ -152,6 +166,14 @@ export async function authRoutes(app) {
   app.post('/auth/forgot-password', { config: authLimit }, async (req, reply) => {
     const parsed = forgotPasswordBody.safeParse(req.body);
     if (!parsed.success) return reply.send({ ok: true }); // same response as "no such account" — see above
+
+    // Same reasoning as login: bounds a distributed attempt to spam one
+    // inbox with reset emails from many IPs. The uniform { ok: true } below
+    // still applies even when throttled, so this can't be used to probe
+    // account existence either.
+    if (shouldThrottle(parsed.data.email)) {
+      return reply.send({ ok: true });
+    }
 
     const { rows } = await query('select id, email from users where email = $1', [parsed.data.email]);
     const user = rows[0];
@@ -172,11 +194,14 @@ export async function authRoutes(app) {
   });
 
   const resetPasswordBody = z.object({
-    token: z.string().uuid(),
+    // Tokens are now app-generated (see auth/tokens.js), not database uuids —
+    // exact shape is re-checked by isWellFormedToken() downstream; this bound
+    // is just to keep a malformed body from reaching that point at all.
+    token: z.string().min(1).max(128),
     password: z.string().min(12).max(200),
   });
 
-  app.post('/auth/reset-password', { config: authLimit }, async (req, reply) => {
+  app.post('/auth/reset-password', { config: authLimit, onRequest: app.csrfProtection }, async (req, reply) => {
     const parsed = resetPasswordBody.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send({

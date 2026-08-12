@@ -26,9 +26,24 @@ export class ApiError extends Error {
   }
 }
 
+// The server mints this on /auth/me (see routes/auth.js) — one token, cached
+// for the page's lifetime and echoed back on every state-changing request.
+// It's derived from a secret the server holds in its own httpOnly cookie, so
+// this value is safe to keep in ordinary JS memory: on its own, without that
+// cookie riding along, it authorises nothing.
+let csrfToken = null;
+
 async function request(path, { method = 'GET', body } = {}) {
   if (!isConfigured) {
     throw new ApiError(0, 'no_backend_configured');
+  }
+
+  const headers = body ? { 'content-type': 'application/json' } : {};
+  // GET/HEAD are exempt server-side too (CSRF only threatens state changes);
+  // sending the header on every request would work but this matches what the
+  // server actually checks.
+  if (csrfToken && method !== 'GET' && method !== 'HEAD') {
+    headers['x-csrf-token'] = csrfToken;
   }
 
   let res;
@@ -38,7 +53,7 @@ async function request(path, { method = 'GET', body } = {}) {
       // The session lives in an httpOnly cookie, which is only sent when
       // credentials are explicitly included on a cross-origin request.
       credentials: 'include',
-      headers: body ? { 'content-type': 'application/json' } : undefined,
+      headers,
       body: body ? JSON.stringify(body) : undefined,
     });
   } catch (err) {
@@ -51,6 +66,7 @@ async function request(path, { method = 'GET', body } = {}) {
   if (!res.ok) {
     throw new ApiError(res.status, payload?.error ?? 'request_failed', payload?.details);
   }
+  if (payload?.csrfToken) csrfToken = payload.csrfToken;
   return payload;
 }
 

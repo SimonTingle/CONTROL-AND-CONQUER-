@@ -9,6 +9,8 @@ import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
+import helmet from '@fastify/helmet';
+import csrfProtection from '@fastify/csrf-protection';
 
 import { config } from './config.js';
 import { pool } from './db/pool.js';
@@ -42,9 +44,37 @@ export async function build() {
     // The session cookie only travels on credentialed requests, which in turn
     // require a named origin rather than '*' (see config.corsOrigin).
     credentials: true,
+    // The CSRF token this server issues has to be readable by the browser's
+    // fetch() call so it can be echoed back as a header on the next request.
+    exposedHeaders: ['x-csrf-token'],
   });
 
+  // Standard response headers (X-Content-Type-Options, X-Frame-Options,
+  // Referrer-Policy, HSTS once isProduction, etc). CSP is switched off: this
+  // is a JSON API with no HTML to protect — the frontend that actually
+  // renders a page is a separate nginx-served static build (see the header
+  // comment above) — and a default CSP tuned for nothing in particular would
+  // just be a header nobody reads and nothing enforces correctly.
+  await app.register(helmet, { contentSecurityPolicy: false });
+
   await app.register(cookie);
+
+  // Double-submit CSRF protection: the server holds a secret in its own
+  // httpOnly cookie and hands the frontend a derived token (see
+  // routes/auth.js's /auth/me) to echo back as a header on state-changing
+  // requests. Cookie attributes mirror the session cookie's — same reasoning,
+  // same deploy modes (see sessionCookieOptions in auth/sessions.js) — so a
+  // cross-site deploy that needs SameSite=None gets it here too rather than
+  // silently keeping SameSite=Strict and having this cookie stop arriving.
+  await app.register(csrfProtection, {
+    cookieOpts: {
+      path: '/',
+      httpOnly: true,
+      secure: config.isProduction,
+      sameSite: config.cookieSameSite,
+      maxAge: config.sessionTtlDays * 24 * 60 * 60,
+    },
+  });
 
   await app.register(rateLimit, {
     global: false, // opt in per route; the auth routes are what actually need it

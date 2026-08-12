@@ -1,24 +1,27 @@
 /**
  * Server-side sessions.
  *
- * See 001_accounts.sql for why these are database rows rather than JWTs. The
- * token is the row's primary key — an opaque uuid v4, which carries no
- * information and cannot be forged without guessing 122 bits of randomness.
+ * See 001_accounts.sql for why these are database rows rather than JWTs, and
+ * 005_hash_tokens.sql for why the database stores a hash of the token rather
+ * than the token itself — the raw token lives only in the cookie and briefly
+ * in memory per request, never in a row a database read could expose.
  */
 
 import { query } from '../db/pool.js';
 import { config } from '../config.js';
+import { newToken, hashToken, isWellFormedToken } from './tokens.js';
 
 export const SESSION_COOKIE = 'ptg_session';
 
 export async function createSession(userId) {
+  const { token, hash } = newToken();
   const { rows } = await query(
-    `insert into sessions (user_id, expires_at)
-     values ($1, now() + ($2 || ' days')::interval)
-     returning token, expires_at`,
-    [userId, config.sessionTtlDays]
+    `insert into sessions (user_id, token_hash, expires_at)
+     values ($1, $2, now() + ($3 || ' days')::interval)
+     returning expires_at`,
+    [userId, hash, config.sessionTtlDays]
   );
-  return rows[0];
+  return { token, expires_at: rows[0].expires_at };
 }
 
 /**
@@ -29,30 +32,26 @@ export async function createSession(userId) {
  * caller cannot forget to check.
  */
 export async function userForToken(token) {
-  if (!token) return null;
-
-  // A malformed token would make Postgres throw a type error on the uuid cast
-  // rather than simply not matching, so screen it first.
-  if (!/^[0-9a-f-]{36}$/i.test(token)) return null;
+  if (!isWellFormedToken(token)) return null;
 
   const { rows } = await query(
     `select u.id, u.email, u.display_name, u.created_at
        from sessions s
        join users u on u.id = s.user_id
-      where s.token = $1
+      where s.token_hash = $1
         and s.revoked_at is null
         and s.expires_at > now()`,
-    [token]
+    [hashToken(token)]
   );
   return rows[0] ?? null;
 }
 
 export async function revokeSession(token) {
-  if (!token || !/^[0-9a-f-]{36}$/i.test(token)) return;
+  if (!isWellFormedToken(token)) return;
   await query(
     `update sessions set revoked_at = now()
-      where token = $1 and revoked_at is null`,
-    [token]
+      where token_hash = $1 and revoked_at is null`,
+    [hashToken(token)]
   );
 }
 

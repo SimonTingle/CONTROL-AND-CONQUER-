@@ -51,6 +51,9 @@ function toMatch(r) {
 
 export async function matchRoutes(app) {
   const auth = { onRequest: app.requireAuth };
+  // State-changing routes also need the CSRF check — a cookie-authenticated
+  // POST is exactly what CSRF forges, a GET is not.
+  const authWrite = { onRequest: [app.requireAuth, app.csrfProtection] };
 
   /** Open lobbies, newest first. */
   app.get('/matches', auth, async () => {
@@ -97,7 +100,7 @@ export async function matchRoutes(app) {
   });
 
   /** Create a lobby. The host takes team 0 in the same transaction. */
-  app.post('/matches', auth, async (req, reply) => {
+  app.post('/matches', authWrite, async (req, reply) => {
     const parsed = createBody.safeParse(req.body ?? {});
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid_request', details: parsed.error.flatten() });
@@ -128,7 +131,7 @@ export async function matchRoutes(app) {
    * both read "3 players, next team is 3" and collide. The unique constraint on
    * (match_id, team_id) is the backstop if that ever slips.
    */
-  app.post('/matches/:id/join', auth, async (req, reply) => {
+  app.post('/matches/:id/join', authWrite, async (req, reply) => {
     if (!uuid.safeParse(req.params.id).success) {
       return reply.code(404).send({ error: 'not_found' });
     }
@@ -181,7 +184,7 @@ export async function matchRoutes(app) {
   });
 
   /** Host starts the match; after this the lobby stops accepting joins. */
-  app.post('/matches/:id/start', auth, async (req, reply) => {
+  app.post('/matches/:id/start', authWrite, async (req, reply) => {
     if (!uuid.safeParse(req.params.id).success) {
       return reply.code(404).send({ error: 'not_found' });
     }
@@ -198,7 +201,7 @@ export async function matchRoutes(app) {
   });
 
   /** Leave a lobby. The host leaving abandons the match for everyone. */
-  app.post('/matches/:id/leave', auth, async (req, reply) => {
+  app.post('/matches/:id/leave', authWrite, async (req, reply) => {
     if (!uuid.safeParse(req.params.id).success) {
       return reply.code(404).send({ error: 'not_found' });
     }
