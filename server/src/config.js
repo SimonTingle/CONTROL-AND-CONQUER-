@@ -17,6 +17,39 @@ function required(name) {
   return value;
 }
 
+// What @fastify/cookie actually accepts for sameSite. Validated at startup
+// rather than passed straight through, so a typo in the env (COOKIE_SAMESITE
+// is free-form, operator-supplied text) fails loudly at boot instead of
+// producing silent, UA-dependent cookie behaviour discovered later as "why is
+// nobody staying signed in".
+const SAME_SITE_VALUES = ['lax', 'strict', 'none'];
+
+function cookieSameSite() {
+  const value = process.env.COOKIE_SAMESITE ?? 'lax';
+  if (!SAME_SITE_VALUES.includes(value)) {
+    throw new Error(
+      `Invalid COOKIE_SAMESITE "${value}". Must be one of: ${SAME_SITE_VALUES.join(', ')}.`
+    );
+  }
+  return value;
+}
+
+const isProduction = process.env.NODE_ENV === 'production';
+const sameSite = cookieSameSite();
+
+// SameSite=None without Secure is rejected outright by every modern browser —
+// the cookie would simply never arrive, silently. isProduction is what gates
+// Secure (see below), so this configuration can never work and should never
+// be allowed to boot looking like it does.
+if (sameSite === 'none' && !isProduction) {
+  throw new Error(
+    'COOKIE_SAMESITE=none requires a Secure cookie, which only happens when ' +
+      'NODE_ENV=production. Browsers silently drop SameSite=None cookies that ' +
+      "aren't also Secure, so this combination would boot but never actually " +
+      'keep anyone signed in.'
+  );
+}
+
 export const config = {
   port: Number(process.env.PORT ?? 3000),
   // 0.0.0.0 rather than localhost: inside a container, binding to the loopback
@@ -32,15 +65,16 @@ export const config = {
 
   // Session cookies are Secure in production, but a plain-HTTP localhost dev
   // server would then never receive them back.
-  isProduction: process.env.NODE_ENV === 'production',
+  isProduction,
 
   sessionTtlDays: Number(process.env.SESSION_TTL_DAYS ?? 30),
 
   // 'lax' is right for the normal CapRover layout, where the frontend and the
   // API are subdomains of one registrable domain and so count as same-site.
   // Only a genuinely cross-site deploy needs 'none', which also requires
-  // Secure (and therefore HTTPS) or browsers will drop the cookie entirely.
-  cookieSameSite: process.env.COOKIE_SAMESITE ?? 'lax',
+  // Secure (and therefore HTTPS) or browsers will drop the cookie entirely —
+  // validated above, at boot.
+  cookieSameSite: sameSite,
 
   // Deliberately NOT required() — the server must still boot (and every
   // other feature must still work) with no email provider configured, the

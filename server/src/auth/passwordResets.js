@@ -1,22 +1,22 @@
 /**
  * Password reset tokens. Same shape and reasoning as sessions.js's tokens —
- * see 003_password_resets.sql.
+ * see 003_password_resets.sql and 005_hash_tokens.sql.
  */
 
 import { query, transaction } from '../db/pool.js';
+import { newToken, hashToken, isWellFormedToken } from './tokens.js';
 
 const RESET_TTL_MINUTES = 30; // short-lived on purpose: a reset link is a bearer credential mailed in plaintext
 
-const UUID_RE = /^[0-9a-f-]{36}$/i;
-
 export async function createPasswordReset(userId) {
+  const { token, hash } = newToken();
   const { rows } = await query(
-    `insert into password_resets (user_id, expires_at)
-     values ($1, now() + ($2 || ' minutes')::interval)
-     returning token, expires_at`,
-    [userId, RESET_TTL_MINUTES]
+    `insert into password_resets (user_id, token_hash, expires_at)
+     values ($1, $2, now() + ($3 || ' minutes')::interval)
+     returning expires_at`,
+    [userId, hash, RESET_TTL_MINUTES]
   );
-  return rows[0];
+  return { token, expires_at: rows[0].expires_at };
 }
 
 /**
@@ -25,16 +25,16 @@ export async function createPasswordReset(userId) {
  * "read the row" and "act on it" where a second request could race a consume.
  */
 export async function userForResetToken(token) {
-  if (!token || !UUID_RE.test(token)) return null;
+  if (!isWellFormedToken(token)) return null;
 
   const { rows } = await query(
     `select u.id, u.email, u.display_name
        from password_resets r
        join users u on u.id = r.user_id
-      where r.token = $1
+      where r.token_hash = $1
         and r.used_at is null
         and r.expires_at > now()`,
-    [token]
+    [hashToken(token)]
   );
   return rows[0] ?? null;
 }
@@ -54,8 +54,8 @@ export async function consumePasswordReset(token, userId, newPasswordHash) {
   return transaction(async (client) => {
     const { rowCount } = await client.query(
       `update password_resets set used_at = now()
-        where token = $1 and used_at is null and expires_at > now()`,
-      [token]
+        where token_hash = $1 and used_at is null and expires_at > now()`,
+      [hashToken(token)]
     );
     if (rowCount === 0) return false;
 

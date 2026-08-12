@@ -26,6 +26,9 @@ const uuid = z.string().uuid();
 
 export async function saveRoutes(app) {
   const auth = { onRequest: app.requireAuth };
+  // State-changing routes also need the CSRF check — a cookie-authenticated
+  // POST/DELETE is exactly what CSRF forges, a GET is not.
+  const authWrite = { onRequest: [app.requireAuth, app.csrfProtection] };
 
   /** Slot list, without payloads — a save browser doesn't need megabytes to draw a list. */
   app.get('/saves', auth, async (req) => {
@@ -82,7 +85,7 @@ export async function saveRoutes(app) {
    * An upsert on (user_id, name) rather than a read-then-insert, so two
    * concurrent saves to the same slot cannot race into a duplicate.
    */
-  app.post('/saves', auth, async (req, reply) => {
+  app.post('/saves', authWrite, async (req, reply) => {
     const parsed = saveBody.safeParse(req.body);
     if (!parsed.success) {
       return reply
@@ -120,7 +123,7 @@ export async function saveRoutes(app) {
     });
   });
 
-  app.delete('/saves/:id', auth, async (req, reply) => {
+  app.delete('/saves/:id', authWrite, async (req, reply) => {
     if (!uuid.safeParse(req.params.id).success) {
       return reply.code(404).send({ error: 'not_found' });
     }
