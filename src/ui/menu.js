@@ -4,6 +4,8 @@
  * heightfield rebuild so dragging a slider stays smooth.
  */
 
+import { showToast } from './toast.js';
+
 const REBUILD_DEBOUNCE_MS = 90;
 
 export class Menu {
@@ -47,6 +49,11 @@ export class Menu {
 
   render(schema) {
     this.body.replaceChildren();
+    // Reset alongside the DOM, not just append to it: rebuild() fires on
+    // sign-in, sign-out and every snapshot load, and without this the previous
+    // render's controls stay in the list forever — so refreshValues() ends up
+    // calling _sync() on widgets that were detached several rebuilds ago.
+    this.controls = [];
     for (const group of schema) {
       const details = document.createElement('details');
       details.className = 'group';
@@ -160,6 +167,21 @@ export class Menu {
 
     let lastKeyWasSpace = false;
 
+    // Is the suggestion list *meant* to be showing? Tracked explicitly rather
+    // than inferred from `document.activeElement`, which is what the old code
+    // did and is not reliable across an await: on iOS the software keyboard
+    // sliding up over a backdrop-filter panel is enough to make activeElement
+    // read as something else for a moment, and an in-flight fetch resolving in
+    // that window used to skip its render permanently. A flag set on focus and
+    // cleared on blur says what activeElement was only ever a proxy for, and
+    // says it correctly at every point in an async gap.
+    let listOpen = false;
+
+    const closeList = () => {
+      listOpen = false;
+      list.classList.add('hidden');
+    };
+
     const renderSuggestions = () => {
       const names = control.get();
       const val = input.value.trim();
@@ -178,7 +200,7 @@ export class Menu {
         // lands. A plain click handler would lose the race to blur closing it.
         const pick = () => {
           input.value = name;
-          list.classList.add('hidden');
+          closeList();
           syncLoadEnabled();
         };
         item.addEventListener('mousedown', (e) => { e.preventDefault(); pick(); });
@@ -188,33 +210,52 @@ export class Menu {
       list.classList.remove('hidden');
     };
 
-    input.addEventListener('focus', () => {
-      renderSuggestions();
-      // Cloud fields carry a `refresh` that fetches the real list from the
-      // server; local fields have none, since localStorage is already
-      // synchronous and always current. Re-render (and re-check Load) once it
-      // resolves, but only if focus hasn't already moved on.
-      if (control.refresh) {
-        control.refresh()
-          .then(() => {
-            if (document.activeElement === input) renderSuggestions();
-            syncLoadEnabled();
-          })
-          .catch((err) => console.warn('save-field refresh failed:', err));
+    /**
+     * Re-read the list from wherever it really lives, then re-render if the
+     * field is still showing.
+     *
+     * Cloud fields carry a `refresh` that fetches from the server; local fields
+     * have none, since localStorage is already synchronous and always current.
+     * The cloud cache starts empty (controlSchema.js) and only this fills it, so
+     * a render that happens *before* this resolves is a render of nothing —
+     * which is why the focus handler below renders again after awaiting rather
+     * than only before.
+     */
+    const refreshList = async () => {
+      if (!control.refresh) return;
+      try {
+        await control.refresh();
+      } catch (err) {
+        // Silent failure here is indistinguishable from "you have no saves",
+        // and a console warning is invisible on a phone — which is exactly
+        // where this field is hardest to use. Say it out loud.
+        console.warn('save-field refresh failed:', err);
+        showToast(`Could not load your cloud saves: ${err.message ?? err}`, 6000);
       }
+      if (!input.isConnected) return; // the menu was rebuilt out from under us
+      if (listOpen) renderSuggestions();
+      syncLoadEnabled();
+    };
+
+    input.addEventListener('focus', () => {
+      listOpen = true;
+      // Show whatever is already cached immediately, so a local field (and a
+      // cloud field on a second tap) opens with no perceptible delay, then
+      // reconcile against the server and render again with the real list.
+      renderSuggestions();
+      refreshList();
     });
     input.addEventListener('input', () => {
       lastKeyWasSpace = false;
       renderSuggestions();
     });
-    input.addEventListener('blur', () => list.classList.add('hidden'));
+    input.addEventListener('blur', closeList);
 
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        control.onSave(input.value.trim());
-        list.classList.add('hidden');
-        syncLoadEnabled(); // the name just saved now exists, so Load can enable
+        closeList();
+        doSave(); // syncLoadEnabled runs inside, once the save has actually landed
         return;
       }
       if (e.key !== ' ') {
@@ -261,18 +302,33 @@ export class Menu {
       loadBtn.classList.toggle('save-field-disabled', b || loadBtn.getAttribute('aria-disabled') === 'true');
     };
 
-    saveBtn.addEventListener('click', async () => {
+    /**
+     * The one save path. Both the button and the Return key go through here so
+     * the busy guard, the await, and the post-save list refresh apply to both —
+     * pressing Return used to call onSave() bare, so a cloud save made that way
+     * never surfaced its error and never appeared in the list afterwards.
+     */
+    const doSave = async () => {
       if (busy) return;
       setBusy(true);
       try {
         await control.onSave(input.value.trim());
-        if (control.refresh) await control.refresh().catch(() => {}); // let a just-saved name appear immediately
+        // Let a just-saved name appear immediately. Errors here are reported
+        // rather than swallowed: if the list can't be re-read, the name the
+        // player just saved will appear to have vanished, and they deserve to
+        // know that's a fetch problem and not a lost save.
+        await refreshList();
       } finally {
         setBusy(false);
         syncLoadEnabled();
-        if (document.activeElement === input) renderSuggestions();
+        // Only if the field is still open — Save is usually clicked *after*
+        // tapping away from the input, and the Enter path closes the list on
+        // purpose. Neither should have the dropdown spring back open.
+        if (listOpen) renderSuggestions();
       }
-    });
+    };
+
+    saveBtn.addEventListener('click', doSave);
 
     loadBtn.addEventListener('click', async () => {
       if (busy) return;
