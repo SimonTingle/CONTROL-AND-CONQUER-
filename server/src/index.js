@@ -28,6 +28,13 @@ export async function build() {
       redact: ['req.headers.cookie', 'req.headers.authorization', 'req.body.password'],
     },
     trustProxy: true, // CapRover terminates TLS and proxies; without this every client IP reads as the proxy's
+    // World snapshots are the largest thing this server accepts. Fastify's
+    // default is 1 MiB, which is *below* the 8 MiB cap routes/saves.js declares
+    // and enforces — so that cap was unreachable and an oversized save died as
+    // an opaque FST_ERR_CTP_BODY_TOO_LARGE before the route ever ran. Set
+    // slightly above the route's cap so the route stays the real policy and can
+    // answer with its own clean 413 payload_too_large.
+    bodyLimit: 9 * 1024 * 1024,
   });
 
   await app.register(cors, {
