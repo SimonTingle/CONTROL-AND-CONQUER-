@@ -223,6 +223,10 @@ export class CombatController {
 
     const killed = target.takeDamage(inst.def.turret.damage);
     if (killed) {
+      // Credited to the shooter for its Active-card "units destroyed" stat.
+      // Counted at the kill site (not the destroy pipeline) precisely because
+      // only here is the responsible vehicle known.
+      inst.kills = (inst.kills ?? 0) + 1;
       // Queued, not removed: the destroy pipeline's single flush point is what
       // guarantees nothing is spliced out of an array another system is still
       // walking this tick.

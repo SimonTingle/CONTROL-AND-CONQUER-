@@ -3,6 +3,32 @@ import { buildVehicleMesh, turningCircleOf } from '../vehicles/vehicleFactory.js
 
 const SPIN_SPEED = 0.5; // radians / second
 
+/** Odometer metres → a short human string, rolling over to km past 1000. */
+function formatDistance(metres) {
+  const m = metres ?? 0;
+  return m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(1)} km`;
+}
+
+/**
+ * The live per-instance stat line for an Active card. Health % is universal;
+ * the rest is type-specific — distance for movers, lifetime credits for the
+ * harvester, distance + kills for the gun platform. Keyed off def.id rather
+ * than tags so a new vehicle gets a deliberate line rather than a default it
+ * was never designed around.
+ */
+function instanceStatsText(inst) {
+  const healthPct = Math.round((inst.health / inst.def.maxHealth) * 100);
+  const dist = formatDistance(inst.odometer);
+  switch (inst.def.id) {
+    case 'crystal-harvester':
+      return `${healthPct}% · ${Math.round(inst.creditsDelivered ?? 0)} cr`;
+    case 'gun-platform':
+      return `${healthPct}% · ${dist} · ${inst.kills ?? 0} kills`;
+    default:
+      return `${healthPct}% · ${dist}`;
+  }
+}
+
 /**
  * Right-side drawer of small live 3D previews, one per catalog entry. Each
  * preview owns its own scene/camera so the vehicle can actually spin in real
@@ -170,13 +196,26 @@ export class VehiclePicker {
     label.textContent = instance.def.name;
     caption.appendChild(label);
 
+    // Live per-instance stats. Unlike the spawn cards' hover-reveal stats, an
+    // Active card's are always shown (see .vehicle-card-active rule in the CSS)
+    // and refreshed every frame in update().
+    const stats = document.createElement('span');
+    stats.className = 'vehicle-card-stats';
+    stats.textContent = instanceStatsText(instance);
+    caption.appendChild(stats);
+
     card.appendChild(caption);
 
     card.addEventListener('click', () => {
       this.vehicles?.setActive(instance);
     });
 
-    this.previews.push(this.createPreview(instance.def, canvas));
+    // Carry the instance + its stats node on the preview so update() can keep
+    // the numbers live without rebuilding the card.
+    const preview = this.createPreview(instance.def, canvas);
+    preview.instance = instance;
+    preview.statsEl = stats;
+    this.previews.push(preview);
     return card;
   }
 
@@ -261,6 +300,13 @@ export class VehiclePicker {
 
     for (const p of this.previews) {
       p.mesh.rotation.y += dt * SPIN_SPEED;
+      // Active cards carry a live instance — refresh their health/stat line in
+      // place. A plain string compare avoids touching the DOM on frames where
+      // nothing changed (most of them, at 60fps against stats that tick slowly).
+      if (p.instance && p.statsEl) {
+        const text = instanceStatsText(p.instance);
+        if (p.statsEl.textContent !== text) p.statsEl.textContent = text;
+      }
       // Render through the one shared context, then copy the result onto
       // this card's own 2D canvas before moving to the next preview.
       this.sharedRenderer.render(p.scene, p.camera);

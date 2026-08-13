@@ -452,6 +452,13 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
   opacity: 1;
 }
 
+/* Active cards show their live stat line at all times — it's the point of the
+   card, not a hover detail like the spawn cards' fixed spec. */
+.vehicle-card-active .vehicle-card-stats {
+  max-height: 12px;
+  opacity: 1;
+}
+
 /* ---- locked vehicle cards ---- */
 
 .vehicle-card.locked {

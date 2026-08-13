@@ -88,6 +88,13 @@ function serializeVehicle(inst) {
     mode: inst.mode,
     headlightsOn: inst.headlightsOn,
     target: point2(inst.target),
+    // Ordering key for the picker's Active list, and the lifetime stats shown
+    // on its cards. createdAt was previously unserialized, so a reload reset
+    // every vehicle's age (and thus the card order); include it here too.
+    createdAt: inst.createdAt,
+    odometer: round(inst.odometer ?? 0, 2),
+    kills: inst.kills ?? 0,
+    creditsDelivered: round(inst.creditsDelivered ?? 0, 2),
     // Drive state, so a vehicle mid-journey resumes at speed rather than
     // snapping to a standstill.
     speed: round(inst.speed, 3),
@@ -243,6 +250,12 @@ function serializeHarvesterStates(ctx) {
       stallTimer: round(s.stallTimer ?? 0, 3),
       pauseTimer: round(s.pauseTimer ?? 0, 3),
       retryTimer: round(s.retryTimer ?? 0, 3),
+      // Repair-retreat state. The bay is a live ref, stored by id and re-looked
+      // up on restore; a TO_REPAIR run that can't resolve its bay falls back to
+      // IDLE (see the restore block). The cooldown keeps a just-failed retreat
+      // from immediately re-firing after a load.
+      repairBayId: s.repairBay?.id ?? null,
+      repairRetryCooldown: round(s.repairRetryCooldown ?? 0, 3),
       // Field bans, as [fieldId, expirySimTime] pairs. These are sim-time
       // based (see simClock.js), so they survive a round trip meaningfully.
       bans: s.bans ? [...s.bans].map(([id, until]) => [id, round(until, 3)]) : [],
@@ -383,6 +396,12 @@ export function deserialize(ctx, snap) {
     inst._fireCooldown = saved.fireCooldown ?? 0;
     inst.turretAim = saved.turretAim ?? null;
     inst.threatUntil = saved.threatUntil ?? 0;
+    // Age + lifetime stats. `??` keeps older saves loading: a missing createdAt
+    // falls back to the fresh tick spawn() just stamped, stats default to 0.
+    if (saved.createdAt != null) inst.createdAt = saved.createdAt;
+    inst.odometer = saved.odometer ?? 0;
+    inst.kills = saved.kills ?? 0;
+    inst.creditsDelivered = saved.creditsDelivered ?? 0;
     if (saved.target) inst.target = new THREE.Vector2(saved.target.x, saved.target.z);
     vehicleById.set(saved.id, inst);
   }
@@ -471,6 +490,13 @@ export function deserialize(ctx, snap) {
       state.stallTimer = saved.stallTimer ?? 0;
       state.pauseTimer = saved.pauseTimer ?? 0;
       state.retryTimer = saved.retryTimer ?? 0;
+      // Repair retreat (v-newer). Resolve the bay by id; if it's gone, a
+      // TO_REPAIR run has nowhere to go, so drop back to IDLE rather than
+      // leaving the harvester driving at a null destination.
+      state.repairBay =
+        saved.repairBayId != null ? (structureById.get(saved.repairBayId) ?? null) : null;
+      state.repairRetryCooldown = saved.repairRetryCooldown ?? 0;
+      if (state.state === 'to-repair' && !state.repairBay) state.state = 'idle';
       state.bans = new Map(saved.bans ?? []);
     }
   }
