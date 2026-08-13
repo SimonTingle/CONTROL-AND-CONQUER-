@@ -96,6 +96,14 @@ export class RepairController {
    */
   _maybeAutoQueue(inst, dt) {
     if (inst === this.vehicles.active) return;
+    // Harvesters run their own repair retreat in harvesterAI, at a higher health
+    // threshold and using its stronger detour/reverse escape to reach the bay.
+    // Letting this generic auto-queue also grab them is what produced the
+    // wedge/flip-flop: it set inst.repair, harvesterAI paused its own escape,
+    // and this controller's weaker drive couldn't free a pinned harvester. Once
+    // harvesterAI hands off (sets inst.repair itself), the servicing loop below
+    // still runs for them — only the *initiation* is suppressed here.
+    if (inst.def.capacity) return;
     if (inst.health > inst.def.maxHealth * AUTO_REPAIR_HEALTH_FRACTION) {
       inst._autoRepairCooldown = 0; // healthy again — re-check instantly if it dips later
       return;
@@ -445,6 +453,12 @@ export class RepairController {
       // 'to-bay'/'queued' legs, where the dock was never claimed.
       if (r.queuePosition != null) this._releaseQueuePosition(r.bay, r);
       this._leaveBay(inst, r.bay);
+      // Hold off re-queuing for a beat. Without this, a vehicle that genuinely
+      // can't reach its nearest bay clears repair here, immediately re-qualifies
+      // in _maybeAutoQueue next tick, claims again, fails to path again — a
+      // per-frame claim/bail loop that strobes the bay ring. (Harvesters no
+      // longer reach this path, but scouts still auto-queue.)
+      inst._autoRepairCooldown = AUTO_REPAIR_RETRY_COOLDOWN;
       return false;
     }
 

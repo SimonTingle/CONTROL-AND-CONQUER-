@@ -29,6 +29,10 @@ const UNLOADING = 'unloading';
 const PARKED = 'parked';
 const PAUSED = 'paused';
 const FLEEING = 'fleeing';
+// Driving itself to a repair bay, under harvesterAI's own (strong) escape
+// logic, then handing off to repairController for the dock+heal.
+const TO_REPAIR = 'to-repair';
+const REPAIRING = 'repairing';
 
 // Comfortably larger than a harvester's own turning radius (~19u). Smaller than
 // that and `driveToTarget`'s pure-pursuit steering can overshoot, lose speed —
@@ -52,6 +56,18 @@ const TRANSFER_SPEED = 0.5; // must be near enough stopped to load or unload
 // spread out rather than pile onto one — both soft: see _idle()'s fallback.
 const LOW_STOCK_FRACTION = 0.33;
 const MAX_HARVESTERS_PER_FIELD = 2;
+
+// Health at or below which a harvester abandons its run and drives itself to a
+// repair bay. Deliberately well above repairController's last-ditch 0.30
+// auto-queue: retreating at half health leaves the headroom to actually reach
+// the bay before terrain-grind damage pins it — the wedge this fixes happens
+// precisely because the old flow only reacted once the harvester was already
+// near death and, often, already stuck.
+const REPAIR_RETREAT_FRACTION = 0.5;
+// After a repair ends with the harvester still hurt (ran dry, or the bay was
+// unreachable), wait this long before trying again rather than looping straight
+// back — it keeps harvesting in the meantime instead of freezing.
+const REPAIR_RETRY_COOLDOWN = 8;
 
 /** Widening, alternating. A straight retry cannot work: the heading is unchanged. */
 const DETOUR_ANGLES = [0.9, -0.9, 1.6, -1.6, 2.4];
@@ -141,6 +157,10 @@ export class HarvesterAI {
         pauseTimer: 0,
         retryTimer: 0,
         bans: new Map(),
+        // Repair retreat (see _maybeRetreatForRepair). repairBay is a live
+        // structure ref while in TO_REPAIR.
+        repairBay: null,
+        repairRetryCooldown: 0,
       };
       this.states.set(inst, s);
     }
@@ -220,11 +240,25 @@ export class HarvesterAI {
       return;
     }
 
+    // Damaged enough to break off and get repaired? Checked from the ordinary
+    // working states only — not while fleeing (staying alive wins), mid-dock,
+    // or already on a repair run. Owning this here rather than letting
+    // repairController's generic auto-queue grab the harvester keeps this file's
+    // stronger detour/reverse escape engaged the whole way to the bay.
+    if (s.state === IDLE || s.state === TO_FIELD || s.state === FILLING || s.state === TO_BASE) {
+      if (this._maybeRetreatForRepair(inst, s, dt)) return;
+    }
+
     switch (s.state) {
       case FLEEING:
         return this._flee(inst, s, dt);
       case IDLE:
         return this._idle(inst, s);
+      case TO_REPAIR:
+        // Drive to the bay under our own escape logic; hand off on arrival.
+        return this._travel(inst, s, dt, DOCK_DISTANCE, () => this._arriveAtRepair(inst, s));
+      case REPAIRING:
+        return this._repairingWait(inst, s);
       case TO_FIELD:
         // Already on the way somewhere when the player picks a field: divert now
         // rather than finishing this run first. Waiting would look like the pick
@@ -420,6 +454,9 @@ export class HarvesterAI {
     // Credited to the harvester's own team. `_facility()` only ever returns a
     // same-team facility, so the two can never disagree.
     this.game.teamOf(inst).earn(moved);
+    // Lifetime tally on the instance (not the states Map) so the vehicle picker
+    // and snapshot both read it without reaching into harvesterAI internals.
+    inst.creditsDelivered += moved;
 
     if (s.load <= 1e-6) {
       s.load = 0;
@@ -669,7 +706,106 @@ export class HarvesterAI {
       const f = this._facility(inst);
       return f ? { x: f.dock.x, z: f.dock.z } : null;
     }
+    // Repair run: aim for the bay's dock. A destroyed or no-longer-idle bay
+    // resolves to null, which _travel turns into a clean fall-back to IDLE.
+    if (s.state === TO_REPAIR) {
+      const bay = s.repairBay;
+      if (!bay || bay.dead || bay.def.id !== 'repair-bay' || bay.mode !== 'idle') return null;
+      return { x: bay.dock.x, z: bay.dock.z };
+    }
     return null;
+  }
+
+  /** Nearest finished, same-team repair bay — mirrors repairController/commands. */
+  _nearestRepairBay(inst) {
+    const pos = inst.group.position;
+    let best = null;
+    let bestD = Infinity;
+    for (const s of this.structures?.instances ?? []) {
+      if (s.def.id !== 'repair-bay' || s.mode !== 'idle') continue;
+      if (s.teamId !== inst.teamId) continue;
+      const d = Math.hypot(s.x - pos.x, s.z - pos.z);
+      if (d < bestD) {
+        bestD = d;
+        best = s;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Breaks off for repair when hurt, if a reachable bay is affordable. Returns
+   * true once it has switched into TO_REPAIR so the caller stops there.
+   *
+   * The affordability gate mirrors repairController's: claiming a bay we can't
+   * pay to use would just bounce straight back out. The cooldown, set when a
+   * previous attempt ended still-hurt, is what stops a harvester that can't
+   * reach (or afford) the bay from looping between here and the bay forever
+   * instead of getting back to work.
+   */
+  _maybeRetreatForRepair(inst, s, dt) {
+    if (s.repairRetryCooldown > 0) {
+      s.repairRetryCooldown -= dt;
+      return false;
+    }
+    if (inst.health > inst.def.maxHealth * REPAIR_RETREAT_FRACTION) return false;
+    // The vehicle the player is driving stays under their hand, same carve-out
+    // repairController's auto-queue makes.
+    if (inst === this.vehicles.active) return false;
+
+    const bay = this._nearestRepairBay(inst);
+    if (!bay) return false;
+    const missing = inst.def.maxHealth - inst.health;
+    const cost = Math.ceil(missing * bay.def.repair.creditsPerHealth);
+    if (this.game.teamOf(inst).credits < cost) return false;
+
+    s.repairBay = bay;
+    s.state = TO_REPAIR;
+    s.dest = null;
+    s.waypoint = null;
+    s.detours = 0;
+    s.stallTimer = 0;
+    return true;
+  }
+
+  /**
+   * Arrived near the bay under our own driving. Hand the dock+heal to
+   * repairController by setting inst.repair in its entry state; the `!!inst.repair`
+   * gate at the top of _drive then holds this dispatch back until it clears.
+   */
+  _arriveAtRepair(inst, s) {
+    const bay = s.repairBay;
+    s.repairBay = null;
+    if (!bay || bay.dead || bay.def.id !== 'repair-bay' || bay.mode !== 'idle') {
+      // Bay vanished between the last destination check and arriving — don't
+      // hand off to nothing; go back to work (or keep the cooldown short).
+      s.state = s.load > 0 ? TO_BASE : IDLE;
+      s.dest = null;
+      return;
+    }
+    inst.repair = { bay, state: 'to-bay' };
+    s.state = REPAIRING;
+    s.dest = null;
+    s.waypoint = null;
+  }
+
+  /**
+   * Passive wait while repairController owns the vehicle. It only runs once
+   * inst.repair has cleared (the `!!inst.repair` gate suppresses this dispatch
+   * until then), i.e. the moment repair ended — healed, or interrupted.
+   */
+  _repairingWait(inst, s) {
+    if (inst.health > inst.def.maxHealth * REPAIR_RETREAT_FRACTION) {
+      // Healed past the retreat line — resume normally.
+      s.state = s.load > 0 ? TO_BASE : IDLE;
+    } else {
+      // Ended still hurt (ran dry / gave up reaching the pad). Back off before
+      // retrying so it works rather than shuttling to the bay on a loop.
+      s.repairRetryCooldown = REPAIR_RETRY_COOLDOWN;
+      s.state = s.load > 0 ? TO_BASE : IDLE;
+    }
+    s.dest = null;
+    s.waypoint = null;
   }
 
   /**
@@ -745,8 +881,19 @@ export class HarvesterAI {
     // become non-zero once this function has already run once for this leg.
     // Reversing on a fresh order the vehicle hasn't even attempted yet would
     // mean every routine trip starts by backing up for no reason.
+    //
+    // Exception: a vehicle actively grinding a slope (`blocked`) is already
+    // pinned — the "don't reverse on a fresh order" reasoning above assumes the
+    // order was never attempted, but a blocked vehicle has been trying and
+    // failing against terrain. Backing off first is the one move that can free
+    // it, so grind gets the reverse immediately instead of waiting for the
+    // second abandon.
     const alreadyTrying = s.detours > 0 || !!s.waypoint;
-    if (alreadyTrying && inst.reverseTimer == null && !hasVehicleBehind(inst, this.vehicles.instances)) {
+    if (
+      (alreadyTrying || inst.blocked) &&
+      inst.reverseTimer == null &&
+      !hasVehicleBehind(inst, this.vehicles.instances)
+    ) {
       inst.beginReverse(REVERSE_DURATION);
     }
 
@@ -776,6 +923,19 @@ export class HarvesterAI {
       // canyon, so just keep trying.
       s.retryTimer = RETRY_PAUSE;
       s.dest = null;
+      return;
+    }
+
+    if (s.state === TO_REPAIR) {
+      // The bay is unreachable from here. Fall back to working and, crucially,
+      // arm the full repair cooldown — a 1.5s RETRY_PAUSE would let the retreat
+      // check re-fire almost immediately and shuttle back toward the same
+      // unreachable bay on a loop instead of getting on with harvesting.
+      s.repairBay = null;
+      s.repairRetryCooldown = REPAIR_RETRY_COOLDOWN;
+      s.state = s.load > 0 ? TO_BASE : IDLE;
+      s.dest = null;
+      s.retryTimer = RETRY_PAUSE;
       return;
     }
 

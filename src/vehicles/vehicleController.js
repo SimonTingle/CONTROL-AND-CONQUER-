@@ -89,6 +89,14 @@ class VehicleInstance {
     // state living on a simulated entity, and a wall-clock value would differ
     // between clients running the same match.
     this.createdAt = simClock.tick;
+    // Lifetime stats, surfaced on the vehicle picker's Active cards. One world
+    // unit is treated as one metre (see vehiclePicker's distance formatting).
+    // `kills` is credited in combatController on a confirmed weapon kill;
+    // `creditsDelivered` in harvesterAI when a harvester unloads. All three are
+    // serialized so they survive save/load.
+    this.odometer = 0; // metres driven, forward or reverse
+    this.kills = 0; // units/structures this vehicle has destroyed
+    this.creditsDelivered = 0; // lifetime credits unloaded (harvesters only)
     // Set by RadialMenu while this vehicle's command menu is up. An autonomous
     // driver holds position while it is true, so the menu does not slide away
     // from under the player's cursor mid-decision.
@@ -351,6 +359,9 @@ class VehicleInstance {
     pos.x += Math.cos(this.heading) * this.forwardSpeed * dt;
     pos.z += Math.sin(this.heading) * this.forwardSpeed * dt;
     this.speed = Math.abs(this.forwardSpeed);
+    // Every movement path (manual and autonomous) funnels through here, so this
+    // is the one place the odometer can count both without being double-applied.
+    this.odometer += this.speed * dt;
   }
 
   driveManual(dt, heightmap) {
