@@ -3,10 +3,21 @@ import { buildVehicleMesh } from './vehicleFactory.js';
 import { VEHICLE_CATALOG } from './catalog.js';
 import { disposeObject3D } from '../core/disposeObject3D.js';
 import { simClock } from '../core/simClock.js';
+// One-way: trafficController does not import this file back (it only mentions
+// beginReverse in a comment), so there is no cycle.
+import { hasVehicleBehind } from './trafficController.js';
 
 const ARRIVE_DISTANCE = 1.5;
 const BRAKE_SPEED = 0.1; // at or below this the vehicle counts as stopped
 const STEER_GAIN = 1.8; // how hard a click order leans on the steering
+// Past this much misalignment, driving forward is the wrong manoeuvre: the
+// alignment floor below would crawl the vehicle round a wide arc for tens of
+// seconds (a harvester at the floor yaws ~0.095 rad/s — about half a minute to
+// turn 180°), which is how a group converging on one dock ends up orbiting and
+// colliding instead of arriving. Backing up swings the nose round far faster,
+// the same three-point turn a real driver would make.
+const SHARP_TURN_ANGLE = 1.92; // radians (~110°)
+const SHARP_TURN_REVERSE = 1.2; // seconds of backing off per attempt
 const GRADE_PROBE = 2.5; // world units to look ahead when measuring the climb
 const MIN_CLIMB_FACTOR = 0.15; // a near-limit climb is a crawl, not a stop
 // Grinding against terrain too steep to climb wears the vehicle down — just
@@ -83,6 +94,12 @@ class VehicleInstance {
     // Seconds remaining in a reverse maneuver, or null when not reversing —
     // see beginReverse().
     this.reverseTimer = null;
+    // Steering applied while reversing, as a fraction of full lock. 0 (the
+    // default) backs dead straight; non-zero makes it a three-point turn.
+    this.reverseSteerBias = 0;
+    // Cooldown so a vehicle that is genuinely pinned can't re-trigger the
+    // sharp-turn reverse every frame — see driveToTarget.
+    this.sharpTurnCooldown = 0;
     this.headlightsOn = false;
     this.lodTier = LOD_TIERS.FULL; // distance-based level of detail
     // Sim tick, not Date.now(): this only orders the vehicle picker, but it is
@@ -240,7 +257,13 @@ class VehicleInstance {
     return { grade, factor, climbable };
   }
 
-  update(dt, heightmap) {
+  update(dt, heightmap, nearby = null) {
+    // Fleet list for this tick, so driveToTarget can ask what is behind it
+    // before committing to a reversing turn. Held rather than threaded through
+    // every call site below; cleared implicitly next tick when it is re-set.
+    this._nearby = nearby;
+    if (this.sharpTurnCooldown > 0) this.sharpTurnCooldown -= dt;
+
     // Manual input always wins, the same as every other override in this
     // class — a reverse maneuver only an autonomous driver would have
     // started should not fight the player's own hands on the wheel.
@@ -258,15 +281,20 @@ class VehicleInstance {
   }
 
   /**
-   * Back straight up for `duration` seconds — no steering, whatever order is
-   * live stays live (untouched), so normal driving just resumes toward it
-   * once this clears. For an autonomous vehicle whose forward path is
-   * genuinely blocked, backing off is often the only thing that actually
-   * creates room; a forward-angled detour alone can't help a vehicle that's
-   * already touching the obstacle.
+   * Back up for `duration` seconds. Whatever order is live stays live
+   * (untouched), so normal driving just resumes toward it once this clears.
+   * For an autonomous vehicle whose forward path is genuinely blocked, backing
+   * off is often the only thing that actually creates room; a forward-angled
+   * detour alone can't help a vehicle that's already touching the obstacle.
+   *
+   * `steerBias` (-1..1, a fraction of full lock) turns this from a straight
+   * back-up into the reversing leg of a three-point turn. Default 0 keeps the
+   * original straight-line behaviour for every existing caller — with no
+   * steering applied at all, so heading is untouched exactly as before.
    */
-  beginReverse(duration) {
+  beginReverse(duration, steerBias = 0) {
     this.reverseTimer = duration;
+    this.reverseSteerBias = steerBias;
   }
 
   _driveReverse(dt, heightmap) {
@@ -283,10 +311,17 @@ class VehicleInstance {
       // Backing into terrain just as bad — don't crawl into it either.
       this.forwardSpeed = Math.min(this.forwardSpeed, 0);
     }
+    // Only steer when a bias was asked for: applySteering also integrates
+    // heading, so calling it unconditionally would rotate every plain back-off
+    // that previously reversed dead straight.
+    if (this.reverseSteerBias) {
+      this.applySteering(dt, this.reverseSteerBias * this.def.maxSteerAngle);
+    }
     this.advance(dt);
 
     if (this.reverseTimer <= 0) {
       this.reverseTimer = null;
+      this.reverseSteerBias = 0;
       this.forwardSpeed = 0;
     }
   }
@@ -341,6 +376,12 @@ class VehicleInstance {
     if (this.steerAngle !== 0 && this.forwardSpeed !== 0) {
       const wheelbase = this.group.userData.wheelbase;
       this.heading += (this.forwardSpeed / wheelbase) * Math.tan(this.steerAngle) * dt;
+      // Keep it in [-π, π]. Unwrapped it just accumulates — real saves have
+      // shown -126 rad (twenty-odd whole rotations) — which erodes the
+      // precision of every sin/cos of it and makes a save unreadable. No
+      // behaviour change: every consumer either wraps the difference itself or
+      // goes through sin/cos, both of which are periodic.
+      this.heading = wrapAngle(this.heading);
     }
 
     // Point the steered wheels where they are actually steering. A second
@@ -440,6 +481,30 @@ class VehicleInstance {
     }
     this.blocked = false;
     this.accelerating = true;
+
+    // Nearly reversed relative to the goal? Back up and swing the nose round
+    // rather than creeping forward on the alignment floor below. Steering the
+    // opposite way to `delta` is what makes this a turn: heading integrates as
+    // (forwardSpeed / wheelbase) * tan(steerAngle), so with forwardSpeed
+    // negative the sign flips and an opposite lock rotates *toward* the target.
+    //
+    // Gated on having somewhere to reverse into, and on a cooldown, so a
+    // vehicle boxed in on all sides falls through to the old crawl instead of
+    // stuttering between the two every frame.
+    if (
+      Math.abs(delta) > SHARP_TURN_ANGLE &&
+      this.sharpTurnCooldown <= 0 &&
+      this.reverseTimer == null &&
+      !(this._nearby && hasVehicleBehind(this, this._nearby))
+    ) {
+      // Short enough that the turn keeps making progress (a longer gap has the
+      // vehicle crawling the alignment floor again between reverses, which
+      // measurably slows the manoeuvre), long enough to give it a beat of
+      // forward travel so it cannot reverse itself into the same obstacle.
+      this.sharpTurnCooldown = SHARP_TURN_REVERSE * 0.5;
+      this.beginReverse(SHARP_TURN_REVERSE, -Math.sign(delta));
+      return;
+    }
 
     // Ease off while still turning sharply, and while closing on the target.
     // Floored rather than clamped to zero: the bicycle model can only turn a
@@ -783,7 +848,7 @@ export class VehicleController {
    */
   update(dt, heightmap, headlightsOn = false, camera = null) {
     for (const instance of this.instances) {
-      instance.update(dt, heightmap);
+      instance.update(dt, heightmap, this.instances);
       instance.updateTurret(dt);
       if (camera) instance.updateLOD(camera);
       instance.updateLights(headlightsOn);

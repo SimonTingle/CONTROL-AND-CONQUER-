@@ -29,6 +29,10 @@ const WAYPOINT_RADIUS = 8;
 const DETOUR_ANGLES = [0.6, -0.6, 1.2, -1.2, 1.9, -1.9]; // radians off the direct bearing
 const STALL_SPEED = 0.4;
 const STALL_TIMEOUT = 1.5; // seconds near-stopped before trying the next detour
+// Speed-blind failure: circling the destination at the alignment floor is fast
+// enough to never look stalled. See _driveTo's progress check.
+const NO_PROGRESS_TIMEOUT = 6; // seconds without getting closer
+const PROGRESS_EPSILON = 0.5; // world units that count as "closer"
 const REVERSE_DURATION = 1.5; // seconds backing off before the next detour attempt
 // Any non-player vehicle at or below this fraction of health queues for
 // repair on its own, without the player having to notice and click Repair.
@@ -186,6 +190,7 @@ export class RepairController {
     } else {
       r.state = 'queued';
       r.queuePosition = this._claimQueuePosition(bay);
+      r.claimedOrder = false; // new leg, new destination — re-take the wheel
     }
   }
 
@@ -225,6 +230,7 @@ export class RepairController {
     r.waypoint = null;
     r.detours = 0;
     r.stallTimer = 0;
+    r.claimedOrder = false; // new leg (the pad itself) — re-take the wheel
     this._setRingState(bay, 'working');
   }
 
@@ -400,6 +406,26 @@ export class RepairController {
 
     const pos = inst.group.position;
 
+    // Take the wheel before anything else on a leg's first tick.
+    //
+    // Every branch below that issues an order is gated behind `!inst.hasOrder`,
+    // and `hasOrder` is just "target !== null" — it cannot tell *our* order
+    // from one the vehicle was already carrying. So a vehicle sent to repair
+    // while it still held a live order (a harvester mid-run, a scout the player
+    // had clicked somewhere, anything) would never be re-targeted: this
+    // controller would sit watching for stalls while the vehicle drove happily
+    // to somewhere else entirely, `inst.repair` never clearing, and the Repair
+    // command stuck reporting "Already repairing" forever. A real save showed
+    // exactly that — a harvester with repair state 'to-bay' driving full speed
+    // at a crystal field on the opposite side of its bay.
+    //
+    // Cancelling the stale order here makes the `!inst.hasOrder` branch below
+    // fire on that same tick, so this controller always issues its own.
+    if (!r.claimedOrder) {
+      r.claimedOrder = true;
+      if (inst.hasOrder) inst.arrive('cancelled');
+    }
+
     if (Math.hypot(x - pos.x, z - pos.z) <= ARRIVE_RADIUS) {
       inst.arrive('reached');
       r.waypoint = null;
@@ -484,6 +510,32 @@ export class RepairController {
       // never climbs and the out-of-detours give-up below is unreachable.
       // A stall-triggered abandon counts as one used detour.
       r.detours = (r.detours ?? 0) + 1;
+      r.bestDistance = null;
+      r.noProgressTimer = 0;
+      return false;
+    }
+
+    // Moving, but getting no closer — the same blind spot harvesterAI's own
+    // _travel covers: a vehicle circling its destination at the alignment floor
+    // is well above STALL_SPEED and so never registers as stalled, even though
+    // it will orbit forever. Measure progress instead of speed.
+    const d = Math.hypot(x - pos.x, z - pos.z);
+    if (holding) {
+      r.noProgressTimer = 0;
+    } else if (r.bestDistance == null || d < r.bestDistance - PROGRESS_EPSILON) {
+      r.bestDistance = d;
+      r.noProgressTimer = 0;
+    } else {
+      r.noProgressTimer = (r.noProgressTimer ?? 0) + dt;
+      if (r.noProgressTimer > NO_PROGRESS_TIMEOUT) {
+        r.noProgressTimer = 0;
+        r.bestDistance = null;
+        inst.arrive('cancelled');
+        if (inst.reverseTimer == null && !hasVehicleBehind(inst, this.vehicles.instances)) {
+          inst.beginReverse(REVERSE_DURATION);
+        }
+        r.detours = (r.detours ?? 0) + 1;
+      }
     }
     return false;
   }
