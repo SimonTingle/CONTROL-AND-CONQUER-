@@ -271,6 +271,38 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
 .save-field-suggestion:hover { background: rgba(79, 209, 197, 0.14); }
 .save-field-suggestion + .save-field-suggestion { border-top: 1px solid rgba(255, 255, 255, 0.05); }
 
+/* Right-click / long-press export menu. Overlays the suggestion list (higher
+   z-index), anchored under the field, styled to match it. */
+.save-field-export-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 6;
+  min-width: 160px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(14px);
+  overflow: hidden;
+}
+
+.save-field-export-item {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.save-field-export-item:hover { background: rgba(79, 209, 197, 0.14); }
+.save-field-export-item + .save-field-export-item { border-top: 1px solid rgba(255, 255, 255, 0.05); }
+
 .control-save-field button.save-field-disabled {
   opacity: 0.4;
   cursor: default;
