@@ -80,6 +80,14 @@ const BUILDABLE_DEFS = STRUCTURE_CATALOG.filter((d) => d.tags?.some((t) => BUILD
 const EXPLORE_RADIUS_START = 90;
 const EXPLORE_RADIUS_STEP = 45;
 const EXPLORE_RADIUS_MAX = 480;
+// How long the scout may go without reaching a genuinely new explore point
+// before the search sweep is rotated to offer somewhere else. Long enough that
+// a legitimately distant target (the ring reaches 480 units out) is not
+// abandoned mid-journey, short enough that a pinned scout is not left grinding.
+const SCOUT_STUCK_TIMEOUT = 25; // seconds
+// Irrational-ish fraction of a turn, so successive rotations keep landing on
+// fresh compass points instead of cycling through a short repeating set.
+const SCOUT_ANGLE_STEP = 2.399; // radians (~137.5°, the golden angle)
 
 export class AiCommander {
   /**
@@ -117,6 +125,12 @@ export class AiCommander {
     // one cause, fixed in _manageBase, but nothing guarantees it's the only
     // one a future change could reintroduce).
     this.baseOrderElapsed = 0;
+    // Scout exploration. The offset rotates findSpawnPointNear's deterministic
+    // sweep when the scout stops getting anywhere; lastScoutPoint is what tells
+    // "chose somewhere new" from "handed the same point back" — see _driveScout.
+    this.scoutStuckTimer = 0;
+    this.scoutAngleOffset = 0;
+    this.lastScoutPoint = null;
 
     const diffId = ctx.game.difficulty?.id;
     this.economy = DIFFICULTY_ECONOMY[diffId] ?? DEFAULT_ECONOMY;
@@ -541,16 +555,47 @@ export class AiCommander {
 
   _driveScout(dt) {
     const scout = this._scout();
-    if (!scout || scout.mode !== 'mobile' || scout.menuOpen || scout.hasOrder) return;
+    if (!scout || scout.mode !== 'mobile' || scout.menuOpen) return;
+
+    // Give up on an explore point the scout is not actually reaching.
+    //
+    // findSpawnPointNear is a deterministic scan, so the same origin and radii
+    // return the same point every time — and `exploreRadius` stops changing
+    // once it saturates. That combination means a scout which cannot reach its
+    // target is re-ordered to the *identical* spot every time it gives up, with
+    // nothing to break the tie. Unlike harvesterAI, this driver has no bans and
+    // no detours, so it never escalates: traced on a real match, a scout pinned
+    // against a 0.815 grade (its limit is 0.8) re-issued the same point for six
+    // straight minutes while blocked-damage ground it from full health down to
+    // the 15% floor, never moving a single unit.
+    //
+    // Rotating the sweep is the escalation it was missing. The timer only
+    // resets when a genuinely different point is chosen, so reaching one keeps
+    // exploration moving while failing to reach one eventually forces a new
+    // direction.
+    this.scoutStuckTimer += dt;
+    if (this.scoutStuckTimer > SCOUT_STUCK_TIMEOUT) {
+      this.scoutStuckTimer = 0;
+      this.scoutAngleOffset += SCOUT_ANGLE_STEP;
+      scout.arrive('cancelled'); // drop the doomed order so a new one is issued
+    }
+
+    if (scout.hasOrder) return;
 
     const origin = this.team.homePoint ?? { x: 0, z: 0 };
     const spot = findSpawnPointNear(this.ctx.heightmap, origin, {
       minRadius: this.exploreRadius * 0.6,
       maxRadius: this.exploreRadius,
+      angleOffset: this.scoutAngleOffset,
       camera: this.camera,
     });
 
     if (scout.setTarget(spot.point.x, spot.point.z, this.ctx.heightmap)) {
+      const last = this.lastScoutPoint;
+      if (!last || Math.hypot(spot.point.x - last.x, spot.point.z - last.z) > 1) {
+        this.scoutStuckTimer = 0;
+        this.lastScoutPoint = { x: spot.point.x, z: spot.point.z };
+      }
       this.exploreRadius = Math.min(EXPLORE_RADIUS_MAX, this.exploreRadius + EXPLORE_RADIUS_STEP);
     } else {
       // Water, or too steep — try a different ring next tick rather than

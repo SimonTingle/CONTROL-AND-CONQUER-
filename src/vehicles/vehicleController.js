@@ -18,6 +18,9 @@ const STEER_GAIN = 1.8; // how hard a click order leans on the steering
 // the same three-point turn a real driver would make.
 const SHARP_TURN_ANGLE = 1.92; // radians (~110°)
 const SHARP_TURN_REVERSE = 1.2; // seconds of backing off per attempt
+// Backing away from a slope too steep to climb. Longer than the sharp-turn
+// reverse: the point is to end up somewhere materially different, not to pivot.
+const BLOCKED_REVERSE = 1.5; // seconds
 const GRADE_PROBE = 2.5; // world units to look ahead when measuring the climb
 const MIN_CLIMB_FACTOR = 0.15; // a near-limit climb is a crawl, not a stop
 // Grinding against terrain too steep to climb wears the vehicle down — just
@@ -97,9 +100,10 @@ class VehicleInstance {
     // Steering applied while reversing, as a fraction of full lock. 0 (the
     // default) backs dead straight; non-zero makes it a three-point turn.
     this.reverseSteerBias = 0;
-    // Cooldown so a vehicle that is genuinely pinned can't re-trigger the
-    // sharp-turn reverse every frame — see driveToTarget.
-    this.sharpTurnCooldown = 0;
+    // Shared cooldown for driveToTarget's two escape manoeuvres (the
+    // sharp-turn reverse and the blocked-slope back-off), so a vehicle that is
+    // genuinely pinned can't re-trigger either of them every frame.
+    this.escapeCooldown = 0;
     this.headlightsOn = false;
     this.lodTier = LOD_TIERS.FULL; // distance-based level of detail
     // Sim tick, not Date.now(): this only orders the vehicle picker, but it is
@@ -262,7 +266,7 @@ class VehicleInstance {
     // before committing to a reversing turn. Held rather than threaded through
     // every call site below; cleared implicitly next tick when it is re-set.
     this._nearby = nearby;
-    if (this.sharpTurnCooldown > 0) this.sharpTurnCooldown -= dt;
+    if (this.escapeCooldown > 0) this.escapeCooldown -= dt;
 
     // Manual input always wins, the same as every other override in this
     // class — a reverse maneuver only an autonomous driver would have
@@ -477,6 +481,26 @@ class VehicleInstance {
       this.blocked = true;
       this._applyBlockedDamage(dt);
       this.arrive('blocked');
+      // ...and physically back away from it. Dropping the order alone changes
+      // nothing the *next* order is decided from: the vehicle is still in the
+      // same spot facing the same slope, so a fresh order in a similar
+      // direction is refused identically, on the very next tick, forever. Only
+      // the drivers that own a detour system (harvesterAI, repairController)
+      // could break out of that; anything else — an AI scout, a player's click
+      // order — just ground itself down in place. Traced on an AI scout: 15,133
+      // blocked frames without moving a single unit, grinding 100hp to the 15%
+      // floor against a 0.815 grade it needed 0.8 to climb.
+      //
+      // Backing off moves it somewhere the next order is genuinely decided
+      // afresh from, which is what actually ends the loop.
+      if (
+        this.escapeCooldown <= 0 &&
+        this.reverseTimer == null &&
+        !(this._nearby && hasVehicleBehind(this, this._nearby))
+      ) {
+        this.escapeCooldown = BLOCKED_REVERSE * 2;
+        this.beginReverse(BLOCKED_REVERSE);
+      }
       return;
     }
     this.blocked = false;
@@ -493,7 +517,7 @@ class VehicleInstance {
     // stuttering between the two every frame.
     if (
       Math.abs(delta) > SHARP_TURN_ANGLE &&
-      this.sharpTurnCooldown <= 0 &&
+      this.escapeCooldown <= 0 &&
       this.reverseTimer == null &&
       !(this._nearby && hasVehicleBehind(this, this._nearby))
     ) {
@@ -501,7 +525,7 @@ class VehicleInstance {
       // vehicle crawling the alignment floor again between reverses, which
       // measurably slows the manoeuvre), long enough to give it a beat of
       // forward travel so it cannot reverse itself into the same obstacle.
-      this.sharpTurnCooldown = SHARP_TURN_REVERSE * 0.5;
+      this.escapeCooldown = SHARP_TURN_REVERSE * 0.5;
       this.beginReverse(SHARP_TURN_REVERSE, -Math.sign(delta));
       return;
     }
