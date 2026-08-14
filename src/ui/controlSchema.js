@@ -92,6 +92,11 @@ export function buildSchema(world, view, game) {
           (name) => {
             const result = game.loadGame(name || 'default');
             if (!result) window.alert(`No save found named "${name || 'default'}".`);
+          },
+          {
+            // The exact stored bytes, so a full export re-loads identically;
+            // menu.js optionally strips the fog/track masks for a diagnostic.
+            onExport: (name) => ({ name, json: game.rawLocalSave(name || 'default') }),
           }
         ),
         // Cloud saves need both a backend build and a signed-in account —
@@ -134,6 +139,14 @@ export function buildSchema(world, view, game) {
                     loadLabel: 'Load from cloud',
                     refresh: async () => {
                       cloudSaves = await game.listCloudSaves();
+                    },
+                    // Cloud rows carry only metadata; fetch the payload to
+                    // export it. Reuses the same cached list onLoad consults.
+                    onExport: async (name) => {
+                      const match = cloudSaves.find((s) => s.name === name);
+                      if (!match) throw new Error('cloud save not found');
+                      const save = await api.getSave(match.id);
+                      return { name, json: JSON.stringify(save.payload) };
                     },
                   }
                 ),

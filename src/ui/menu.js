@@ -7,6 +7,43 @@
 import { showToast } from './toast.js';
 
 const REBUILD_DEBOUNCE_MS = 90;
+const LONG_PRESS_MS = 500; // touch equivalent of a right-click
+
+/** A filename-safe slug for a save name, so an odd name can't break the download. */
+function safeSlug(name) {
+  return (name || 'save').replace(/[^a-z0-9._-]+/gi, '_').replace(/^_+|_+$/g, '') || 'save';
+}
+
+/**
+ * Strip the bulky, opaque masks from a snapshot for a human/Claude-readable
+ * diagnostic. `teams[].fog` and top-level `tracksRLE` are base64 blobs (a
+ * 256×256 mask per team, a 1024×1024 track mask) that are 80–95% of a save's
+ * bytes and say nothing about game logic — see snapshot.js. Everything else
+ * (teams, vehicles, structures, harvester states, AI commanders, terrain
+ * params) is kept. Returns a new object; the input is not mutated.
+ */
+function stripMasks(snap) {
+  const out = { ...snap };
+  if (out.tracksRLE) out.tracksRLE = null;
+  if (Array.isArray(out.teams)) {
+    out.teams = out.teams.map((t) => (t && t.fog != null ? { ...t, fog: null } : t));
+  }
+  return out;
+}
+
+/** Hand `text` to the browser as a download named `filename`. */
+function downloadText(filename, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Revoke after the click has been dispatched — doing it synchronously can
+  // cancel the download on some browsers.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
 
 export class Menu {
   /**
@@ -199,6 +236,84 @@ export class Menu {
     const closeList = () => {
       listOpen = false;
       list.classList.add('hidden');
+      closeExportMenu();
+    };
+
+    // At most one export menu at a time; closing it is idempotent.
+    let exportMenu = null;
+    let exportDismiss = null;
+    const closeExportMenu = () => {
+      exportDismiss?.();
+      exportDismiss = null;
+      exportMenu?.remove();
+      exportMenu = null;
+    };
+
+    /**
+     * Resolve the raw save JSON for `name` and download it — the exact bytes as
+     * the full save, or the mask-stripped diagnostic. Failures (a cloud fetch
+     * that didn't come back) toast rather than fail silently.
+     */
+    const runExport = async (name, diagnostic) => {
+      closeExportMenu();
+      try {
+        const { json } = await control.onExport(name);
+        if (json == null) throw new Error('save not found');
+        const text = diagnostic
+          ? JSON.stringify(stripMasks(JSON.parse(json)), null, 2)
+          : json;
+        const suffix = diagnostic ? '.diagnostic.json' : '.json';
+        downloadText(safeSlug(name) + suffix, text);
+      } catch (err) {
+        showToast(`Could not export "${name}": ${err.message ?? err}`, 6000);
+      }
+    };
+
+    /** A tiny two-item menu anchored to a suggestion row. */
+    const openExportMenu = (name) => {
+      closeExportMenu();
+      const menu = document.createElement('div');
+      menu.className = 'save-field-export-menu';
+      for (const [label, diagnostic] of [
+        ['Export save', false],
+        ['Export diagnostic', true],
+      ]) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'save-field-export-item';
+        btn.textContent = label;
+        // mousedown/touchstart, not click: the field's blur handler closes the
+        // list on pointer-down elsewhere; acting here keeps us ahead of it.
+        const go = (e) => { e.preventDefault(); runExport(name, diagnostic); };
+        btn.addEventListener('mousedown', go);
+        btn.addEventListener('touchstart', go, { passive: false });
+        menu.appendChild(btn);
+      }
+      // Sits inside the same positioned wrap as the suggestion list, so it
+      // rides along with the field rather than needing absolute page coords.
+      wrap.appendChild(menu);
+      exportMenu = menu;
+
+      // Dismiss on a pointer-down outside the menu, or Escape. Listeners are
+      // removed together via exportDismiss so none can outlive the menu.
+      const onAway = (e) => {
+        if (!menu.contains(e.target)) closeExportMenu();
+      };
+      const onKey = (e) => {
+        if (e.key === 'Escape') closeExportMenu();
+      };
+      exportDismiss = () => {
+        document.removeEventListener('mousedown', onAway, true);
+        document.removeEventListener('touchstart', onAway, true);
+        document.removeEventListener('keydown', onKey);
+      };
+      // Capture phase + a tick's delay so the very pointer-down that opened the
+      // menu doesn't immediately close it.
+      setTimeout(() => {
+        document.addEventListener('mousedown', onAway, true);
+        document.addEventListener('touchstart', onAway, true);
+        document.addEventListener('keydown', onKey);
+      }, 0);
     };
 
     const renderSuggestions = () => {
@@ -214,6 +329,7 @@ export class Menu {
         const item = document.createElement('div');
         item.className = 'save-field-suggestion';
         item.textContent = name;
+        if (control.onExport) item.title = 'Right-click or long-press to export';
         // mousedown/touchstart, not click: both fire before the input's blur,
         // so the list is still open (and not yet hidden by it) when a pick
         // lands. A plain click handler would lose the race to blur closing it.
@@ -222,8 +338,47 @@ export class Menu {
           closeList();
           syncLoadEnabled();
         };
-        item.addEventListener('mousedown', (e) => { e.preventDefault(); pick(); });
-        item.addEventListener('touchstart', (e) => { e.preventDefault(); pick(); }, { passive: false });
+        // preventDefault on any button so the input keeps focus — otherwise a
+        // right-click blurs it, and the blur's closeList() tears down the very
+        // export menu the contextmenu is about to open. Only the left button
+        // actually picks; the right button is handled by contextmenu below.
+        item.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          if (e.button === 0) pick();
+        });
+
+        if (control.onExport) {
+          // Desktop: right-click exports.
+          item.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            openExportMenu(name);
+          });
+          // Touch: a long press exports; a short tap still picks. The timer is
+          // cancelled if the finger moves (a scroll) or lifts early.
+          let pressTimer = null;
+          let longFired = false;
+          const clearPress = () => {
+            if (pressTimer) clearTimeout(pressTimer);
+            pressTimer = null;
+          };
+          item.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            longFired = false;
+            clearPress();
+            pressTimer = setTimeout(() => {
+              longFired = true;
+              openExportMenu(name);
+            }, LONG_PRESS_MS);
+          }, { passive: false });
+          item.addEventListener('touchmove', clearPress, { passive: true });
+          item.addEventListener('touchend', (e) => {
+            clearPress();
+            if (!longFired) { e.preventDefault(); pick(); }
+          }, { passive: false });
+          item.addEventListener('touchcancel', clearPress, { passive: true });
+        } else {
+          item.addEventListener('touchstart', (e) => { e.preventDefault(); pick(); }, { passive: false });
+        }
         list.appendChild(item);
       }
       list.classList.remove('hidden');

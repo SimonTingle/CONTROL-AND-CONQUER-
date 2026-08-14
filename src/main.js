@@ -1008,6 +1008,12 @@ const game = {
     localStorage.removeItem(`ptg-save:${slot}`);
   },
 
+  /** The exact stored JSON for a slot, or null — backs the Save/Load field's
+   * export. Kept here so the `ptg-save:` key prefix lives in one place. */
+  rawLocalSave(slot) {
+    return localStorage.getItem(`ptg-save:${slot}`);
+  },
+
   loadGame(slot = 'default') {
     const raw = localStorage.getItem(`ptg-save:${slot}`);
     if (!raw) return null;
