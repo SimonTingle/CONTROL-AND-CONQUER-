@@ -45,6 +45,12 @@ const WAYPOINT_RADIUS = 16;
 const RESUME_DELAY = 0.35; // seconds of quiet keys before the loop picks up again
 const STALL_SPEED = 0.3;
 const STALL_TIMEOUT = 3; // seconds barely moving in a driving state
+// Progress, rather than speed, is what catches a vehicle circling its own
+// destination at the alignment floor — see _travel. Generous on purpose: a
+// legitimately wide arc round an obstacle, or a slow climb, can hold distance
+// for a few seconds without being stuck.
+const NO_PROGRESS_TIMEOUT = 6; // seconds without getting closer
+const PROGRESS_EPSILON = 0.5; // world units that count as "closer"
 const RETRY_PAUSE = 1.5;
 const REVERSE_DURATION = 1.5; // seconds backing off before trying the next detour angle
 const BAN_SECONDS = 45;
@@ -161,6 +167,12 @@ export class HarvesterAI {
         // structure ref while in TO_REPAIR.
         repairBay: null,
         repairRetryCooldown: 0,
+        // Progress tracking (see _travel): the closest this leg has come to its
+        // destination, how long it has failed to beat that, and which leg the
+        // pair belongs to.
+        progressLeg: null,
+        bestDistance: null,
+        noProgressTimer: 0,
       };
       this.states.set(inst, s);
     }
@@ -868,6 +880,43 @@ export class HarvesterAI {
     if (s.stallTimer > STALL_TIMEOUT) {
       s.stallTimer = 0;
       this._onAbandoned(inst, s, dest, d);
+      return;
+    }
+
+    // Moving, but getting nowhere.
+    //
+    // The stall check above measures *speed*, and that is blind to the failure
+    // this catches: a vehicle pointed away from its goal drives at the
+    // alignment floor (vehicleController's `Math.max(0.12, cos(delta))` — for a
+    // harvester, exactly 1.68 u/s) on a wide arc, which is comfortably above
+    // STALL_SPEED and so reads as perfectly healthy while it orbits its own
+    // destination indefinitely. A real save caught four harvesters doing this
+    // around one dock at once, colliding, with every stallTimer sat at 0.
+    //
+    // Progress, not speed, is the honest measure: track the closest this leg
+    // has ever got and complain if that stops improving.
+    //
+    // Keyed off the state itself rather than reset at each of the ~ten sites
+    // that can change it — one check here cannot be forgotten by a state added
+    // later.
+    if (s.progressLeg !== s.state) {
+      s.progressLeg = s.state;
+      s.bestDistance = null;
+      s.noProgressTimer = 0;
+    }
+
+    if (holding) {
+      s.noProgressTimer = 0; // a deliberate hold is not a failure to progress
+    } else if (s.bestDistance == null || d < s.bestDistance - PROGRESS_EPSILON) {
+      s.bestDistance = d;
+      s.noProgressTimer = 0;
+    } else {
+      s.noProgressTimer = (s.noProgressTimer ?? 0) + dt;
+      if (s.noProgressTimer > NO_PROGRESS_TIMEOUT) {
+        s.noProgressTimer = 0;
+        s.bestDistance = null;
+        this._onAbandoned(inst, s, dest, d);
+      }
     }
   }
 

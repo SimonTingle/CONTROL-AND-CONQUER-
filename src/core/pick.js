@@ -226,7 +226,21 @@ export function findTeamSpawnPoints(heightmap, count, { minSeparation = 260, pha
 export function findSpawnPointNear(
   heightmap,
   origin,
-  { minRadius, maxRadius, camera, target = new THREE.Vector3(), requireGentleGrade = false, isValid = null }
+  {
+    minRadius,
+    maxRadius,
+    camera,
+    target = new THREE.Vector3(),
+    requireGentleGrade = false,
+    isValid = null,
+    // Rotates the whole sweep. This scan is deterministic — same origin and
+    // radii in, same point out — which is what a caller wants right up until
+    // the point it returns is one the vehicle cannot actually reach, at which
+    // point asking again is pointless. An offset lets such a caller ask for a
+    // genuinely different answer. Default 0 leaves every existing caller's
+    // result bit-identical.
+    angleOffset = 0,
+  }
 ) {
   const radiusStep = Math.max(2, (maxRadius - minRadius) / 6);
   const angleCount = 12;
@@ -239,7 +253,7 @@ export function findSpawnPointNear(
     for (let i = 0; i < angleCount; i++) {
       // Offset the angle sweep per ring so successive radii don't all sample
       // the same compass points and miss a valid gap between them.
-      const angle = (i / angleCount) * Math.PI * 2 + r * 0.618;
+      const angle = (i / angleCount) * Math.PI * 2 + r * 0.618 + angleOffset;
       const x = origin.x + Math.cos(angle) * r;
       const z = origin.z + Math.sin(angle) * r;
       if (heightmap.heightAt(x, z) <= heightmap.seaLevelY) continue;

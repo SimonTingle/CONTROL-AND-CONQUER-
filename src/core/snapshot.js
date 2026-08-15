@@ -121,6 +121,18 @@ function serializeVehicle(inst) {
           state: inst.repair.state,
           queuePosition: inst.repair.queuePosition ?? null,
           owed: inst.repair.owed ?? 0,
+          // The drive leg itself. Without these a save taken mid-approach
+          // restarted its detour sequence from scratch on load and could take a
+          // different route than the one in progress; `claimedOrder` in
+          // particular decides whether the controller re-issues its own order,
+          // which is what keeps it from riding a stale one.
+          detours: inst.repair.detours ?? 0,
+          waypoint: point2(inst.repair.waypoint),
+          stallTimer: round(inst.repair.stallTimer ?? 0, 3),
+          claimedOrder: inst.repair.claimedOrder ?? false,
+          bestDistance:
+            inst.repair.bestDistance == null ? null : round(inst.repair.bestDistance, 2),
+          noProgressTimer: round(inst.repair.noProgressTimer ?? 0, 3),
         }
       : null,
   };
@@ -256,6 +268,11 @@ function serializeHarvesterStates(ctx) {
       // from immediately re-firing after a load.
       repairBayId: s.repairBay?.id ?? null,
       repairRetryCooldown: round(s.repairRetryCooldown ?? 0, 3),
+      // Progress tracking, so a reload doesn't hand a circling harvester a
+      // fresh six seconds of grace before anything notices it again.
+      progressLeg: s.progressLeg ?? null,
+      bestDistance: s.bestDistance == null ? null : round(s.bestDistance, 2),
+      noProgressTimer: round(s.noProgressTimer ?? 0, 3),
       // Field bans, as [fieldId, expirySimTime] pairs. These are sim-time
       // based (see simClock.js), so they survive a round trip meaningfully.
       bans: s.bans ? [...s.bans].map(([id, until]) => [id, round(until, 3)]) : [],
@@ -448,6 +465,14 @@ export function deserialize(ctx, snap) {
           state: saved.repair.state,
           queuePosition: saved.repair.queuePosition,
           owed: saved.repair.owed,
+          // Drive-leg state. `??` so a save written before these existed still
+          // loads — it just restarts the approach, which is the old behaviour.
+          detours: saved.repair.detours ?? 0,
+          waypoint: saved.repair.waypoint ?? null,
+          stallTimer: saved.repair.stallTimer ?? 0,
+          claimedOrder: saved.repair.claimedOrder ?? false,
+          bestDistance: saved.repair.bestDistance ?? null,
+          noProgressTimer: saved.repair.noProgressTimer ?? 0,
         };
       }
     }
@@ -496,6 +521,9 @@ export function deserialize(ctx, snap) {
       state.repairBay =
         saved.repairBayId != null ? (structureById.get(saved.repairBayId) ?? null) : null;
       state.repairRetryCooldown = saved.repairRetryCooldown ?? 0;
+      state.progressLeg = saved.progressLeg ?? null;
+      state.bestDistance = saved.bestDistance ?? null;
+      state.noProgressTimer = saved.noProgressTimer ?? 0;
       if (state.state === 'to-repair' && !state.repairBay) state.state = 'idle';
       state.bans = new Map(saved.bans ?? []);
     }
