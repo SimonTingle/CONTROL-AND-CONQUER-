@@ -13,8 +13,12 @@
  * Deliberately lighter machinery than harvesterAI's own bans-with-expiry: that
  * exists because a harvester chooses between several bloom fields with a real
  * history worth remembering. A commander's choices here — deploy once, build
- * a facility once, buy a harvester periodically, send the scout somewhere new
- * — don't have that shape, so a single retry brake (`retryTimer`) covers it.
+ * a facility once, buy a harvester periodically — don't have that shape, so a
+ * single retry brake (`retryTimer`) covers them. Scouting is the one exception:
+ * a team can own several scout-buggies exploring independently (see `_scouts`),
+ * so each gets its own retry/stuck state in `scoutState` — sharing the
+ * commander-wide brake would stall every other scout, and every other system,
+ * whenever just one of them hit an unreachable point.
  *
  * commands.js is reused directly wherever it's headless (deploy, build a
  * harvester, upgrade). The two build-a-structure commands are not: they only
@@ -125,12 +129,15 @@ export class AiCommander {
     // one cause, fixed in _manageBase, but nothing guarantees it's the only
     // one a future change could reintroduce).
     this.baseOrderElapsed = 0;
-    // Scout exploration. The offset rotates findSpawnPointNear's deterministic
-    // sweep when the scout stops getting anywhere; lastScoutPoint is what tells
-    // "chose somewhere new" from "handed the same point back" — see _driveScout.
-    this.scoutStuckTimer = 0;
-    this.scoutAngleOffset = 0;
-    this.lastScoutPoint = null;
+    // Scout exploration, one entry per scout-buggy (a team can own more than
+    // one — see _scouts). stuckTimer/angleOffset rotate findSpawnPointNear's
+    // deterministic sweep when a scout stops getting anywhere; lastPoint is
+    // what tells "chose somewhere new" from "handed the same point back" —
+    // see _driveOneScout. exploreRadius stays commander-level: it tracks how
+    // far the team as a whole has pushed its search ring, shared by design so
+    // a second scout continues widening from where the first left off rather
+    // than re-exploring the same near ring.
+    this.scoutState = new Map();
 
     const diffId = ctx.game.difficulty?.id;
     this.economy = DIFFICULTY_ECONOMY[diffId] ?? DEFAULT_ECONOMY;
@@ -164,8 +171,8 @@ export class AiCommander {
     return this._ownUnits('base-station')[0] ?? null;
   }
 
-  _scout() {
-    return this._ownUnits('scout-buggy')[0] ?? null;
+  _scouts() {
+    return this._ownUnits('scout-buggy');
   }
 
   // ---- deploy, once — self-gating: COMMANDS['base-station'] only lists
@@ -554,8 +561,26 @@ export class AiCommander {
   // ---- scouting: keep the recon unit moving outward, forever ----
 
   _driveScout(dt) {
-    const scout = this._scout();
-    if (!scout || scout.mode !== 'mobile' || scout.menuOpen) return;
+    // Every scout-buggy the team owns explores independently — each gets its
+    // own stuck-timer/angle-offset/retry state (below) so one scout's stall
+    // doesn't rotate another's search sweep or pause its order.
+    for (const scout of this._scouts()) {
+      this._driveOneScout(scout, dt);
+    }
+  }
+
+  _driveOneScout(scout, dt) {
+    let st = this.scoutState.get(scout);
+    if (!st) {
+      st = { stuckTimer: 0, angleOffset: 0, lastPoint: null, retryTimer: 0 };
+      this.scoutState.set(scout, st);
+    }
+
+    if (st.retryTimer > 0) {
+      st.retryTimer -= dt;
+      return;
+    }
+    if (scout.mode !== 'mobile' || scout.menuOpen) return;
 
     // Give up on an explore point the scout is not actually reaching.
     //
@@ -573,10 +598,10 @@ export class AiCommander {
     // resets when a genuinely different point is chosen, so reaching one keeps
     // exploration moving while failing to reach one eventually forces a new
     // direction.
-    this.scoutStuckTimer += dt;
-    if (this.scoutStuckTimer > SCOUT_STUCK_TIMEOUT) {
-      this.scoutStuckTimer = 0;
-      this.scoutAngleOffset += SCOUT_ANGLE_STEP;
+    st.stuckTimer += dt;
+    if (st.stuckTimer > SCOUT_STUCK_TIMEOUT) {
+      st.stuckTimer = 0;
+      st.angleOffset += SCOUT_ANGLE_STEP;
       scout.arrive('cancelled'); // drop the doomed order so a new one is issued
     }
 
@@ -586,21 +611,21 @@ export class AiCommander {
     const spot = findSpawnPointNear(this.ctx.heightmap, origin, {
       minRadius: this.exploreRadius * 0.6,
       maxRadius: this.exploreRadius,
-      angleOffset: this.scoutAngleOffset,
+      angleOffset: st.angleOffset,
       camera: this.camera,
     });
 
     if (scout.setTarget(spot.point.x, spot.point.z, this.ctx.heightmap)) {
-      const last = this.lastScoutPoint;
+      const last = st.lastPoint;
       if (!last || Math.hypot(spot.point.x - last.x, spot.point.z - last.z) > 1) {
-        this.scoutStuckTimer = 0;
-        this.lastScoutPoint = { x: spot.point.x, z: spot.point.z };
+        st.stuckTimer = 0;
+        st.lastPoint = { x: spot.point.x, z: spot.point.z };
       }
       this.exploreRadius = Math.min(EXPLORE_RADIUS_MAX, this.exploreRadius + EXPLORE_RADIUS_STEP);
     } else {
       // Water, or too steep — try a different ring next tick rather than
       // spinning on the exact same rejected point every frame.
-      this.retryTimer = RETRY_PAUSE;
+      st.retryTimer = RETRY_PAUSE;
     }
   }
 }

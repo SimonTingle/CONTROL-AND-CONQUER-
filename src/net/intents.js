@@ -36,8 +36,13 @@ import { commandsFor } from '../vehicles/commands.js';
 
 /** Wire-form constructors. Kept together so the vocabulary is greppable. */
 export const Intent = {
-  /** A radial-menu command, identified by id rather than by closure. */
-  command: (instanceId, cmdId) => ({ t: 'cmd', instanceId, cmdId }),
+  /**
+   * A radial-menu command, identified by id rather than by closure.
+   * `instanceKind` ('vehicle' | 'structure') disambiguates the id: vehicle and
+   * structure ids are separate counters that both start at 1, so the same
+   * number can legitimately refer to one of each at once.
+   */
+  command: (instanceId, instanceKind, cmdId) => ({ t: 'cmd', instanceId, instanceKind, cmdId }),
   /** Tap-to-move / click order for one vehicle. */
   move: (instanceId, x, z) => ({ t: 'move', instanceId, x, z }),
   /**
@@ -77,8 +82,9 @@ export function applyIntent(intent, ctx, teamId = null) {
 
   switch (intent.t) {
     case 'cmd': {
-      const inst = vehicleById(ctx, intent.instanceId) ??
-        ctx.structures.instances.find((s) => s.id === intent.instanceId && !s.dead);
+      const inst = intent.instanceKind === 'structure'
+        ? ctx.structures.instances.find((s) => s.id === intent.instanceId && !s.dead) ?? null
+        : vehicleById(ctx, intent.instanceId);
       if (!owns(inst)) return false;
       // commandsFor resolves the command list for the instance's *current*
       // mode, so a command that was legal when clicked but isn't now simply

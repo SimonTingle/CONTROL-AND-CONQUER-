@@ -284,10 +284,29 @@ export class HarvesterAI {
         );
       case FILLING:
         return this._fill(inst, s, dt);
-      case TO_BASE:
+      case TO_BASE: {
+        // Checked every tick, not just on arrival: a harvester converging on a
+        // dock another harvester is already unloading at can be physically
+        // blocked well short of DOCK_DISTANCE, in the contested approach
+        // corridor rather than yielding to moving traffic — `holding` in
+        // _travel only covers the latter, so without this the no-progress
+        // timer (correctly) escalates it as stuck instead. Routing straight to
+        // the queue avoids the contested corridor entirely, the same place
+        // _atDock already sends it if arrival finds the dock taken.
+        const facility = this._facility(inst);
+        if (facility?.dockedHarvester && facility.dockedHarvester !== inst) {
+          s.state = WAITING_FOR_DOCK;
+          s.dest = null;
+          s.waypoint = null;
+          s.detours = 0;
+          s.stallTimer = 0;
+          s.queuePosition = this._claimQueueSlot(facility);
+          return;
+        }
         return this._travel(inst, s, dt, DOCK_DISTANCE, () => {
           this._atDock(inst, s);
         });
+      }
       case WAITING_FOR_DOCK:
         return this._waitingForDock(inst, s);
       case UNLOADING:

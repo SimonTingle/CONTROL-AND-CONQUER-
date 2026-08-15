@@ -1067,7 +1067,7 @@ const hud = new Hud();
  */
 const radialMenu = new RadialMenu(camera, {
   onCommand(cmd, instance) {
-    submitIntent(Intent.command(instance.id, cmd.id));
+    submitIntent(Intent.command(instance.id, instance.kind, cmd.id));
   },
 });
 
