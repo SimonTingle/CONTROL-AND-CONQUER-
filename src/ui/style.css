@@ -902,12 +902,27 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
   inset: 0;
   z-index: 32; /* above the difficulty/AI-difficulty screens it routes to */
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
   padding: 24px;
+  transition: opacity 0.35s ease;
+}
+
+#lobby {
+  justify-content: center;
   background: rgba(5, 8, 12, 0.94);
   backdrop-filter: blur(6px);
-  transition: opacity 0.35s ease;
+}
+
+/* landscape-game-photo.png is faded to black across its lower third by
+   design — the button row below lands there and needs no extra darkening
+   of its own. The gradient only has to cover the upper two thirds, where
+   the title sits directly on open sky/terrain. */
+#portal {
+  justify-content: flex-start;
+  background:
+    linear-gradient(to bottom, rgba(5, 8, 12, 0.6) 0%, rgba(5, 8, 12, 0.2) 45%, rgba(5, 8, 12, 0) 62%),
+    url('/landscape-game-photo.png') center / cover no-repeat;
 }
 
 #portal.hidden, #lobby.hidden { opacity: 0; pointer-events: none; }
@@ -915,6 +930,7 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
 .portal-panel {
   width: 100%;
   max-width: 760px;
+  margin-top: 9vh;
   text-align: center;
 }
 
@@ -961,10 +977,48 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
   color: var(--text-dim);
 }
 
-.portal-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
+/* Sits directly on #portal (not inside .portal-panel) so it can be pinned to
+   the image's black lower third independently of where the title lands. */
+.portal-button-row {
+  position: absolute;
+  left: 50%;
+  bottom: 6%;
+  transform: translateX(-50%);
+  width: min(94vw, 920px);
+  display: flex;
   gap: 12px;
+}
+
+.portal-mode-btn {
+  flex: 1 1 0;
+  padding: 14px 10px;
+  border: 1px solid rgba(79, 209, 197, 0.75);
+  border-radius: 8px;
+  background: rgba(8, 12, 17, 0.55);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  text-shadow: 0 0 6px rgba(79, 209, 197, 0.7);
+  box-shadow: 0 0 12px rgba(79, 209, 197, 0.3);
+  cursor: pointer;
+  transition: box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.portal-mode-btn:hover {
+  background: rgba(79, 209, 197, 0.12);
+  box-shadow: 0 0 20px rgba(79, 209, 197, 0.55);
+}
+
+/* Same styling as the rest of the row today — a hook to give this button its
+   own look later without touching the shared .portal-mode-btn rule. */
+.god-mode-btn {}
+
+@media (max-width: 620px) {
+  .portal-button-row { flex-wrap: wrap; bottom: 4%; }
+  .portal-mode-btn { flex: 1 1 40%; }
 }
 
 .portal-card {
@@ -1003,10 +1057,6 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
   max-width: 160px;
   text-align: center;
   align-items: center;
-}
-
-@media (max-width: 620px) {
-  .portal-grid { grid-template-columns: 1fr; }
 }
 
 /* ---- match end (victory / defeat) ---- */
