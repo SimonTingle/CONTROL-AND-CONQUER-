@@ -1,5 +1,28 @@
 # Online multiplayer, round three: a build-version handshake
 
+## Note: reconciled with a concurrent pass at the same fix
+
+A separate session landed a first attempt at this same change on this branch
+first (`a9bd939`, "Add protocol version handshake..."), superseded by this
+version rather than left alongside it. Its approach was one-directional and
+had a real bug worth recording, since the same shape of mistake is easy to
+repeat: it added `PROTOCOL_VERSION` to the `welcome` frame and checked it in
+`main.js` **after** `client.connect()` resolved, with no server-side check at
+all — so an old *client* connecting to a new server was never caught (only
+the reverse), which fails requirement 2 below outright. Worse, the mismatch
+branch called `endOnlineMatch(...)`, which opens with `if (!match) return;` —
+and at that point in `startOnlineMatch`, the module-level `match` variable is
+still `null` (it isn't assigned until much later in the same function). The
+guard fired, `endOnlineMatch` silently returned having closed nothing and
+shown no toast, and `startOnlineMatch` returned `undefined` rather than
+throwing — so the caller's `.catch()` never ran either. The net effect was a
+protocol mismatch that produced *no visible symptom at all*: not the
+undocumented desync this feature exists to replace with something better, but
+a strictly worse silent no-op. This version's client-side check lives inside
+`MatchClient.connect()` itself, rejecting the promise before it can resolve,
+which is what the existing `lobbyScreen.onStart().catch(...)` was already
+built to handle — no new failure path to get subtly wrong.
+
 ## Context
 
 The two previous rounds (`online-multiplayer-desync.md`,
