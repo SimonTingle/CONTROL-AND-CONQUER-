@@ -28,6 +28,22 @@ import wsPkg from '../../server/node_modules/ws/index.js';
 const { WebSocket } = wsPkg;
 import { LockstepSession } from '../../src/net/lockstep.js';
 
+// server/src/ws/match.js's import chain reaches server/src/config.js, which
+// refuses to load without a connection string — even though PROTOCOL_VERSION,
+// the only thing pulled from it below, never touches the database. This
+// script's own process doesn't otherwise need DATABASE_URL (only the API
+// server subprocess named in the run instructions above does), so a
+// placeholder is set here purely to satisfy that import chain. A dynamic
+// import, not a static one, so this line actually runs first — a static
+// import is hoisted above it regardless of source order (see
+// tests/match-room.test.mjs, which needs the identical workaround).
+process.env.DATABASE_URL ??= 'postgres://test:test@127.0.0.1:5432/test';
+// The real relay this harness talks to, so "what version does a real client
+// declare" and "what version does the real server require" can never drift
+// apart from what this test asserts — importing the constant beats copying
+// its value in by hand.
+const { PROTOCOL_VERSION } = await import('../../server/src/ws/match.js');
+
 const API = process.env.E2E_API ?? 'http://127.0.0.1:3999';
 const results = [];
 const ok = (name, pass, detail = '') => {
@@ -88,7 +104,7 @@ async function makeUser(tag) {
  */
 function connectClient(user, matchId) {
   const seen = { begin: null, waiting: [], turns: [], welcome: null, resyncNeeded: [], snapshot: null };
-  const ws = new WebSocket(`ws://127.0.0.1:3999/ws/match/${matchId}`, {
+  const ws = new WebSocket(`ws://127.0.0.1:3999/ws/match/${matchId}?protocolVersion=${PROTOCOL_VERSION}`, {
     headers: { cookie: user.cookie() },
   });
   let session = null;
@@ -139,6 +155,39 @@ function connectClient(user, matchId) {
     session: () => session,
     send(msg) { ws.send(JSON.stringify(msg)); },
   };
+}
+
+// ------------------------------------------------- the build-version handshake --
+//
+// Checked before any user, match, or roster exists — the version check runs
+// first in handleMatchSocket, ahead of authentication, precisely so a build
+// mismatch never needs real credentials or a real match to be caught. No
+// database row backs this matchId at all; if the check ran after the DB
+// lookup this would fail for the wrong reason (not_a_member) instead of the
+// one under test.
+{
+  const wrongVersion = new WebSocket(
+    `ws://127.0.0.1:3999/ws/match/protocol-check?protocolVersion=${PROTOCOL_VERSION + 1}`
+  );
+  const msg = await new Promise((resolve) => wrongVersion.on('message', (raw) => resolve(JSON.parse(raw.toString()))));
+  ok('a peer declaring a different protocol version is rejected by name, not silently',
+     msg.t === 'error' && msg.error === 'protocol_version_mismatch',
+     JSON.stringify(msg));
+  ok('the rejection names both versions, so the mismatch is diagnosable rather than opaque',
+     msg.serverVersion === PROTOCOL_VERSION && msg.clientVersion === PROTOCOL_VERSION + 1,
+     JSON.stringify(msg));
+  await new Promise((resolve) => wrongVersion.on('close', resolve));
+}
+{
+  // An old build — from before this handshake existed — never sends the query
+  // param at all. That must fail exactly like a numeric mismatch, not be
+  // waved through as compatible by default.
+  const noVersion = new WebSocket('ws://127.0.0.1:3999/ws/match/protocol-check');
+  const msg = await new Promise((resolve) => noVersion.on('message', (raw) => resolve(JSON.parse(raw.toString()))));
+  ok('a peer that never declares a protocol version is rejected the same way, not treated as compatible',
+     msg.t === 'error' && msg.error === 'protocol_version_mismatch' && msg.clientVersion === null,
+     JSON.stringify(msg));
+  await new Promise((resolve) => noVersion.on('close', resolve));
 }
 
 // ---------------------------------------------------------------- the match --

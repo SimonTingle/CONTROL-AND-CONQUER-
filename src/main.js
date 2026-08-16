@@ -58,10 +58,6 @@ import { showToast } from './ui/toast.js';
 // for console access without scrolling back through the log.
 console.log(`[Procedural Terrain] ${__APP_VERSION__} · built ${__BUILD_TIME__}`);
 
-// Protocol version — bumped when wire format or behavior changes incompatibly.
-// Both client and server check this during handshake; a mismatch prevents peers
-// on different builds from failing in undocumented ways mid-transition.
-const PROTOCOL_VERSION = 1;
 // Phase 1 verification gap: this environment's browser tooling has no real
 // touch/pointer CDP emulation, so IS_MOBILE can never actually read true
 // here. Logged plainly so a real device can confirm it without devtools —
@@ -1701,18 +1697,10 @@ async function startOnlineMatch(matchId, difficulty) {
     onClose: () => endOnlineMatch('Disconnected from the match.'),
   });
 
+  // A protocol version mismatch is rejected inside connect() itself — before
+  // `welcome` can even resolve — so by the time this line returns, the two
+  // peers are already known to agree. See matchClient.js's PROTOCOL_VERSION.
   const welcome = await client.connect();
-
-  // Peers on different protocol versions cannot understand each other's wire
-  // format or behaviors. This guards against undocumented failures when clients
-  // are mid-transition during a deploy.
-  if (welcome.protocolVersion !== PROTOCOL_VERSION) {
-    endOnlineMatch(
-      `Protocol version mismatch: this build is v${PROTOCOL_VERSION} but the match server is v${welcome.protocolVersion}. ` +
-      'Please refresh the page to get the latest version.'
-    );
-    return;
-  }
 
   game.mode = 'multiplayer-online';
   game.localTeamId = welcome.teamId;

@@ -22,8 +22,8 @@ import assert from 'node:assert/strict';
 // import below, since a static import would be hoisted above it.
 process.env.DATABASE_URL ??= 'postgres://test:test@127.0.0.1:5432/test';
 
-const { createRoom, maybeBegin, releaseReadyTurns, reapSilent, TICKS_PER_TURN, PROTOCOL_VERSION } =
-  await import('../server/src/ws/match.js');
+const { createRoom, maybeBegin, releaseReadyTurns, reapSilent, TICKS_PER_TURN,
+  checkProtocolVersion, PROTOCOL_VERSION } = await import('../server/src/ws/match.js');
 
 /** A socket that records what it was sent, instead of owning a network. */
 function fakeSocket() {
@@ -215,12 +215,29 @@ test('a departed player leaves no stale hash behind to be wrongly compared later
   assert.equal(room.hashes.get(10).has('a'), true, "a's own hash is untouched");
 });
 
-test('protocolVersion is defined and numeric', () => {
-  // The server sends protocolVersion in the welcome message; it is checked by
-  // the client before simulating so peers on different protocol versions are
-  // rejected before failing in undocumented ways.
-  assert.equal(typeof PROTOCOL_VERSION, 'number', 'PROTOCOL_VERSION is defined and numeric');
-  assert(PROTOCOL_VERSION >= 1, 'PROTOCOL_VERSION is at least 1');
+test('checkProtocolVersion accepts only a client declaring the server\'s exact version', () => {
+  assert.equal(checkProtocolVersion(String(PROTOCOL_VERSION)).ok, true,
+    'the query param arrives as a string; a matching numeric value must still pass');
+  assert.equal(checkProtocolVersion(PROTOCOL_VERSION).ok, true);
+});
+
+test('checkProtocolVersion rejects a numeric mismatch and reports the client\'s version', () => {
+  const result = checkProtocolVersion(String(PROTOCOL_VERSION + 1));
+  assert.equal(result.ok, false);
+  assert.equal(result.clientVersion, PROTOCOL_VERSION + 1);
+});
+
+test('checkProtocolVersion rejects a missing version exactly like a mismatched one', () => {
+  // An old client — one built before this handshake existed — never sends the
+  // query param at all. That must fail closed, not be treated as compatible
+  // by default, or every pre-handshake build would sail through unversioned.
+  const missing = checkProtocolVersion(undefined);
+  assert.equal(missing.ok, false);
+  assert.equal(missing.clientVersion, null, 'nothing parseable to report back');
+
+  const malformed = checkProtocolVersion('not-a-number');
+  assert.equal(malformed.ok, false);
+  assert.equal(malformed.clientVersion, null);
 });
 
 test('TICKS_PER_TURN is the value the diagnostic arithmetic relies on', () => {

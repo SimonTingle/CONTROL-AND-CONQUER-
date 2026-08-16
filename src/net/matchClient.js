@@ -10,12 +10,42 @@
 /** Same origin the REST client uses; baked in at build time by Vite. */
 const API_BASE = typeof __API_URL__ === 'string' ? __API_URL__ : '';
 
-function socketUrl(matchId) {
+/**
+ * Wire protocol version this client build understands. Sent as a query param
+ * on connect so a server with a different one — see
+ * `server/src/ws/match.js`'s `PROTOCOL_VERSION` — can reject the connection
+ * before it is trusted with anything, and cross-checked against the value the
+ * server echoes back in `welcome` so an *old* server (one that predates that
+ * check and never rejects the query param) is still caught, from this side.
+ *
+ * Bump alongside the server's constant whenever the wire format changes in a
+ * way an older or newer peer would misinterpret.
+ */
+export const PROTOCOL_VERSION = 1;
+
+// Exported so the query-string construction can be checked directly without a
+// browser `location` global — see matchClient-protocol.test.mjs, which sets
+// `__API_URL__` before importing this module for exactly that reason.
+export function socketUrl(matchId) {
   // The session cookie rides the upgrade request, so the socket must go to the
   // same origin the cookie was set for — hence deriving it from the API base
   // rather than from location.
   const base = API_BASE || `${location.protocol}//${location.host}`;
-  return `${base.replace(/^http/, 'ws')}/ws/match/${matchId}`;
+  return `${base.replace(/^http/, 'ws')}/ws/match/${matchId}?protocolVersion=${PROTOCOL_VERSION}`;
+}
+
+/**
+ * Turn a `welcome`/`error` frame's version fields into a message worth
+ * showing a player. Exported so the wording can be checked directly, without
+ * a real socket (matchClient.js otherwise needs a browser WebSocket to do
+ * anything).
+ */
+export function versionMismatchMessage({ serverVersion, clientVersion }) {
+  return (
+    `protocol version mismatch: this client speaks v${clientVersion ?? PROTOCOL_VERSION}, ` +
+    `the match server speaks v${serverVersion ?? 'an older, unversioned build'} — ` +
+    'one side of this match needs to redeploy before it can be joined.'
+  );
 }
 
 export class MatchClient {
@@ -60,6 +90,22 @@ export class MatchClient {
         }
         switch (msg.t) {
           case 'welcome':
+            // A server that predates PROTOCOL_VERSION never rejects the query
+            // param this client sent (it doesn't know to look for one) and
+            // proceeds straight to a welcome with no `protocolVersion` field
+            // at all — `undefined !== 1` catches that case exactly like a
+            // numeric mismatch does. Caught here, before anything about the
+            // match is trusted, rather than desyncing on whatever wire shape
+            // the two builds disagree about.
+            if (msg.protocolVersion !== PROTOCOL_VERSION) {
+              const err = new Error(
+                versionMismatchMessage({ serverVersion: msg.protocolVersion, clientVersion: PROTOCOL_VERSION })
+              );
+              err.code = 'protocol_version_mismatch';
+              ws.close(4010, 'protocol version mismatch');
+              if (!settled) { settled = true; reject(err); }
+              return;
+            }
             this.info = msg;
             this.handlers.onWelcome?.(msg);
             if (!settled) { settled = true; resolve(msg); }
@@ -98,7 +144,18 @@ export class MatchClient {
           case 'error':
             // An error before the welcome means we never got in at all — reject
             // rather than leave the caller waiting on a connection that failed.
-            if (!settled) { settled = true; reject(new Error(msg.error)); }
+            // `protocol_version_mismatch` gets a message worth showing a
+            // player instead of the bare error code the others fall back to —
+            // the server rejected the query param before this client got far
+            // enough to have a `welcome` to compare against on its own.
+            if (!settled) {
+              settled = true;
+              reject(new Error(
+                msg.error === 'protocol_version_mismatch'
+                  ? versionMismatchMessage(msg)
+                  : msg.error
+              ));
+            }
             // The full frame, not just the string — `turn_already_released`
             // carries the turn that was rejected, and a handler needs it to
             // tell "stale input, ignorable" from "this session can never

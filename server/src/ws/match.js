@@ -62,7 +62,24 @@ import { query } from '../db/pool.js';
 export const TICKS_PER_TURN = 6;
 /** Input issued in turn N runs at turn N+2 — ~200ms of cover for the round trip. */
 export const INPUT_DELAY_TURNS = 2;
-/** Protocol version — bumped when wire format or behavior changes incompatibly. */
+/**
+ * Wire protocol version. Bump this whenever a message shape or the meaning of
+ * an existing field changes in a way an older or newer peer would silently
+ * misinterpret it — a new `Intent.command` field, `resumeAt` sending
+ * differently, a new frame either side must react to (`waiting`,
+ * `resyncNeeded`). PR #62 and the running-match quorum fix both changed wire
+ * behavior without bumping anything, because there was nothing to bump; two
+ * players on different builds during that deploy would have failed in
+ * whatever undocumented way the mismatch happened to produce, rather than
+ * being told plainly that their builds disagree.
+ *
+ * Checked in both directions: the client sends its own value as a query
+ * param on connect, checked here before the socket is trusted with anything
+ * (`clientProtocolVersion` below); and the server's value rides the
+ * `welcome` frame for `src/net/matchClient.js` to check against its own,
+ * which is what catches an *old* server that predates this file's check
+ * entirely and so never rejects the query param at all.
+ */
 export const PROTOCOL_VERSION = 1;
 /** A player silent this long is dropped so the rest of the match can continue. */
 const DROP_AFTER_MS = 15000;
@@ -127,6 +144,20 @@ export function createRoom(matchId, seed, expectedPlayers) {
     /** turn -> Map(userId -> hash), for desync detection (4D). */
     hashes: new Map(),
   };
+}
+
+/**
+ * Validate the client's declared protocol version before anything else about
+ * the connection is trusted. Exported so the rejection rule can be checked
+ * directly — the same way the barrier and release rules are (see
+ * match-room.test.mjs) — without standing up a socket and a database to do
+ * it. A missing or non-numeric version (an old client, which never sent the
+ * query param at all) is rejected exactly like a numeric one that disagrees.
+ */
+export function checkProtocolVersion(rawVersion) {
+  const clientVersion = Number(rawVersion);
+  if (Number.isInteger(clientVersion) && clientVersion === PROTOCOL_VERSION) return { ok: true };
+  return { ok: false, clientVersion: Number.isInteger(clientVersion) ? clientVersion : null };
 }
 
 function roomFor(matchId, seed, expectedPlayers) {
@@ -329,6 +360,21 @@ export async function matchSocket(app) {
  * and an HTTP fallback without burying either in the other's indentation.
  */
 async function handleMatchSocket(socket, req) {
+  // Checked before anything else — including authentication — so a build
+  // mismatch is never confused with a credentials problem, and so a mismatched
+  // client never gets far enough to be handed a `welcome` it would misread.
+  const versionCheck = checkProtocolVersion(req.query?.protocolVersion);
+  if (!versionCheck.ok) {
+    send(socket, {
+      t: 'error',
+      error: 'protocol_version_mismatch',
+      serverVersion: PROTOCOL_VERSION,
+      clientVersion: versionCheck.clientVersion,
+    });
+    socket.close(4010, 'protocol version mismatch');
+    return;
+  }
+
   // `onRequest` already resolved the session cookie for this upgrade, but fall
   // back to reading it directly so this does not silently depend on plugin
   // ordering — an unauthenticated socket is the one failure worth being loud
@@ -375,6 +421,11 @@ async function handleMatchSocket(socket, req) {
   send(socket, {
     t: 'welcome',
     matchId,
+    // Rides here too, not just the connect-time query check, so a *client*
+    // ahead of an old server (one that predates checkProtocolVersion and so
+    // never rejected the query param) still has something to compare against
+    // and can refuse to proceed rather than trusting an unversioned peer.
+    protocolVersion: PROTOCOL_VERSION,
     seed: room.seed,
     teamId,
     userId: user.id,
@@ -389,9 +440,6 @@ async function handleMatchSocket(socket, req) {
     started: room.started,
     ticksPerTurn: TICKS_PER_TURN,
     inputDelayTurns: INPUT_DELAY_TURNS,
-    // Protocol version — mismatches mean the peers cannot understand each other.
-    // Bumped when wire format or behavior changes incompatibly.
-    protocolVersion: PROTOCOL_VERSION,
     // Where the match already is, so a reconnecting client knows it must
     // catch up rather than start from turn 0.
     releasedTurn: room.released,
