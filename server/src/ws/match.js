@@ -62,6 +62,8 @@ import { query } from '../db/pool.js';
 export const TICKS_PER_TURN = 6;
 /** Input issued in turn N runs at turn N+2 — ~200ms of cover for the round trip. */
 export const INPUT_DELAY_TURNS = 2;
+/** Protocol version — bumped when wire format or behavior changes incompatibly. */
+export const PROTOCOL_VERSION = 1;
 /** A player silent this long is dropped so the rest of the match can continue. */
 const DROP_AFTER_MS = 15000;
 /**
@@ -387,6 +389,9 @@ async function handleMatchSocket(socket, req) {
     started: room.started,
     ticksPerTurn: TICKS_PER_TURN,
     inputDelayTurns: INPUT_DELAY_TURNS,
+    // Protocol version — mismatches mean the peers cannot understand each other.
+    // Bumped when wire format or behavior changes incompatibly.
+    protocolVersion: PROTOCOL_VERSION,
     // Where the match already is, so a reconnecting client knows it must
     // catch up rather than start from turn 0.
     releasedTurn: room.released,

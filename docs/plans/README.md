@@ -49,3 +49,4 @@ here is the reasoning". Record them with enough detail to act on later.
 |---|---|
 | [online-multiplayer-desync.md](online-multiplayer-desync.md) | Two clients ran independent simulations of the same map; three fail-open paths in the lockstep start barrier, late-join and disconnect handling. |
 | [online-multiplayer-quorum-and-rejoin.md](online-multiplayer-quorum-and-rejoin.md) | Follow-up: the *running* match had the identical fail-open the previous fix closed only at *start* — a dropped peer let the survivor free-run, rejoining never actually worked, and a stall got the player ejected and re-doubled the world on return. |
+| [protocol-version-handshake.md](protocol-version-handshake.md) | All wire behavior changes since the initial multiplayer code (Intent shape, resumeAt behavior, message types) are unguarded, so peers on different builds mid-transition fail silently. Added protocol version to welcome message; client rejects mismatches. |

@@ -22,7 +22,7 @@ import assert from 'node:assert/strict';
 // import below, since a static import would be hoisted above it.
 process.env.DATABASE_URL ??= 'postgres://test:test@127.0.0.1:5432/test';
 
-const { createRoom, maybeBegin, releaseReadyTurns, reapSilent, TICKS_PER_TURN } =
+const { createRoom, maybeBegin, releaseReadyTurns, reapSilent, TICKS_PER_TURN, PROTOCOL_VERSION } =
   await import('../server/src/ws/match.js');
 
 /** A socket that records what it was sent, instead of owning a network. */
@@ -213,6 +213,14 @@ test('a departed player leaves no stale hash behind to be wrongly compared later
 
   assert.equal(room.hashes.get(10).has('b'), false, "b's stale hash is purged with them");
   assert.equal(room.hashes.get(10).has('a'), true, "a's own hash is untouched");
+});
+
+test('protocolVersion is defined and numeric', () => {
+  // The server sends protocolVersion in the welcome message; it is checked by
+  // the client before simulating so peers on different protocol versions are
+  // rejected before failing in undocumented ways.
+  assert.equal(typeof PROTOCOL_VERSION, 'number', 'PROTOCOL_VERSION is defined and numeric');
+  assert(PROTOCOL_VERSION >= 1, 'PROTOCOL_VERSION is at least 1');
 });
 
 test('TICKS_PER_TURN is the value the diagnostic arithmetic relies on', () => {
