@@ -43,10 +43,11 @@ export class PortalScreen {
     this.buildGrid();
   }
 
-  /** Call after sign-in/sign-out so the corner reflects the new state. */
+  /** Call after sign-in/sign-out so the corner and God Mode's visibility both reflect the new state. */
   refreshAccount() {
     if (!this.accountBar) return;
     this.renderAccountBar();
+    this.renderButtonRow();
   }
 
   renderAccountBar() {
@@ -68,6 +69,41 @@ export class PortalScreen {
     this.accountBar.appendChild(btn);
   }
 
+  /**
+   * The five buttons pinned to the image's black lower third: sign-in,
+   * the three mode buttons, and God Mode last — visible only for that one
+   * account, since it isn't a general-purpose admin role yet.
+   */
+  renderButtonRow() {
+    this.buttonRow.replaceChildren();
+
+    const authBtn = document.createElement('button');
+    authBtn.type = 'button';
+    authBtn.className = 'portal-mode-btn';
+    authBtn.textContent = 'Sign in / create account';
+    authBtn.addEventListener('click', () => this.account.onSignIn?.());
+    this.buttonRow.appendChild(authBtn);
+
+    for (const mode of PORTAL_MODES) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'portal-mode-btn';
+      btn.textContent = mode.name;
+      btn.addEventListener('click', () => this.choose(mode.id));
+      this.buttonRow.appendChild(btn);
+    }
+
+    const user = this.account.getAccount?.();
+    if (user?.email === 'tingleteaching@gmail.com') {
+      const godBtn = document.createElement('button');
+      godBtn.type = 'button';
+      godBtn.className = 'portal-mode-btn god-mode-btn';
+      godBtn.textContent = 'God Mode';
+      // Not wired to anything yet.
+      this.buttonRow.appendChild(godBtn);
+    }
+  }
+
   buildGrid() {
     const panel = document.createElement('div');
     panel.className = 'portal-panel';
@@ -86,30 +122,11 @@ export class PortalScreen {
     hint.textContent = 'Choose how you want to play.';
     panel.appendChild(hint);
 
-    const grid = document.createElement('div');
-    grid.className = 'portal-grid';
+    this.buttonRow = document.createElement('div');
+    this.buttonRow.className = 'portal-button-row';
+    this.renderButtonRow();
 
-    for (const mode of PORTAL_MODES) {
-      const card = document.createElement('button');
-      card.className = 'portal-card';
-      card.type = 'button';
-
-      const name = document.createElement('span');
-      name.className = 'portal-card-name';
-      name.textContent = mode.name;
-      card.appendChild(name);
-
-      const blurb = document.createElement('span');
-      blurb.className = 'portal-card-blurb';
-      blurb.textContent = mode.blurb;
-      card.appendChild(blurb);
-
-      card.addEventListener('click', () => this.choose(mode.id));
-      grid.appendChild(card);
-    }
-
-    panel.appendChild(grid);
-    this.root.replaceChildren(panel);
+    this.root.replaceChildren(panel, this.buttonRow);
   }
 
   choose(modeId) {
