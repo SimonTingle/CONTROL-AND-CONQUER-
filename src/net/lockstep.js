@@ -71,6 +71,26 @@ export class LockstepSession {
     this.sentThrough = this.inputDelayTurns - 1;
   }
 
+  /**
+   * Join a match that is already running, at the first turn not yet released.
+   *
+   * Distinct from `start()` in the one way that matters: it does **not** prime
+   * turns 0..DELAY. Those were released long ago, the server rejects any late
+   * input for them, and a rejoining client that reported them would sit waiting
+   * for broadcasts that already happened — which is exactly how a late arrival
+   * used to hang, silently, forever.
+   *
+   * Reporting begins immediately even though this client's world is still
+   * stale: input is what the other players' turns are gated on, so staying
+   * quiet to "wait for a snapshot first" would stall the whole match and stop
+   * the host ever reaching the turn it promised the snapshot for. The stale
+   * world is corrected a few turns later by the ordinary resync path.
+   */
+  resumeAt(turn) {
+    this.started = true;
+    this.resetTo(turn);
+  }
+
   /** A turn's complete input set arrived from the server. */
   receiveTurn(turn, inputs) {
     this.received.set(turn, inputs ?? []);
