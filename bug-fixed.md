@@ -9,6 +9,32 @@ tuning/balance changes are not included unless they were fixing broken behavior.
 
 ## Online multiplayer
 
+- **Two players in one match each simulated a private world on the same island —
+  both screens sat on "waiting for other team" first, then each played on alone
+  with the opponent frozen at spawn.** Three fail-open paths, all of which had to
+  line up. (1) The 30-second start grace began the match short-rostered, and
+  turn release gates on who is *connected* rather than who is *expected*, so the
+  first player to arrive was released to simulate by itself. (2) A client
+  connecting after that was never sent `begin` — `welcome.started` and
+  `welcome.releasedTurn` were transmitted for exactly this case but never read,
+  and `LockstepSession.resetTo` was dead code — so it never reported input, sat
+  on "waiting" forever, and its silence (masked by a healthy heartbeat) stalled
+  the player who *was* running. (3) On disconnect, `endOnlineMatch` nulled
+  `match` while leaving `game.mode` alone, and both the sim gate and the
+  local-intent guard keyed off that object, so a dropped client silently
+  promoted itself to authoritative local play at full speed — applying its own
+  orders with `teamId = null`, which disables the ownership check and hands it
+  command of both teams. Diagnosed from the two save files' tick counts:
+  `11118 = 1853 × 6` exactly (stalled on a turn boundary) versus
+  `14084 = 2347 × 6 + 2` (running ungated). Fixed by removing the grace period
+  entirely, sending `begin` to late arrivals plus a host resync, timing
+  participation separately from liveness, and keying both client-side gates on
+  the mode rather than on an object. **Verified with a two-client end-to-end
+  test against the real relay and a real database: reverting only the barrier
+  reproduces the bug (lone client simulates 12 ticks by itself; the two clients
+  end on different turn streams, 4 versus 0), and with the fix both run 40 turns
+  on an identical stream and finish on the same tick.**
+
 - **Cars in a live match didn't move in real time, crystal fields disagreed, and
   the sky differed between devices — while the sync readout falsely said
   "SYNC OK."** Root cause was two independent bugs: (1) the settings drawer wrote

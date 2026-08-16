@@ -21,13 +21,35 @@ function ensureEl() {
 
 let hideTimer = null;
 
-/** @param {string} message @param {number} [durationMs] */
-export function showToast(message, durationMs = 3000) {
+/**
+ * @param {string} message
+ * @param {number} [durationMs]
+ * @param {{label: string, onClick: () => void}} [action] an optional button.
+ *   A toast carrying one does **not** auto-hide: it is offering the only way
+ *   out of a state the player cannot otherwise leave (waiting on a peer who is
+ *   never going to connect, say), and a way out that fades after three seconds
+ *   is no way out at all.
+ */
+export function showToast(message, durationMs = 3000, action = null) {
   const node = ensureEl();
   node.textContent = message;
   node.classList.remove('hidden');
+  clearTimeout(hideTimer);
+
+  if (action) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'toast-action';
+    button.textContent = action.label;
+    button.addEventListener('click', () => {
+      node.classList.add('hidden');
+      action.onClick();
+    });
+    node.appendChild(button);
+    return;
+  }
+
   // Restart the fade window on every call rather than letting an earlier
   // toast's timer hide a newer message out from under it.
-  clearTimeout(hideTimer);
   hideTimer = setTimeout(() => node.classList.add('hidden'), durationMs);
 }

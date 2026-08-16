@@ -331,6 +331,26 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
 
 .toast.hidden { opacity: 0; }
 
+/* The toast itself is pointer-events: none so a background message can never
+   swallow a click. An action button is the deliberate exception — it exists to
+   be clicked — so it opts back in, and opts out again while hidden so a faded
+   toast cannot be hit by an invisible target. */
+.toast-action {
+  margin-left: 12px;
+  padding: 4px 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.toast-action:hover { background: rgba(255, 255, 255, 0.12); }
+
+.toast.hidden .toast-action { pointer-events: none; }
+
 /* ---- vehicle picker (mirrors the settings hamburger/drawer, right side) ---- */
 
 #vehicle-toggle {

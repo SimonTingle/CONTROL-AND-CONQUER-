@@ -65,10 +65,16 @@ export class MatchClient {
             if (!settled) { settled = true; resolve(msg); }
             return;
           case 'begin':
-            // The roster is complete (or the server waited long enough). Until
-            // this lands the client must not report input — see the start
-            // barrier in server/src/ws/match.js.
+            // The roster is complete. Until this lands the client must not
+            // report input — see the start barrier in server/src/ws/match.js.
+            // `resuming` marks the copy sent directly to a socket that joined
+            // an already-running match, which must resync rather than start
+            // simulating from turn 0.
             return void this.handlers.onBegin?.(msg);
+          case 'waiting':
+            // The roster is still short and the wait has gone on long enough to
+            // be worth naming. Repeats every few seconds until it resolves.
+            return void this.handlers.onWaiting?.(msg);
           case 'turn':
             return void this.handlers.onTurn?.(msg.turn, msg.inputs);
           case 'agreed':

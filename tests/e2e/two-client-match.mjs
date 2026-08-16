@@ -1,0 +1,196 @@
+// Two real clients, the real relay, a real database.
+//
+// Reproduces the match from the field report end to end: one player connects,
+// waits, and the second arrives late. Asserts that the first is NEVER released
+// to simulate alone, and that both run in genuine lockstep once the roster
+// completes.
+//
+// This is the only check in the repository that can observe a split-brain at
+// all. The unit tests cover the rules; `window.__determinismCheck` replays a
+// single client against itself and is structurally blind to two clients
+// disagreeing. Nothing caught the original bug because nothing was looking at
+// two clients at once.
+//
+// Not part of `npm test`, which is deliberately dependency-free. This one needs
+// a database and a running API server:
+//
+//   initdb -D /var/tmp/ccpg -U cc -A trust
+//   pg_ctl -D /var/tmp/ccpg -o '-p 55432 -k /var/tmp' start
+//   createdb -h /var/tmp -p 55432 -U cc ccdev
+//   cd server && DATABASE_URL=postgres://cc@127.0.0.1:55432/ccdev \
+//     CORS_ORIGIN=http://localhost:5178 NODE_ENV=development PORT=3999 \
+//     MATCH_START_REPORT_MS=1000 node src/index.js
+//   node tests/e2e/two-client-match.mjs
+//
+// MATCH_START_REPORT_MS is lowered only so the "what am I waiting for" frame
+// arrives inside the test's patience; the barrier itself has no timeout to tune.
+import wsPkg from '../../server/node_modules/ws/index.js';
+const { WebSocket } = wsPkg;
+import { LockstepSession } from '../../src/net/lockstep.js';
+
+const API = process.env.E2E_API ?? 'http://127.0.0.1:3999';
+const results = [];
+const ok = (name, pass, detail = '') => {
+  results.push({ name, pass });
+  console.log(`${pass ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`);
+};
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** A logged-in API caller that carries its own cookie jar and CSRF token. */
+async function makeUser(tag) {
+  // A real jar, merged per name: /auth/me sets the CSRF cookie alongside the
+  // session one, and simply replacing the header would drop the session.
+  const jar = new Map();
+  const cookieHeader = () => [...jar].map(([k, v]) => `${k}=${v}`).join('; ');
+  const call = async (path, opts = {}) => {
+    const res = await fetch(API + path, {
+      ...opts,
+      headers: {
+        'content-type': 'application/json',
+        ...(jar.size ? { cookie: cookieHeader() } : {}),
+        ...(opts.headers ?? {}),
+      },
+    });
+    for (const raw of res.headers.getSetCookie?.() ?? []) {
+      const [name, ...rest] = raw.split(';')[0].split('=');
+      jar.set(name, rest.join('='));
+    }
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(`${path} -> ${res.status} ${JSON.stringify(body)}`);
+    return body;
+  };
+
+  const email = `${tag}-${Date.now()}@example.test`;
+  await call('/auth/register', {
+    method: 'POST',
+    body: JSON.stringify({ email, password: 'correct-horse-battery', displayName: tag }),
+  });
+  const me = await call('/auth/me');
+  const csrf = me.csrfToken;
+  const write = (path, body) =>
+    call(path, { method: 'POST', headers: { 'x-csrf-token': csrf }, body: JSON.stringify(body ?? {}) });
+
+  return { tag, call, write, cookie: cookieHeader, userId: me.user.id };
+}
+
+/** One client's socket + lockstep session, recording what it saw. */
+function connectClient(user, matchId) {
+  const seen = { begin: null, waiting: [], turns: [], welcome: null };
+  const ws = new WebSocket(`ws://127.0.0.1:3999/ws/match/${matchId}`, {
+    headers: { cookie: user.cookie() },
+  });
+  let session = null;
+
+  ws.on('message', (raw) => {
+    const msg = JSON.parse(raw.toString());
+    if (msg.t === 'welcome') {
+      seen.welcome = msg;
+      session = new LockstepSession({
+        ticksPerTurn: msg.ticksPerTurn,
+        inputDelayTurns: msg.inputDelayTurns,
+        queue: { drain: () => [] },
+        send: (turn, inputs) => ws.send(JSON.stringify({ t: 'input', turn, inputs })),
+        onTurn: () => {},
+      });
+    } else if (msg.t === 'begin') {
+      seen.begin = msg;
+      if (msg.resuming) session.resumeAt((seen.welcome.releasedTurn ?? -1) + 1);
+      else session.start();
+    } else if (msg.t === 'waiting') {
+      seen.waiting.push(msg);
+    } else if (msg.t === 'turn') {
+      seen.turns.push(msg.turn);
+      session.receiveTurn(msg.turn, msg.inputs);
+    }
+  });
+
+  return {
+    user,
+    seen,
+    ws,
+    ready: new Promise((res) => ws.on('open', res)),
+    /** Stand in for the frame loop: step as far as lockstep allows. */
+    pump(steps = 600) {
+      if (!session) return 0;
+      let done = 0;
+      for (let i = 0; i < steps; i++) {
+        if (!session.beginStep()) break;
+        session.endStep();
+        done++;
+      }
+      return done;
+    },
+    session: () => session,
+  };
+}
+
+// ---------------------------------------------------------------- the match --
+const host = await makeUser('host');
+const joiner = await makeUser('joiner');
+
+const created = await host.write('/matches', { name: 'e2e', maxPlayers: 2, aiCount: 0 });
+const matchId = created.match.id;
+await joiner.write(`/matches/${matchId}/join`);
+await host.write(`/matches/${matchId}/start`);
+console.log(`  match ${matchId}, seed ${created.match.seed}\n`);
+
+// ---- 1. the host connects ALONE and must never be released to simulate ----
+const a = connectClient(host, matchId);
+await a.ready;
+await sleep(7000); // past the threshold AND the 5s reaper sweep that reports it
+
+ok('a lone client is not told the match began',
+   a.seen.begin === null, `begin=${JSON.stringify(a.seen.begin)}`);
+ok('a lone client is told what it is waiting for',
+   a.seen.waiting.length > 0 && a.seen.waiting[0].expected === 2 && a.seen.waiting[0].present === 1,
+   JSON.stringify(a.seen.waiting[0]));
+
+const steppedAlone = a.pump();
+ok('a lone client simulates nothing at all',
+   steppedAlone === 0 && a.seen.turns.length === 0,
+   `stepped=${steppedAlone} turns=${a.seen.turns.length}`);
+
+// ---- 2. the second player arrives; both must begin together ----
+const b = connectClient(joiner, matchId);
+await b.ready;
+await sleep(500);
+
+ok('both clients are told the match began, together',
+   a.seen.begin !== null && b.seen.begin !== null,
+   `host=${!!a.seen.begin} joiner=${!!b.seen.begin}`);
+ok('neither was told it started short-rostered',
+   !a.seen.begin?.resuming && !b.seen.begin?.resuming);
+
+// ---- 3. drive both, as two frame loops would ----
+for (let round = 0; round < 40; round++) {
+  a.pump(6);
+  b.pump(6);
+  await sleep(20);
+}
+await sleep(300);
+
+const turnA = a.session().turn;
+const turnB = b.session().turn;
+ok('both clients actually advanced', turnA > 3 && turnB > 3, `A=${turnA} B=${turnB}`);
+ok('both clients are on the same turn — real lockstep, not two private games',
+   turnA === turnB, `A=${turnA} B=${turnB}`);
+ok('both received an identical turn stream',
+   JSON.stringify(a.seen.turns) === JSON.stringify(b.seen.turns),
+   `A got ${a.seen.turns.length}, B got ${b.seen.turns.length}`);
+
+// ---- 4. the diagnostic signature from the uploaded saves ----
+// A stalls only on a turn boundary; a free-running client stops anywhere. Both
+// clients being boundary-aligned and equal is the inverse of what the two saves
+// showed (11118 = 1853*6 exactly, versus 14084 = 2347*6 + 2).
+const tickA = turnA * a.session().ticksPerTurn + a.session().tickInTurn;
+const tickB = turnB * b.session().ticksPerTurn + b.session().tickInTurn;
+ok('neither client is ahead of the other in sim ticks',
+   tickA === tickB, `tickA=${tickA} tickB=${tickB}`);
+
+a.ws.close();
+b.ws.close();
+await sleep(200);
+
+const failed = results.filter((r) => !r.pass).length;
+console.log(`\n${results.length - failed}/${results.length} passed`);
+process.exit(failed ? 1 : 0);

@@ -841,7 +841,14 @@ function drainIntents() {
   // In a match the queue belongs to the lockstep session, which drains it when
   // it sends. Applying locally as well would execute every order twice on the
   // issuing client and once everywhere else.
-  if (match) return;
+  //
+  // Keyed on the *mode*, not just on `match` being live. A dropped connection
+  // nulls `match` while leaving the mode alone, and testing only the object
+  // meant a disconnected client silently promoted itself to authoritative local
+  // play: it applied its own orders with `teamId = null`, which switches the
+  // ownership check off entirely (see intents.js) and hands the player command
+  // of *both* teams' units in what is still nominally a networked match.
+  if (match || game.mode === 'multiplayer-online') return;
   const batch = intentQueue.drain();
   if (!batch.length) return;
   // Local play passes teamId null: there is one human team, and the ownership
@@ -1561,12 +1568,32 @@ let match = null;
 /** Seconds since the last "waiting…" notice, so a stall explains itself once a second. */
 let matchWaitTimer = 0;
 
+/** Back to the mode picker — the one way out of a match that cannot continue. */
+function returnToPortal() {
+  game.portalScreen.buildGrid();
+  game.portalScreen.open = true;
+  game.portalScreen.root.classList.remove('hidden');
+}
+
+/**
+ * Leave an online match, for any reason.
+ *
+ * The simulation stops here and does not resume: `game.mode` stays
+ * `'multiplayer-online'`, which the sim loop and `drainIntents` both read as
+ * "no local authority". That is deliberate. This used to null `match` and
+ * nothing else, and since every other check keyed off that object rather than
+ * the mode, a disconnected client quietly carried on simulating a world nobody
+ * else could see — full speed, its own orders applied locally with ownership
+ * checks disabled, no indication anything had gone wrong. A frozen world and a
+ * way back to the portal is the honest version.
+ */
 function endOnlineMatch(reason) {
   if (!match) return;
   match.client.close();
   match = null;
   hideNetDebug();
-  if (reason) showToast(reason, 5000);
+  if (reason) showToast(reason, 8000);
+  returnToPortal();
 }
 
 /**
@@ -1584,14 +1611,26 @@ async function startOnlineMatch(matchId, difficulty) {
     onBegin: (msg) => {
       if (!match || match.begun) return;
       match.begun = true;
-      match.session.start();
-      showToast(
-        msg.waitedOut
-          ? 'Starting without everyone — a player did not connect.'
-          : 'All players connected — match starting.',
-        4000
-      );
+      if (msg.resuming) {
+        // Rejoining a match already in progress. Pick up at the first turn the
+        // server has not released rather than at turn 0 — the turns before it
+        // are gone, and asking for them is what used to leave a late client
+        // waiting on broadcasts that had already happened.
+        match.session.resumeAt(match.releasedTurn + 1);
+        showToast('Rejoining the match — resynchronising…', 4000);
+      } else {
+        match.session.start();
+        showToast('All players connected — match starting.', 4000);
+      }
     },
+    onWaiting: (msg) => {
+      if (!match) return;
+      // Repeats every few seconds while the roster is short. The match will
+      // never begin on its own from here, so this has to be actionable rather
+      // than reassuring.
+      match.waitingFor = msg;
+    },
+    onResyncNeeded: (msg) => scheduleResync(msg.users ?? []),
     onTurn: (turn, inputs) => match?.session.receiveTurn(turn, inputs),
     onAgreed: (msg) => {
       if (!match) return;
@@ -1660,8 +1699,16 @@ async function startOnlineMatch(matchId, difficulty) {
     isHost: welcome.isHost,
     userId: welcome.userId,
     expectedPlayers: welcome.expectedPlayers,
+    /**
+     * How far the match had already got when this client connected. -1 for a
+     * fresh match; anything higher means we are rejoining one in progress and
+     * must resume from there rather than from turn 0.
+     */
+    releasedTurn: welcome.releasedTurn ?? -1,
     /** Flipped by the server's `begin`; until then the sim does not advance. */
     begun: false,
+    /** Set by the server's `waiting` frame while the roster is short. */
+    waitingFor: null,
     /** Last turn-aligned state digest, shown in the sync readout. */
     checkpoint: null,
     /** Turn the server last reported clients disagreeing, or null. */
@@ -1742,13 +1789,32 @@ function onMatchTurn(inputs, turn) {
  * snapshot a few turns out and sends it to every client outside its own group.
  */
 function handleDesync(msg) {
-  if (!match?.isHost || match.resyncAtTurn !== null) return;
+  if (!match?.isHost) return;
   const mine = msg.groups.find((g) => g.users.includes(match.userId));
   const targets = msg.groups.filter((g) => g !== mine).flatMap((g) => g.users);
   if (!targets.length) return;
+  if (scheduleResync(targets)) {
+    console.warn(`desync at turn ${msg.turn}; resyncing ${targets.length} client(s)`);
+  }
+}
+
+/**
+ * Host side of a resync: promise a snapshot at a turn far enough ahead that
+ * every client can be at it when the snapshot lands.
+ *
+ * Two things ask for this — the server's desync comparison, and a player
+ * rejoining a running match (whose world is stale or absent, which is the same
+ * problem arriving by a different route). Both want identical handling, so they
+ * share this rather than each scheduling their own.
+ *
+ * @returns {boolean} whether a resync was scheduled — false if one is already
+ *   in flight, since a second would only overwrite the first's targets.
+ */
+function scheduleResync(targets) {
+  if (!match?.isHost || match.resyncAtTurn !== null || !targets.length) return false;
   match.resyncAtTurn = match.session.turn + RESYNC_LEAD_TURNS;
   match.resyncTargets = targets;
-  console.warn(`desync at turn ${msg.turn}; resyncing ${targets.length} client(s)`);
+  return true;
 }
 
 /**
@@ -2232,12 +2298,26 @@ function renderTick(dt) {
     matchWaitTimer += dt;
     if (matchWaitTimer >= 1) {
       matchWaitTimer = 0;
-      showToast(
-        match.begun
-          ? 'Waiting for the other player…'
-          : `Waiting for ${match.expectedPlayers} players to connect…`,
-        2000
-      );
+      const waiting = match.waitingFor;
+      if (!match.begun && waiting) {
+        // The server has told us the roster is short and stayed short. It will
+        // now wait indefinitely rather than starting a match that cannot work,
+        // so this is a decision for the player, not a status line — it needs a
+        // way out attached.
+        showToast(
+          `Still waiting for ${waiting.expected - waiting.present} of ` +
+            `${waiting.expected} players to connect.`,
+          0,
+          { label: 'Leave match', onClick: () => endOnlineMatch(null) }
+        );
+      } else {
+        showToast(
+          match.begun
+            ? 'Waiting for the other player…'
+            : `Waiting for ${match.expectedPlayers} players to connect…`,
+          2000
+        );
+      }
     }
   } else {
     matchWaitTimer = 0;
@@ -2361,6 +2441,11 @@ function animate() {
     // the current turn have not arrived, the simulation waits rather than
     // running ahead and reconciling. Rendering continues either way, so a stall
     // reads as the world pausing, not as the game freezing.
+    // An online match with no live session must not advance at all. Testing
+    // `match` alone left a disconnected client free-running an ungated 60Hz
+    // simulation of a world it no longer shared with anyone — the game looked
+    // perfectly healthy while being, by then, entirely private.
+    if (game.mode === 'multiplayer-online' && !match) break;
     if (match && !match.session.beginStep()) break;
     simAccumulator -= SIM_DT;
     steps++;
