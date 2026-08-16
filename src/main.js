@@ -2097,6 +2097,16 @@ addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
+// Diagnostic only: requestAnimationFrame is throttled hard by browsers once a
+// tab/window loses focus, and animate() below is the only thing that drives
+// LockstepSession forward. A backgrounded client during an online match can
+// fall behind and stop sending turn input long before anything else notices —
+// this makes that visible in the console instead of only showing up as an
+// unexplained stall on the *other* client.
+addEventListener('visibilitychange', () => {
+  console.log(`[visibility] ${document.visibilityState} at ${performance.now().toFixed(0)}ms`);
+});
+
 const clock = new THREE.Clock();
 let statsTimer = 0;
 let frames = 0;
@@ -2497,6 +2507,13 @@ const MAX_FRAME_DT = 0.25; // a tab regaining focus must not deliver a huge dt
 const MAX_CATCHUP_STEPS = 5; // bound the work per frame — see the drop below
 let simAccumulator = 0;
 
+// Diagnostic only: reports how many match ticks actually ran per wall-clock
+// second, next to the visibilitychange log above. In a healthy foreground tab
+// this should track ~60/s; if it collapses right as visibility goes 'hidden',
+// that's the throttling hypothesis confirmed rather than assumed.
+let matchTickCount = 0;
+let matchTickTimer = 0;
+
 function animate() {
   requestAnimationFrame(animate);
   const frameDt = Math.min(clock.getDelta(), MAX_FRAME_DT);
@@ -2518,6 +2535,18 @@ function animate() {
     steps++;
     simTick(SIM_DT);
     match?.session.endStep();
+    if (match) matchTickCount++;
+  }
+  if (match) {
+    matchTickTimer += frameDt;
+    if (matchTickTimer >= 1) {
+      console.log(
+        `[tick-rate] ${matchTickCount} match ticks/s · visibility=${document.visibilityState}` +
+        (match.session.stalled ? ' · STALLED' : '')
+      );
+      matchTickCount = 0;
+      matchTickTimer = 0;
+    }
   }
   // Time spent stalled is not a debt to repay in a burst — the match paused for
   // everyone, so drop the backlog rather than fast-forwarding out of it.

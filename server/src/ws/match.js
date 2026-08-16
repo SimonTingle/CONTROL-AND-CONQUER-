@@ -163,6 +163,13 @@ export function checkProtocolVersion(rawVersion) {
 function roomFor(matchId, seed, expectedPlayers) {
   let room = rooms.get(matchId);
   if (!room) {
+    // Diagnostic only: rooms are in-memory and per-process (see the module
+    // header). A player landing here for a matchId this process has never
+    // seen — while another player is already mid-match on the same id — is
+    // exactly what a split-across-processes deploy looks like from inside
+    // one process; it has no way to see the other room. This log is the only
+    // trace of that ever left behind.
+    console.log(`[match] new room for ${matchId}: seed=${seed} expectedPlayers=${expectedPlayers}`);
     room = createRoom(matchId, seed, expectedPlayers);
     rooms.set(matchId, room);
   }
@@ -296,6 +303,7 @@ export function reapSilent(room) {
   const now = Date.now();
   for (const [userId, p] of room.players) {
     if (now - p.lastSeen <= DROP_AFTER_MS) continue;
+    console.log(`[match] reaping ${userId} from ${room.matchId}: silent for ${now - p.lastSeen}ms`);
     try { p.socket.close(4008, 'timed out'); } catch { /* already gone */ }
     dropPlayer(room, userId);
     broadcast(room, { t: 'playerLeft', userId, teamId: p.teamId, reason: 'timeout' });
@@ -524,6 +532,7 @@ async function handleMatchSocket(socket, req) {
             groups.set(hash, [...(groups.get(hash) ?? []), uid]);
           }
           if (groups.size > 1) {
+            console.log(`[match] desync in ${matchId} at turn ${turn}: ${groups.size} distinct hashes among ${bucket.size} reports`);
             broadcast(room, {
               t: 'desync',
               turn,
@@ -532,6 +541,7 @@ async function handleMatchSocket(socket, req) {
           } else {
             // Say so explicitly. "No desync reported" and "verified agreement"
             // are different claims and the readout must not conflate them.
+            console.log(`[match] agreed in ${matchId} at turn ${turn}: ${bucket.size} peers`);
             broadcast(room, { t: 'agreed', turn, peers: bucket.size });
           }
         }
@@ -558,11 +568,12 @@ async function handleMatchSocket(socket, req) {
     }
   });
 
-  socket.on('close', () => {
+  socket.on('close', (code, reason) => {
     const current = room.players.get(user.id);
     // Only clear the seat if this socket still owns it — otherwise a
     // just-replaced connection's close event would evict its replacement.
     if (current?.socket !== socket) return;
+    console.log(`[match] ${user.id} socket closed on ${matchId}: code=${code} reason=${reason?.toString?.() || '(none)'}`);
     dropPlayer(room, user.id);
     broadcast(room, { t: 'playerLeft', userId: user.id, teamId, reason: 'closed' });
     // `expectedPlayers` is unchanged by this — the room now waits for this

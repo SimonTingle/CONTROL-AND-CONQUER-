@@ -62,6 +62,8 @@ export class MatchClient {
     /** Populated from the server's welcome — the match's ground truth. */
     this.info = null;
     this.heartbeat = null;
+    /** Diagnostic only: last time a 'pong' was actually received back. */
+    this.lastPongAt = null;
   }
 
   connect() {
@@ -135,6 +137,13 @@ export class MatchClient {
             return void this.handlers.onPlayerJoined?.(msg);
           case 'playerLeft':
             return void this.handlers.onPlayerLeft?.(msg);
+          case 'pong':
+            // Diagnostic only: confirms this socket's inbound leg is actually
+            // alive, not just the outbound ping that keeps the server's
+            // reaper from firing. A ping that keeps sending while no pong
+            // ever comes back is a half-open socket the server can't see.
+            this.lastPongAt = Date.now();
+            return;
           case 'resyncNeeded':
             // The host's own cue that some other player just rejoined stale or
             // empty — the same signal a hash mismatch produces, on a different
@@ -170,6 +179,10 @@ export class MatchClient {
         this.connected = false;
         clearInterval(this.heartbeat);
         this.heartbeat = null;
+        console.log(
+          `[matchClient] socket closed: code=${ev.code} reason=${ev.reason || '(none)'} ` +
+          `wasClean=${ev.wasClean} lastPongAt=${this.lastPongAt ?? '(never)'}`
+        );
         if (!settled) { settled = true; reject(new Error(`socket closed: ${ev.code}`)); }
         this.handlers.onClose?.(ev);
       });
@@ -178,6 +191,7 @@ export class MatchClient {
         // The browser deliberately does not expose the HTTP status of a failed
         // handshake, so this is all we can ever know locally — say what it
         // usually means rather than the bare "socket error" the event gives us.
+        console.log('[matchClient] socket error event fired');
         if (!settled) {
           settled = true;
           reject(new Error(
