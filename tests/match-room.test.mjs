@@ -22,8 +22,8 @@ import assert from 'node:assert/strict';
 // import below, since a static import would be hoisted above it.
 process.env.DATABASE_URL ??= 'postgres://test:test@127.0.0.1:5432/test';
 
-const { createRoom, maybeBegin, releaseReadyTurns, reapSilent, TICKS_PER_TURN } =
-  await import('../server/src/ws/match.js');
+const { createRoom, maybeBegin, releaseReadyTurns, reapSilent, TICKS_PER_TURN,
+  checkProtocolVersion, PROTOCOL_VERSION } = await import('../server/src/ws/match.js');
 
 /** A socket that records what it was sent, instead of owning a network. */
 function fakeSocket() {
@@ -37,7 +37,6 @@ function addPlayer(room, userId, teamId) {
     teamId,
     displayName: `p${userId}`,
     lastSeen: Date.now(),
-    lastInputAt: Date.now(),
   });
   return socket;
 }
@@ -135,38 +134,52 @@ test('released input is ordered by teamId, not by arrival', () => {
   );
 });
 
-test('a player who pings but never reports input is dropped, not tolerated', () => {
+test('a player who stops reporting input is never reaped for it — only a dead socket is', () => {
+  // This used to be the opposite: a separate `lastInputAt` clock reaped anyone
+  // who fell silent on turns, heartbeat or not. That was reaping the *symptom*
+  // of a stall — `beginStep()` stops sending input the instant a turn is
+  // missing, by design — so a peer correctly waiting on someone else looked
+  // identical to a dead one and got dropped right along with it. Liveness
+  // (`lastSeen`, refreshed by every message including the heartbeat) is the
+  // only thing this file can actually observe from here.
   const room = createRoom('m7', 123, 2);
   const a = addPlayer(room, 'a', 0);
-  const mute = addPlayer(room, 'b', 1);
+  addPlayer(room, 'b', 1);
   maybeBegin(room);
 
-  // The heartbeat keeps this one looking perfectly healthy while it reports
-  // nothing. That is exactly how one real match froze: the quorum counted a
-  // client that was never going to speak, so the other player stalled forever.
+  // b has reported nothing for ages but is still answering heartbeats.
   room.players.get('b').lastSeen = Date.now();
-  room.players.get('b').lastInputAt = Date.now() - 60 * 1000;
-
   reapSilent(room);
+  assert.equal(room.players.has('b'), true, 'a silent-but-connected peer is not reaped');
+  assert.equal(framesOfType(a, 'playerLeft').length, 0);
 
-  assert.equal(room.players.has('b'), false, 'a mute peer is reaped');
+  // Only a genuinely dead socket — no message of any kind in DROP_AFTER_MS —
+  // is removed.
+  room.players.get('b').lastSeen = Date.now() - 60 * 1000;
+  reapSilent(room);
+  assert.equal(room.players.has('b'), false, 'a truly dead socket is still reaped');
   const [left] = framesOfType(a, 'playerLeft');
-  assert.ok(left, 'survivors are told');
-  assert.equal(left.reason, 'not_reporting', 'and told which kind of silence it was');
-  assert.equal(mute.sent.some((m) => m.t === 'turn'), false);
+  assert.equal(left.reason, 'timeout');
 });
 
-test('input silence is not held against anyone before the match begins', () => {
+test('the whole roster is required regardless of session.started — reapSilent never releases a turn by itself', () => {
   const room = createRoom('m8', 123, 2);
   addPlayer(room, 'a', 0);
-  room.players.get('a').lastInputAt = Date.now() - 60 * 1000;
+  room.players.get('a').lastSeen = Date.now();
 
   reapSilent(room);
 
-  assert.equal(room.players.has('a'), true, 'nobody owes input before begin');
+  assert.equal(room.players.has('a'), true, 'a live, connected player is never reaped');
 });
 
-test('reaping a stalled peer unblocks the turns it was holding', () => {
+test('reaping a dead peer does NOT unblock the turns it was holding — the match pauses, it does not run ahead', () => {
+  // The exact regression from the field report. `releaseReadyTurns` used to
+  // gate on `room.players.size` — the connected count — so the instant the
+  // stalled peer's ghost socket was reaped, the survivor alone satisfied a
+  // now-smaller quorum and was released to simulate every subsequent turn on
+  // its own, drifting further from the peer with every frame. Gating on
+  // `expectedPlayers` instead means removing a dead socket changes nothing
+  // about who the match is still waiting for.
   const room = createRoom('m9', 123, 2);
   const a = addPlayer(room, 'a', 0);
   addPlayer(room, 'b', 1);
@@ -174,13 +187,57 @@ test('reaping a stalled peer unblocks the turns it was holding', () => {
 
   room.pending.set(0, new Map([['a', []]]));
   releaseReadyTurns(room);
-  assert.equal(room.released, -1, 'held while b is still counted');
+  assert.equal(room.released, -1, 'held while b has not reported');
 
-  room.players.get('b').lastInputAt = Date.now() - 60 * 1000;
+  room.players.get('b').lastSeen = Date.now() - 60 * 1000;
   reapSilent(room);
 
-  assert.equal(room.released, 0, 'the survivor carries on once b is gone');
-  assert.equal(framesOfType(a, 'turn').length, 1);
+  assert.equal(room.players.has('b'), false, 'the dead socket is gone');
+  assert.equal(room.released, -1, 'but the match is still waiting for that roster seat — it did not advance');
+  assert.equal(framesOfType(a, 'turn').length, 0, 'the survivor was never released to run alone');
+});
+
+test('a departed player leaves no stale hash behind to be wrongly compared later', () => {
+  // room.hashes is never otherwise purged on departure (only aged out by turn
+  // number), so a hash left behind by a dead connection could sit in its
+  // turn's bucket and later be compared against a live peer's later report for
+  // the same turn — a phantom desync between two clients that were never
+  // describing the same running match.
+  const room = createRoom('m10', 123, 2);
+  addPlayer(room, 'a', 0);
+  addPlayer(room, 'b', 1);
+  room.hashes.set(10, new Map([['a', 'hash-a'], ['b', 'hash-b']]));
+
+  room.players.get('b').lastSeen = Date.now() - 60 * 1000;
+  reapSilent(room);
+
+  assert.equal(room.hashes.get(10).has('b'), false, "b's stale hash is purged with them");
+  assert.equal(room.hashes.get(10).has('a'), true, "a's own hash is untouched");
+});
+
+test('checkProtocolVersion accepts only a client declaring the server\'s exact version', () => {
+  assert.equal(checkProtocolVersion(String(PROTOCOL_VERSION)).ok, true,
+    'the query param arrives as a string; a matching numeric value must still pass');
+  assert.equal(checkProtocolVersion(PROTOCOL_VERSION).ok, true);
+});
+
+test('checkProtocolVersion rejects a numeric mismatch and reports the client\'s version', () => {
+  const result = checkProtocolVersion(String(PROTOCOL_VERSION + 1));
+  assert.equal(result.ok, false);
+  assert.equal(result.clientVersion, PROTOCOL_VERSION + 1);
+});
+
+test('checkProtocolVersion rejects a missing version exactly like a mismatched one', () => {
+  // An old client — one built before this handshake existed — never sends the
+  // query param at all. That must fail closed, not be treated as compatible
+  // by default, or every pre-handshake build would sail through unversioned.
+  const missing = checkProtocolVersion(undefined);
+  assert.equal(missing.ok, false);
+  assert.equal(missing.clientVersion, null, 'nothing parseable to report back');
+
+  const malformed = checkProtocolVersion('not-a-number');
+  assert.equal(malformed.ok, false);
+  assert.equal(malformed.clientVersion, null);
 });
 
 test('TICKS_PER_TURN is the value the diagnostic arithmetic relies on', () => {

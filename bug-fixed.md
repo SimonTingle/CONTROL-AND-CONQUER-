@@ -9,6 +9,43 @@ tuning/balance changes are not included unless they were fixing broken behavior.
 
 ## Online multiplayer
 
+- **After the fix below shipped, a follow-up redeploy showed the same match
+  still split — this time each screen showed "waiting for the other player",
+  then one client reached turn 14 (with 8 vehicles) while the other sat at
+  turn 2 (with the correct 4), and both were ejected to the portal after
+  ~15 seconds.** The start barrier from the entry below held — both clients did
+  receive `begin` together — but the identical bug it had just fixed at match
+  *start* was still present in the *running* match: `releaseReadyTurns` gated
+  on the connected-player count rather than the roster, so the instant one
+  socket dropped, the survivor alone satisfied the smaller quorum and was
+  released to simulate every subsequent turn on its own — turn 14 vs turn 2,
+  reproducing the original symptom from inside the match rather than at its
+  start. Three more faults compounded it, two of them introduced by the
+  previous fix: `LockstepSession.resumeAt` moved its bookkeeping past the
+  input-delay window without ever sending anything for it, so a rejoining
+  client could never actually report in; `matchClient.js`'s message switch was
+  missing `case 'resyncNeeded'` entirely, so the resync handler already written
+  for it was dead code; and the new `lastInputAt` reaper (added specifically to
+  stop one kind of stall) ejected both players from any *legitimate* stall,
+  since a client correctly waiting on a stalled peer stops sending input by
+  design and looked identical to a dead one. Separately, `endOnlineMatch`'s new
+  `returnToPortal()` made it trivial for a dropped player to click back into
+  the same still-running match and call `beginMatch` a second time —
+  `deployStartingForces` is purely additive, so the world doubled (8 vehicles).
+  Fixed by gating the running-match quorum on the roster instead of the
+  connection count (the running-match twin of the start barrier), having
+  `resumeAt` actually send its primed window, wiring the missing message case,
+  removing the reaper path that punished legitimate stalls, and replacing
+  `returnToPortal()` with `location.reload()` plus a re-entry guard — the same
+  remedy `matchEndScreen`'s "play again" already used for the identical reason.
+  **Verified with the two-client end-to-end test extended to the drop/rejoin
+  cycle, against a real relay and a real database: reverting the roster-based
+  quorum alone reproduces the exact field symptom (the survivor free-runs from
+  turn 42 to 61, unprompted, the moment its peer drops); with the fix, the
+  survivor holds at 42 for as long as the peer is gone, the rejoining client is
+  sent `begin{resuming}` and a relayed resync snapshot, and both converge on an
+  identical turn again afterward.**
+
 - **Two players in one match each simulated a private world on the same island —
   both screens sat on "waiting for other team" first, then each played on alone
   with the opponent frozen at spawn.** Three fail-open paths, all of which had to

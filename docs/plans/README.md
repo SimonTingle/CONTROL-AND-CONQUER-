@@ -48,3 +48,5 @@ here is the reasoning". Record them with enough detail to act on later.
 | Plan | Change |
 |---|---|
 | [online-multiplayer-desync.md](online-multiplayer-desync.md) | Two clients ran independent simulations of the same map; three fail-open paths in the lockstep start barrier, late-join and disconnect handling. |
+| [online-multiplayer-quorum-and-rejoin.md](online-multiplayer-quorum-and-rejoin.md) | Follow-up: the *running* match had the identical fail-open the previous fix closed only at *start* — a dropped peer let the survivor free-run, rejoining never actually worked, and a stall got the player ejected and re-doubled the world on return. |
+| [online-multiplayer-protocol-handshake.md](online-multiplayer-protocol-handshake.md) | Follow-up: neither of the above wire-format changes was guarded by any check that two peers agree on the protocol at all — added a hardcoded, hand-bumped `PROTOCOL_VERSION` checked in both directions at connect time. |
