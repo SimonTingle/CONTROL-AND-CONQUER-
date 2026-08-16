@@ -73,9 +73,21 @@ async function makeUser(tag) {
   return { tag, call, write, cookie: cookieHeader, userId: me.user.id };
 }
 
-/** One client's socket + lockstep session, recording what it saw. */
+/**
+ * One client's socket + lockstep session, recording what it saw.
+ *
+ * `onResyncNeeded`/`onSnapshot` mirror the two frames a real host and a real
+ * rejoiner exchange (`main.js`'s `onResyncNeeded`/`onSnapshot` handlers) —
+ * this harness has no game world to actually serialize, so the host side
+ * responds with a marker payload rather than a real snapshot. What this
+ * proves is the wire path itself: does `resyncNeeded` reach the host, and
+ * does the relayed `snapshot` reach the rejoiner. That path had a real,
+ * shipped bug — `matchClient.js`'s message switch had no `case
+ * 'resyncNeeded'` at all, so the handler `main.js` already had written for it
+ * was simply never called.
+ */
 function connectClient(user, matchId) {
-  const seen = { begin: null, waiting: [], turns: [], welcome: null };
+  const seen = { begin: null, waiting: [], turns: [], welcome: null, resyncNeeded: [], snapshot: null };
   const ws = new WebSocket(`ws://127.0.0.1:3999/ws/match/${matchId}`, {
     headers: { cookie: user.cookie() },
   });
@@ -101,6 +113,10 @@ function connectClient(user, matchId) {
     } else if (msg.t === 'turn') {
       seen.turns.push(msg.turn);
       session.receiveTurn(msg.turn, msg.inputs);
+    } else if (msg.t === 'resyncNeeded') {
+      seen.resyncNeeded.push(msg);
+    } else if (msg.t === 'snapshot') {
+      seen.snapshot = msg;
     }
   });
 
@@ -121,6 +137,7 @@ function connectClient(user, matchId) {
       return done;
     },
     session: () => session,
+    send(msg) { ws.send(JSON.stringify(msg)); },
   };
 }
 
@@ -187,8 +204,81 @@ const tickB = turnB * b.session().ticksPerTurn + b.session().tickInTurn;
 ok('neither client is ahead of the other in sim ticks',
    tickA === tickB, `tickA=${tickA} tickB=${tickB}`);
 
-a.ws.close();
+// ---- 5. b drops. a must PAUSE, not run ahead alone ----
+//
+// The primary bug this round: `releaseReadyTurns` used to gate on
+// `room.players.size` — the connected count — so the moment b's socket
+// closed, a alone satisfied the (now smaller) quorum and was released to
+// simulate every subsequent turn on its own. That produced exactly the two
+// diagnostic saves this round started from: one client at turn 14, the other
+// still at turn 2, neither reachable by the other.
 b.ws.close();
+await sleep(300); // let the server's close handler run and any turns already
+                   // in flight from before the drop finish landing on a — the
+                   // invariant under test is that release STOPS once b is
+                   // gone, not that it stops at the exact instant .close() was
+                   // called (a couple of turns both sides had already fully
+                   // reported can legitimately land just after).
+a.pump(600);
+const turnBeforeDrop = a.session().turn;
+const releasedBeforeDrop = a.seen.turns.length;
+
+for (let round = 0; round < 20; round++) {
+  a.pump(6);
+  await sleep(20);
+}
+
+ok('a alone after b drops does NOT advance — the match pauses, it does not run ahead',
+   a.session().turn === turnBeforeDrop && a.seen.turns.length === releasedBeforeDrop,
+   `turn settled at=${turnBeforeDrop}, stayed at=${a.session().turn}; ` +
+     `turns received settled at=${releasedBeforeDrop}, stayed at=${a.seen.turns.length}`);
+
+// ---- 6. b reconnects. It must be told the match began (resuming), and must
+//         actually be able to rejoin the turn stream — not deadlock on it ----
+const b2 = connectClient(joiner, matchId);
+await b2.ready;
+await sleep(300);
+
+ok('the rejoining socket is told the match already began, and that it is resuming',
+   b2.seen.begin !== null && b2.seen.begin.resuming === true,
+   `begin=${JSON.stringify(b2.seen.begin)}`);
+
+ok('the host is asked to resync the rejoining player',
+   a.seen.resyncNeeded.length > 0 && a.seen.resyncNeeded.at(-1).users.includes(joiner.userId),
+   JSON.stringify(a.seen.resyncNeeded));
+
+// Stand in for main.js's host-side snapshot response — this harness has no
+// game world to serialize, so a marker payload exercises the same wire path
+// a real snapshot would (server/src/ws/match.js's 'snapshot' relay), which is
+// the part that had no route to the client at all before this fix.
+if (a.seen.resyncNeeded.length) {
+  const req = a.seen.resyncNeeded.at(-1);
+  a.send({ t: 'snapshot', toUserId: req.users[0], turn: a.session().turn, payload: { marker: 'resync' } });
+}
+await sleep(200);
+
+ok('the rejoiner actually receives the relayed snapshot',
+   b2.seen.snapshot?.payload?.marker === 'resync', JSON.stringify(b2.seen.snapshot));
+
+// ---- 7. both clients advance together again — the actual proof the rejoin
+//         worked, not just that the frames arrived ----
+for (let round = 0; round < 40; round++) {
+  a.pump(6);
+  b2.pump(6);
+  await sleep(20);
+}
+await sleep(300);
+
+const finalA = a.session().turn;
+const finalB = b2.session().turn;
+ok('both clients advanced past where the drop paused them',
+   finalA > turnBeforeDrop && finalB > turnBeforeDrop,
+   `A: ${turnBeforeDrop} -> ${finalA}; B (rejoined): -> ${finalB}`);
+ok('after rejoining, both clients are on the same turn again',
+   finalA === finalB, `A=${finalA} B2=${finalB}`);
+
+a.ws.close();
+b2.ws.close();
 await sleep(200);
 
 const failed = results.filter((r) => !r.pass).length;

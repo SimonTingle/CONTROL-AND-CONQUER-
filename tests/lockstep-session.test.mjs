@@ -67,35 +67,53 @@ test('a turn is exactly ticksPerTurn steps long', () => {
   assert.equal(session.tickInTurn, 0, 'and lands on a boundary');
 });
 
-test('rejoining resumes at the first unreleased turn, not turn 0', () => {
-  const { session, sent } = makeSession();
+test('resumeAt actually SENDS the delay window it primes — this was the deadlock', () => {
+  const { session, sent } = makeSession({ inputDelayTurns: 2 });
 
   // The server released through turn 500 before this client connected.
   session.resumeAt(501);
 
+  // The regression, exactly: an earlier version only moved `sentThrough` past
+  // the window (via `resetTo` alone) without a single byte going out. The
+  // server's per-turn quorum could then never be satisfied for 501/502, so
+  // release stalled forever — and because the roster-based quorum
+  // (server/src/ws/match.js) waits for every player, that took every OTHER
+  // client down with it too, not just the rejoiner.
+  assert.deepEqual(
+    sent,
+    [{ turn: 501, inputs: [] }, { turn: 502, inputs: [] }],
+    'reports the delay window at the resume point, not just marks it sent'
+  );
   assert.equal(session.turn, 501, 'picks up where the match actually is');
-  assert.deepEqual(sent, [], 'and does NOT report turns 0..DELAY-1');
+  assert.equal(session.sentThrough, 502);
   assert.equal(session.started, true, 'counts as started');
 });
 
-test('a rejoining session reports input immediately, so it cannot stall the match', () => {
+test('a rejoining session keeps reporting normally once its primed window clears', () => {
   const { session, sent } = makeSession({ inputDelayTurns: 2 });
   session.resumeAt(501);
 
   session.receiveTurn(501, []);
   assert.equal(session.beginStep(), true);
 
-  // Reporting has to begin at once even though this client's world is still
-  // stale: the other players' turns are gated on it, and staying quiet until a
-  // snapshot arrived would stall the host before it could ever send one.
-  assert.deepEqual(sent.map((s) => s.turn), [503], 'reports turn + DELAY');
+  // Reporting must continue past the primed window without a gap: turn 501
+  // begins, and — same as any ordinary turn — that is what schedules turn
+  // 501 + DELAY = 503.
+  assert.deepEqual(
+    sent.map((s) => s.turn),
+    [501, 502, 503],
+    'the primed window, then the next turn scheduled as 501 begins'
+  );
 });
 
-test('start() after resumeAt does not re-prime turn 0', () => {
-  const { session, sent } = makeSession();
+test('start() after resumeAt does not re-prime or duplicate the delay window', () => {
+  const { session, sent } = makeSession({ inputDelayTurns: 2 });
   session.resumeAt(501);
+  const afterResume = [...sent];
+
   session.start();
-  assert.deepEqual(sent, [], 'a late begin frame must not rewind the cursor');
+
+  assert.deepEqual(sent, afterResume, 'a late begin frame must not re-send or rewind the cursor');
   assert.equal(session.turn, 501);
 });
 

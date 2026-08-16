@@ -74,21 +74,35 @@ export class LockstepSession {
   /**
    * Join a match that is already running, at the first turn not yet released.
    *
-   * Distinct from `start()` in the one way that matters: it does **not** prime
-   * turns 0..DELAY. Those were released long ago, the server rejects any late
-   * input for them, and a rejoining client that reported them would sit waiting
-   * for broadcasts that already happened — which is exactly how a late arrival
-   * used to hang, silently, forever.
+   * Distinct from `start()` in *where* it primes the input-delay window rather
+   * than *whether* it does: reporting turns 0..DELAY would sit waiting for
+   * broadcasts that already happened (the server rejects them outright — they
+   * are behind `released`), so this primes `turn..turn+DELAY-1` instead, the
+   * same window shifted to where the match actually is.
+   *
+   * Priming means **sending**, not just moving `sentThrough` past it. That was
+   * the actual bug: `resetTo` alone advances the bookkeeping without a single
+   * byte going out, so the server's per-turn quorum can never be met for a
+   * window nobody ever reported — every client, not just the rejoiner, stalls
+   * on it forever. `start()` avoided this by looping over `send`; a rejoin
+   * needs the identical loop, just anchored somewhere other than turn 0.
    *
    * Reporting begins immediately even though this client's world is still
    * stale: input is what the other players' turns are gated on, so staying
    * quiet to "wait for a snapshot first" would stall the whole match and stop
    * the host ever reaching the turn it promised the snapshot for. The stale
-   * world is corrected a few turns later by the ordinary resync path.
+   * world keeps simulating in the meantime — wrongly, briefly — exactly as it
+   * already does for an ordinary in-match desync resync; the snapshot corrects
+   * it a few turns later, at a turn boundary, before that turn's real inputs
+   * are applied. No separate "receiving but not simulating" mode is needed:
+   * the correction path this relies on already tolerates being wrong for a few
+   * turns, because it has to.
    */
   resumeAt(turn) {
     this.started = true;
     this.resetTo(turn);
+    for (let t = turn; t < turn + this.inputDelayTurns; t++) this.send(t, []);
+    this.sentThrough = turn + this.inputDelayTurns - 1;
   }
 
   /** A turn's complete input set arrived from the server. */

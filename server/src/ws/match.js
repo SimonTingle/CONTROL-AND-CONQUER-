@@ -2,9 +2,9 @@
  * Lockstep relay.
  *
  * The server does not simulate the game. It collects each player's input for a
- * turn and, once every connected player has reported, broadcasts the complete
- * set so all clients apply an identical ordered batch. That is the whole
- * protocol — no positions, no health, no authority over the world.
+ * turn and, once the **whole roster** has reported, broadcasts the complete set
+ * so all clients apply an identical ordered batch. That is the whole protocol —
+ * no positions, no health, no authority over the world.
  *
  * ## Turns, and why they are not ticks
  *
@@ -16,14 +16,27 @@
  * what buys time for the round trip without stalling: by the time a client
  * needs turn N+2's inputs, they were sent two turns ago.
  *
- * ## Why the server holds the clock
+ * ## Why the server holds the clock, and why the quorum is the roster
  *
- * A turn is only released when every player has reported for it. That makes the
- * slowest player the pacer (real lockstep), and it is why a disconnect must be
- * handled explicitly rather than ignored — a vanished player would otherwise
- * stall everyone forever. Past DROP_AFTER_MS a silent player is dropped so the
- * remaining players can carry on. Their team then simply idles: handing it to
- * an AI commander mid-match is a sensible follow-up but is not implemented.
+ * A turn is only released once every **rostered** player has reported it —
+ * `expectedPlayers`, not however many sockets happen to be open. That makes the
+ * slowest player the pacer (real lockstep). It used to gate on the connected
+ * count instead, on the reasoning that a vanished player should not stall
+ * everyone forever. That reasoning was backwards: the moment one socket closed,
+ * the survivor alone satisfied the (now smaller) quorum and free-ran at frame
+ * rate, while the other player's session — behind by however many turns it
+ * missed — could never catch up. Two real players spent a match exactly that
+ * way: one at turn 14, the other still at turn 2, each in a world the other had
+ * no way to reach. A drop now pauses the match for everyone until the missing
+ * player returns (see `maybeBegin` for the identical rule at match start) or a
+ * player chooses to leave, which is a client-side decision, not something this
+ * file grants unilaterally by shrinking who it is willing to wait for.
+ *
+ * `DROP_AFTER_MS`/`reapSilent` still exist, but only to garbage-collect a
+ * socket that has gone genuinely silent (no heartbeat, nothing) — removing it
+ * tidies the roster display and lets a reconnect claim a clean seat. It does
+ * **not** change `expectedPlayers`, so it cannot let the match run ahead
+ * without the player it just removed.
  *
  * ## The start barrier
  *
@@ -103,7 +116,7 @@ export function createRoom(matchId, seed, expectedPlayers) {
     started: false,
     /** When the first client connected, for the waiting-report threshold. */
     firstJoinAt: Date.now(),
-    /** userId -> { socket, teamId, displayName, lastSeen, lastInputAt } */
+    /** userId -> { socket, teamId, displayName, lastSeen } */
     players: new Map(),
     /** turn -> Map(userId -> input[]) */
     pending: new Map(),
@@ -189,13 +202,20 @@ function rosterOf(room) {
 }
 
 /**
- * Release every turn that now has input from all connected players.
+ * Release every turn that now has input from the **whole roster**.
  *
- * Ordering is the subtle part: inputs are sorted by teamId so every client
- * applies the batch in the same sequence. Two orders issued in the same turn
- * that interact (both buying the last affordable unit, say) must resolve the
- * same way everywhere, and arrival order at the server is not something clients
- * can agree on.
+ * Deliberately `room.expectedPlayers`, not `room.players.size`. Gating on who
+ * is currently connected is what let a lone survivor free-run past a dropped
+ * peer — see the file header. Gating on the roster means a drop pauses the
+ * clock for everyone, symmetrically with the start barrier in `maybeBegin`:
+ * neither one ever releases a turn on behalf of a player who has not actually
+ * reported it, whether that player has never connected yet or has stopped.
+ *
+ * Ordering is the other subtle part: inputs are sorted by teamId so every
+ * client applies the batch in the same sequence. Two orders issued in the same
+ * turn that interact (both buying the last affordable unit, say) must resolve
+ * the same way everywhere, and arrival order at the server is not something
+ * clients can agree on.
  */
 export function releaseReadyTurns(room) {
   for (;;) {
@@ -204,8 +224,8 @@ export function releaseReadyTurns(room) {
     // The barrier: until the match has begun, nothing is released at all. This
     // is what stops the first client to connect from advancing the turn clock
     // on its own and leaving every later arrival permanently behind it.
-    if (!room.started || !room.players.size) return;
-    if (!reported || reported.size < room.players.size) return;
+    if (!room.started) return;
+    if (!reported || reported.size < room.expectedPlayers) return;
 
     const inputs = [];
     for (const [userId, list] of reported) {
@@ -222,36 +242,47 @@ export function releaseReadyTurns(room) {
 }
 
 /**
- * Drop players who have gone quiet, so their silence cannot stall the match.
+ * Drop a socket that has gone genuinely silent — no message of any kind,
+ * including the heartbeat, for `DROP_AFTER_MS`.
  *
- * "Quiet" means two different things and both have to be checked. A socket that
- * has stopped sending anything is the obvious case. The subtler one is a client
- * that faithfully answers the 5s heartbeat while never reporting a single turn
- * of input: `lastSeen` says it is healthy, `releaseReadyTurns` counts it in the
- * quorum, and every other player stalls forever waiting on a peer that is never
- * going to speak. That is not hypothetical — it is precisely how one real match
- * froze, and why participation is timed separately from liveness.
+ * This used to also reap a client that kept answering the heartbeat while
+ * never reporting a turn of input, on the theory that such a client was dead
+ * in every way that mattered. It was not: that is the *normal* appearance of a
+ * client correctly waiting on a stalled peer — `beginStep()` stops sending
+ * input the instant a turn is missing, by design, so "reporting nothing" and
+ * "participating correctly" look identical from here. Reaping on it meant a
+ * legitimate stall ejected both players within one sweep of each other, which
+ * is not a recovery, it is the failure with extra steps.
  *
- * Input silence only counts once the match has begun: before `begin` nobody is
- * expected to have reported anything yet.
+ * So this only ever removes a socket that is actually gone. It does not touch
+ * `expectedPlayers`, so it cannot let the match run ahead of a player it just
+ * removed — see the file header. Its only effect is to tidy the roster display
+ * and free the seat for a genuine reconnect.
  */
 export function reapSilent(room) {
   const now = Date.now();
   for (const [userId, p] of room.players) {
-    const gone = now - p.lastSeen > DROP_AFTER_MS;
-    const mute = room.started && now - p.lastInputAt > DROP_AFTER_MS;
-    if (!gone && !mute) continue;
+    if (now - p.lastSeen <= DROP_AFTER_MS) continue;
     try { p.socket.close(4008, 'timed out'); } catch { /* already gone */ }
-    room.players.delete(userId);
-    broadcast(room, {
-      t: 'playerLeft',
-      userId,
-      teamId: p.teamId,
-      reason: gone ? 'timeout' : 'not_reporting',
-    });
+    dropPlayer(room, userId);
+    broadcast(room, { t: 'playerLeft', userId, teamId: p.teamId, reason: 'timeout' });
   }
-  // Their absence may be exactly what several pending turns were waiting on.
-  releaseReadyTurns(room);
+}
+
+/**
+ * Remove a player's bookkeeping, wherever it lives.
+ *
+ * `room.hashes` matters most: it is never otherwise purged on departure (only
+ * aged out by turn number), so a hash left behind by a dead connection would
+ * sit in its turn's bucket and later get compared against a live peer's report
+ * for that same turn — a phantom desync, since the two were never describing
+ * the same running match. Shared by both places a player can leave (an
+ * explicit socket close, and this file's own silent-socket reap) so neither one
+ * can forget it.
+ */
+function dropPlayer(room, userId) {
+  room.players.delete(userId);
+  for (const bucket of room.hashes.values()) bucket.delete(userId);
 }
 
 export async function matchSocket(app) {
@@ -337,10 +368,6 @@ async function handleMatchSocket(socket, req) {
     teamId,
     displayName: user.display_name,
     lastSeen: Date.now(),
-    // Tracked separately from `lastSeen` on purpose — see `reapSilent`. The
-    // heartbeat keeps `lastSeen` fresh whether or not the client is actually
-    // participating, so it cannot answer "is this player still playing?".
-    lastInputAt: Date.now(),
   });
 
   send(socket, {
@@ -413,7 +440,6 @@ async function handleMatchSocket(socket, req) {
           send(socket, { t: 'error', error: 'turn_already_released', turn });
           return;
         }
-        player.lastInputAt = Date.now();
         if (!room.pending.has(turn)) room.pending.set(turn, new Map());
         // teamId is attached at release time from the roster, so anything the
         // client claims about ownership here is ignored by construction.
@@ -484,9 +510,12 @@ async function handleMatchSocket(socket, req) {
     // Only clear the seat if this socket still owns it — otherwise a
     // just-replaced connection's close event would evict its replacement.
     if (current?.socket !== socket) return;
-    room.players.delete(user.id);
+    dropPlayer(room, user.id);
     broadcast(room, { t: 'playerLeft', userId: user.id, teamId, reason: 'closed' });
+    // `expectedPlayers` is unchanged by this — the room now waits for this
+    // player to come back rather than releasing turns without them (see the
+    // file header). Emptying the room entirely is the one case with nobody
+    // left to wait for.
     if (room.players.size === 0) rooms.delete(matchId);
-    else releaseReadyTurns(room); // they may have been the turn we waited on
   });
 }

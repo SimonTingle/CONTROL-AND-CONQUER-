@@ -28,6 +28,19 @@ export class LobbyScreen {
     this.timer = null;
     /** The match we are sitting in, if any. */
     this.current = null;
+    /**
+     * Has `onStart` already fired for the match we are sitting in?
+     *
+     * Two independent races can otherwise fire it twice: the host's own click
+     * in `start()` overlapping a poll's `refresh()` seeing `status === 'running'`
+     * moments later, or two overlapping polls both seeing it (a slow request on
+     * a bad connection). `onStart` runs `beginMatch`, which is purely additive —
+     * it spawns starting forces without clearing anything — so a second call
+     * doubles every vehicle on the board. This flag is the one thing both paths
+     * check before calling it, and it is reset only when the lobby is opened
+     * again for a fresh visit (`show()`), not by anything within one.
+     */
+    this.entered = false;
 
     this.root = document.createElement('div');
     this.root.id = 'lobby';
@@ -40,6 +53,7 @@ export class LobbyScreen {
 
   show() {
     this.open = true;
+    this.entered = false;
     this.root.classList.remove('hidden');
     this.renderBrowser();
     this.startPolling();
@@ -67,10 +81,16 @@ export class LobbyScreen {
     try {
       if (this.current) {
         const { match, players } = await this.api.getMatch(this.current.id);
+        // Re-check after the await, not just before it: `hide()` (from a
+        // click on `start()`, or from this same branch on an earlier poll)
+        // cannot cancel a request already in flight, and this poll's result
+        // is stale the moment either happens.
+        if (!this.open || this.entered) return;
         this.current = match;
         // The host pressing Start is what everyone else is waiting on — it is
         // the only signal that moves a guest out of this screen.
         if (match.status === 'running') {
+          this.entered = true;
           this.hide();
           this.onStart(match.id);
           return;
@@ -228,12 +248,19 @@ export class LobbyScreen {
   }
 
   async start() {
+    // Set before the request, not after: a poll's `refresh()` can observe
+    // `status === 'running'` and race to call `onStart` itself while this
+    // request is still in flight (the host's own click is what flips that
+    // status). `entered` is the one guard both paths share.
+    if (this.entered) return;
+    this.entered = true;
     try {
       await this.api.startMatch(this.current.id);
       const id = this.current.id;
       this.hide();
       this.onStart(id);
     } catch (err) {
+      this.entered = false; // the attempt failed; a retry must be allowed to fire
       this.renderError(err);
     }
   }

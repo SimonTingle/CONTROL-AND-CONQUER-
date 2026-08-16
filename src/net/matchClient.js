@@ -89,11 +89,21 @@ export class MatchClient {
             return void this.handlers.onPlayerJoined?.(msg);
           case 'playerLeft':
             return void this.handlers.onPlayerLeft?.(msg);
+          case 'resyncNeeded':
+            // The host's own cue that some other player just rejoined stale or
+            // empty — the same signal a hash mismatch produces, on a different
+            // trigger. Handled identically: schedule a snapshot at a turn the
+            // host can promise to reach.
+            return void this.handlers.onResyncNeeded?.(msg);
           case 'error':
             // An error before the welcome means we never got in at all — reject
             // rather than leave the caller waiting on a connection that failed.
             if (!settled) { settled = true; reject(new Error(msg.error)); }
-            return void this.handlers.onError?.(msg.error);
+            // The full frame, not just the string — `turn_already_released`
+            // carries the turn that was rejected, and a handler needs it to
+            // tell "stale input, ignorable" from "this session can never
+            // rejoin the turn stream" (see onError in main.js).
+            return void this.handlers.onError?.(msg);
           default:
             return;
         }

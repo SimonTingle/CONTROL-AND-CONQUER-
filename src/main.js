@@ -1567,33 +1567,42 @@ const RESYNC_LEAD_TURNS = 3;
 let match = null;
 /** Seconds since the last "waiting…" notice, so a stall explains itself once a second. */
 let matchWaitTimer = 0;
-
-/** Back to the mode picker — the one way out of a match that cannot continue. */
-function returnToPortal() {
-  game.portalScreen.buildGrid();
-  game.portalScreen.open = true;
-  game.portalScreen.root.classList.remove('hidden');
-}
+/**
+ * How many of those once-a-second notices a mid-match stall has run for.
+ * The running quorum now waits for an absent peer indefinitely rather than
+ * releasing without them (server/src/ws/match.js) — there is no timeout that
+ * ejects the player automatically the way there used to be. A brief stall
+ * (a lost packet, a moment of lag) is normal and should look like one; a long
+ * one needs a way out attached, or the player is stuck with no recourse but to
+ * close the tab. This is what tells the two apart.
+ */
+let matchStallSeconds = 0;
+const MID_MATCH_STALL_ESCALATE_S = 5;
 
 /**
  * Leave an online match, for any reason.
  *
- * The simulation stops here and does not resume: `game.mode` stays
- * `'multiplayer-online'`, which the sim loop and `drainIntents` both read as
- * "no local authority". That is deliberate. This used to null `match` and
- * nothing else, and since every other check keyed off that object rather than
- * the mode, a disconnected client quietly carried on simulating a world nobody
- * else could see — full speed, its own orders applied locally with ownership
- * checks disabled, no indication anything had gone wrong. A frozen world and a
- * way back to the portal is the honest version.
+ * A full reload, not a return to the portal in place. `matchEndScreen`
+ * (below) already settled this question for "play again" and says why:
+ * rebuilding a match in place means unwinding the world, the fleet, the fog
+ * masks, the commanders and the destroy queue by hand, and any one of those
+ * missed is a subtle cross-match bug. Returning to the portal without
+ * reloading kept the old (still-populated) world sitting behind the portal
+ * screen, and the lobby's own state (`LobbyScreen.current`) survived the trip
+ * too — so clicking back into Multiplayer Online could re-enter the very match
+ * just left and run `beginMatch` a second time on top of the old one, doubling
+ * every vehicle on the board. A reload is the version of this fix that cannot
+ * miss a subsystem, the same reasoning `matchEndScreen` already relied on.
+ *
+ * The reason is shown before the navigation actually happens (`sessionStorage`
+ * survives a reload; a toast queued right before one does not), and read back
+ * once on load — see the `pendingToast` handling near the bottom of this file.
  */
 function endOnlineMatch(reason) {
   if (!match) return;
   match.client.close();
-  match = null;
-  hideNetDebug();
-  if (reason) showToast(reason, 8000);
-  returnToPortal();
+  if (reason) sessionStorage.setItem('pendingToast', reason);
+  location.reload();
 }
 
 /**
@@ -1602,8 +1611,19 @@ function endOnlineMatch(reason) {
  * Everything about the world is derived, not received: the seed comes from the
  * lobby row, terrain regenerates from it, and both clients deploy identical
  * starting forces because `deployStartingForces` is itself deterministic.
+ *
+ * Refuses to run while a match is already live. `beginMatch` (called below) is
+ * purely additive — it spawns starting forces without clearing the world — so
+ * a second call on top of a live match doubles every vehicle on the board.
+ * `LobbyScreen` guards against calling this twice for its own reasons (see
+ * `entered` there); this is the backstop for any other way it could be
+ * reached twice, so the two defenses do not have to stay in sync by hand.
  */
 async function startOnlineMatch(matchId, difficulty) {
+  if (match) {
+    console.error('startOnlineMatch called while a match is already live — ignoring.');
+    return;
+  }
   const { match: info } = await api.getMatch(matchId);
   const client = new MatchClient(matchId, {
     // The server holds every client at the gate until the roster is complete;
@@ -1652,9 +1672,26 @@ async function startOnlineMatch(matchId, difficulty) {
       if (match) match.pendingSnapshot = msg;
     },
     onPlayerLeft: (msg) => {
-      // Their team carries on under AI rather than freezing — the same
-      // commander the AI-match mode already uses, so nothing new to build.
-      showToast(`${msg.teamId === game.localTeamId ? 'You' : 'A player'} left the match`, 4000);
+      // Their team is not handed to an AI commander — that would be a sensible
+      // follow-up but is not implemented. The match pauses on them instead (see
+      // server/src/ws/match.js's roster-based quorum) until they reconnect or
+      // somebody still present chooses to leave.
+      showToast(
+        `${msg.teamId === game.localTeamId ? 'You' : 'A player'} left the match — ` +
+          'waiting for them to reconnect.',
+        4000
+      );
+    },
+    onError: (msg) => {
+      if (msg.error !== 'turn_already_released') return;
+      // This session's clock cannot be reconciled with the server's: it asked
+      // to report a turn already broadcast, which means it fell far enough
+      // behind (or jumped far enough ahead, via a stale rejoin) that the normal
+      // resync machinery — anchored to a turn still in the future — cannot
+      // reach it. Continuing would silently re-stall on the same turn forever
+      // and, since the quorum is now the whole roster, take every other player
+      // down with it. Ending cleanly here is what makes that impossible.
+      endOnlineMatch('Lost sync with the match and could not recover — please rejoin.');
     },
     onClose: () => endOnlineMatch('Disconnected from the match.'),
   });
@@ -2038,6 +2075,18 @@ api.me().then((user) => {
   }
 }
 
+// A message queued right before `location.reload()` — see `endOnlineMatch` —
+// would otherwise vanish with the page that was about to show it. sessionStorage
+// survives the reload; this reads it back exactly once and clears it, so it
+// cannot resurface on some unrelated later reload.
+{
+  const pendingToast = sessionStorage.getItem('pendingToast');
+  if (pendingToast) {
+    sessionStorage.removeItem('pendingToast');
+    showToast(pendingToast, 8000);
+  }
+}
+
 addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
@@ -2298,6 +2347,7 @@ function renderTick(dt) {
     matchWaitTimer += dt;
     if (matchWaitTimer >= 1) {
       matchWaitTimer = 0;
+      matchStallSeconds += 1;
       const waiting = match.waitingFor;
       if (!match.begun && waiting) {
         // The server has told us the roster is short and stayed short. It will
@@ -2307,6 +2357,18 @@ function renderTick(dt) {
         showToast(
           `Still waiting for ${waiting.expected - waiting.present} of ` +
             `${waiting.expected} players to connect.`,
+          0,
+          { label: 'Leave match', onClick: () => endOnlineMatch(null) }
+        );
+      } else if (match.begun && matchStallSeconds >= MID_MATCH_STALL_ESCALATE_S) {
+        // The match itself pauses on an absent or lagging peer for as long as
+        // it takes rather than ejecting anyone automatically (see
+        // server/src/ws/match.js's roster-based quorum) — a pause that looks
+        // identical to a freeze is what made the underlying bug hard to even
+        // report. Past a few seconds this stops being ordinary jitter and
+        // needs the same way out as the pre-start wait.
+        showToast(
+          'Still waiting for the other player — the match is paused, not frozen.',
           0,
           { label: 'Leave match', onClick: () => endOnlineMatch(null) }
         );
@@ -2321,6 +2383,7 @@ function renderTick(dt) {
     }
   } else {
     matchWaitTimer = 0;
+    matchStallSeconds = 0;
   }
 
   p.time('updateTracers', () => updateTracers(dt));
