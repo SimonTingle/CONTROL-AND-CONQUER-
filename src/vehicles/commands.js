@@ -23,7 +23,18 @@ import { WEAPON_TIERS } from '../core/team.js';
 export function commandsFor(instance, ctx) {
   const byId = COMMANDS[instance.def.id];
   if (!byId) return [];
-  return (byId[instance.mode] ?? []).map((cmd) => ({
+  const base = byId[instance.mode] ?? [];
+
+  // Author-built vehicles cannot be in COMMANDS: that object is assembled at
+  // module import, before anyone has signed in and loaded theirs. So a working
+  // structure's build list is completed here, per call, from whatever custom
+  // vehicles name it in `producedBy`.
+  const staticIds = new Set(base.map((c) => c.id));
+  const extraBuilds = (instance.mode === 'idle' ? producedUnitIds(instance.def, ctx) : [])
+    .filter((unitId) => !staticIds.has(`build-${unitId}`))
+    .map((unitId) => buildCommandFor(unitId, { atBase: SPAWNS_AT_BASE.has(instance.def.id) }));
+
+  return [...base, ...extraBuilds].map((cmd) => ({
     ...cmd,
     // A hint may be a function when it needs a live number, like a price.
     hint: typeof cmd.hint === 'function' ? cmd.hint(instance, ctx) : cmd.hint,
@@ -188,13 +199,36 @@ const TEAM_WEAPON_UPGRADE_COMMAND = {
  */
 function producedByCommands(structureId) {
   const def = STRUCTURE_CATALOG.find((d) => d.id === structureId);
-  const produces = def?.produces ?? [];
-  return produces.map((unitId) => ({
+  return (def?.produces ?? []).map((unitId) => buildCommandFor(unitId));
+}
+
+/**
+ * One "Build X" command.
+ *
+ * Split out of the two near-identical generators below so a command can also
+ * be produced for a *single* id on demand — which is what author-built
+ * vehicles need, since `COMMANDS` is assembled at module import, long before
+ * anyone has signed in and loaded theirs.
+ *
+ * The unit's name is resolved through `ctx.vehicles.defOf` at call time rather
+ * than from `VEHICLE_CATALOG` at generation time, because a custom vehicle is
+ * not in that array — `defOf` searches the built-ins and then the custom defs.
+ *
+ * @param {string} unitId
+ * @param {boolean} [atBase] spawn near the team's base rather than at the
+ *   producing structure. The Armed Factory's units queue outside the base pad.
+ */
+function buildCommandFor(unitId, { atBase = false } = {}) {
+  return {
     id: `build-${unitId}`,
     label: `Build ${VEHICLE_CATALOG.find((v) => v.id === unitId)?.name ?? unitId}`,
-    hint: (instance, ctx) => `${ctx.vehicles.defOf(unitId).cost} cr`,
+    hint: (instance, ctx) => `${ctx.vehicles.defOf(unitId)?.cost ?? '?'} cr`,
     enabled(instance, ctx) {
       const unitDef = ctx.vehicles.defOf(unitId);
+      // A custom vehicle can vanish between menus — deleted in the editor, or
+      // the mode changed to one that does not admit it. Refuse rather than
+      // throw on a def that is no longer there.
+      if (!unitDef) return 'Unavailable';
       const team = ctx.game.teamOf(instance);
       if (team.credits < unitDef.cost) {
         return `Needs ${unitDef.cost} cr (have ${Math.floor(team.credits)})`;
@@ -203,11 +237,43 @@ function producedByCommands(structureId) {
     },
     execute(instance, ctx) {
       const unitDef = ctx.vehicles.defOf(unitId);
+      if (!unitDef) return;
       // spend() is the gate, not the enabled() check — that ran when the
       // menu opened and the balance can have moved since.
-      if (ctx.game.teamOf(instance).spend(unitDef.cost)) ctx.produceUnit(unitDef, instance);
+      if (ctx.game.teamOf(instance).spend(unitDef.cost)) {
+        ctx.produceUnit(unitDef, atBase ? baseSpawnAnchor(instance, ctx) : instance);
+      }
     },
-  }));
+  };
+}
+
+/**
+ * Every unit id a structure can produce right now: its own `produces` list,
+ * then any author-built vehicle naming it in `producedBy`.
+ *
+ * `producedBy` had no reader at all before this — the live link was the
+ * structure's `produces` array, and the field was inert documentation on the
+ * catalog defs. Custom vehicles make it load-bearing, since a player cannot
+ * edit `structures.js`.
+ *
+ * Custom ids come *after* the built-ins deliberately. `aiCommander` takes the
+ * first produced unit matching its wanted tag that is under its cap, so
+ * appending means a custom vehicle supplements the AI's normal build order
+ * rather than silently displacing it.
+ *
+ * Custom defs are read from `ctx.vehicles.extraDefs`, which is already
+ * mode-gated: `applyCustomCatalog()` leaves it empty in an online match (see
+ * src/builder/customCatalog.js), so nothing here has to re-check the mode for
+ * a custom vehicle to be correctly unbuildable online.
+ */
+export function producedUnitIds(structureDef, ctx) {
+  const own = structureDef?.produces ?? [];
+  const extra = ctx?.vehicles?.extraDefs ?? [];
+  if (!extra.length || !structureDef?.id) return own;
+  const custom = extra
+    .filter((d) => d.producedBy === structureDef.id && !own.includes(d.id))
+    .map((d) => d.id);
+  return custom.length ? [...own, ...custom] : own;
 }
 
 /**
@@ -249,27 +315,11 @@ function baseSpawnAnchor(instance, ctx) {
  */
 function producedNearBaseCommands(structureId) {
   const def = STRUCTURE_CATALOG.find((d) => d.id === structureId);
-  const produces = def?.produces ?? [];
-  return produces.map((unitId) => ({
-    id: `build-${unitId}`,
-    label: `Build ${VEHICLE_CATALOG.find((v) => v.id === unitId)?.name ?? unitId}`,
-    hint: (instance, ctx) => `${ctx.vehicles.defOf(unitId).cost} cr`,
-    enabled(instance, ctx) {
-      const unitDef = ctx.vehicles.defOf(unitId);
-      const team = ctx.game.teamOf(instance);
-      if (team.credits < unitDef.cost) {
-        return `Needs ${unitDef.cost} cr (have ${Math.floor(team.credits)})`;
-      }
-      return true;
-    },
-    execute(instance, ctx) {
-      const unitDef = ctx.vehicles.defOf(unitId);
-      if (ctx.game.teamOf(instance).spend(unitDef.cost)) {
-        ctx.produceUnit(unitDef, baseSpawnAnchor(instance, ctx));
-      }
-    },
-  }));
+  return (def?.produces ?? []).map((unitId) => buildCommandFor(unitId, { atBase: true }));
 }
+
+/** Structures whose produced units wait by the base rather than at the works. */
+const SPAWNS_AT_BASE = new Set(['armed-factory']);
 
 const COMMANDS = {
   'scout-buggy': {
