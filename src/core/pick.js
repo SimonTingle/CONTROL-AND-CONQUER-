@@ -110,6 +110,12 @@ const SPAWN_MAX_GRADE = 0.3;
 // away; both must clear the limit for the spot to count as gentle.
 const GRADE_PROBE_DISTS = [4, 12];
 const GRADE_PROBE_DIRS = 8;
+// How far inland of the coastline the degenerate-fallback sweep starts a
+// base, once it finds *any* dry point in the slice — matched to the coarse
+// end of the grade probes above rather than the vehicle-scale spawn-near
+// radii, since this is choosing a point on the coast, not clearing space
+// around an existing vehicle.
+const SPAWN_DEGENERATE_INLAND = 20;
 
 function localGrade(heightmap, x, z) {
   let worst = 0;
@@ -131,7 +137,7 @@ function localGrade(heightmap, x, z) {
  * than the one the camera happens to face. Multi-team match setup needs to
  * place N bases on N specific bearings; the camera has no say in that.
  */
-export function findEdgeSpawnPointAtAngle(heightmap, angle, target = new THREE.Vector3()) {
+export function findEdgeSpawnPointAtAngle(heightmap, angle, target = new THREE.Vector3(), sliceHalfWidth = 0) {
   const { size } = heightmap.params;
 
   const dirX = Math.cos(angle);
@@ -161,7 +167,35 @@ export function findEdgeSpawnPointAtAngle(heightmap, angle, target = new THREE.V
     };
   }
 
-  // Degenerate fallback (e.g. a fully-flooded map): spawn at the centre.
+  // The exact bearing found nothing dry at all. Before giving up to the map
+  // centre, sweep outward from it — both directions at once, growing step by
+  // step — as far as sliceHalfWidth allows, re-running the same edge-to-centre
+  // march at each test angle. A caller with no slice to bound this to (angle
+  // came from the camera, not a team roster) passes 0 and skips straight to
+  // the centre fallback below, same as before this existed.
+  if (sliceHalfWidth > 0) {
+    const SWEEP_STEPS = 8;
+    for (let i = 1; i <= SWEEP_STEPS; i++) {
+      const off = (i / SWEEP_STEPS) * sliceHalfWidth;
+      for (const testAngle of [angle + off, angle - off]) {
+        const dx = Math.cos(testAngle);
+        const dz = Math.sin(testAngle);
+        for (let r = maxRadius; r > 0; r -= step) {
+          const x = dx * r;
+          const z = dz * r;
+          if (heightmap.heightAt(x, z) <= heightmap.seaLevelY) continue;
+          // Found the coastline on this test angle — start a short distance
+          // further inland along it rather than right on the waterline.
+          const inlandR = Math.max(0, r - SPAWN_DEGENERATE_INLAND);
+          const ix = dx * inlandR;
+          const iz = dz * inlandR;
+          return { point: target.set(ix, heightmap.heightAt(ix, iz), iz), heading: Math.atan2(-dz, -dx) };
+        }
+      }
+    }
+  }
+
+  // True degenerate fallback (e.g. a fully-flooded map): spawn at the centre.
   return { point: target.set(0, heightmap.heightAt(0, 0), 0), heading: 0 };
 }
 
@@ -193,7 +227,7 @@ export function findTeamSpawnPoints(heightmap, count, { minSeparation = 260, pha
     for (const nudge of NUDGES) {
       // Never let a nudge cross into a neighbouring slice.
       const angle = centre + nudge * slice;
-      const found = findEdgeSpawnPointAtAngle(heightmap, angle, new THREE.Vector3());
+      const found = findEdgeSpawnPointAtAngle(heightmap, angle, new THREE.Vector3(), slice / 2);
       const clearance = placed.length
         ? Math.min(...placed.map((p) => Math.hypot(p.point.x - found.point.x, p.point.z - found.point.z)))
         : Infinity;
