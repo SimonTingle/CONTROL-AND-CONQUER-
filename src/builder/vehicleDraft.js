@@ -79,7 +79,10 @@ export function blankDef(name = 'New Vehicle') {
     axles: 2,
     axleFractions: [1.0, -1.0],
     steerRatios: [1.0, 0],
-    shape: { nose: true, turret: true, tank: false, cabinLength: 0.3, cabinX: 0.2 },
+    shape: { nose: true, turret: true, tank: false, tracked: false, cabinLength: 0.3, cabinX: 0.2 },
+    // Only read when shape.tracked is on, but always present so switching to
+    // tracks in the editor never lands on undefined dimensions.
+    pivotRate: 0.9,
     // Never omit this block — see the file header.
     lights: {
       style: 'lamps',
@@ -111,6 +114,9 @@ export function blankDef(name = 'New Vehicle') {
       turretHeight: 0.75,
       barrelRadius: 0.16,
       barrelLength: 3.0,
+      roadWheels: 5,
+      trackWidth: 0.95,
+      trackThickness: 0.18,
     },
     colors: { hull: '#4b4f46', cabin: '#292d28', wheel: '#161616', trim: '#8f9a86' },
     previewDistance: 16,
@@ -202,6 +208,32 @@ export function validateDef(def, { catalog = VEHICLE_CATALOG } = {}) {
     if (def.shape?.turret) {
       for (const key of ['turretRadius', 'turretHeight', 'barrelRadius', 'barrelLength']) {
         if (!isPositive(def.dims[key])) problems.push(`dims.${key} must be a positive number for a turreted vehicle.`);
+      }
+    }
+    if (def.shape?.tracked) {
+      // The belt is built as an outline with the same outline inset by the
+      // thickness punched out. A thickness at or above the wheel radius would
+      // collapse that hole, leaving a solid slab where the running gear should
+      // be — so this is a geometry constraint, not a taste one.
+      const thickness = def.dims.trackThickness;
+      if (thickness !== undefined) {
+        if (!isPositive(thickness)) problems.push('dims.trackThickness must be a positive number.');
+        else if (thickness >= def.dims.wheelRadius) {
+          problems.push('dims.trackThickness must be smaller than the wheel radius.');
+        }
+      }
+      if (def.dims.trackWidth !== undefined && !isPositive(def.dims.trackWidth)) {
+        problems.push('dims.trackWidth must be a positive number.');
+      }
+      if (def.dims.roadWheels !== undefined) {
+        if (!Number.isInteger(def.dims.roadWheels) || def.dims.roadWheels < 2) {
+          problems.push('dims.roadWheels must be a whole number, 2 or more.');
+        }
+      }
+      // A track that cannot pivot cannot turn at all: it has no steered axle,
+      // so this rate is its only source of yaw.
+      if (def.pivotRate !== undefined && !isPositive(def.pivotRate)) {
+        problems.push('pivotRate must be a positive number for a tracked vehicle.');
       }
     }
   }

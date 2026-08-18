@@ -10,7 +10,7 @@
  */
 import { VEHICLE_CATALOG } from '../vehicles/catalog.js';
 import { BuilderPreview } from './builderPreview.js';
-import { BUILDER_GROUPS, getPath, setPath, resyncAxles } from './builderSchema.js';
+import { BUILDER_GROUPS, getPath, setPath, resyncAxles, resyncTracked } from './builderSchema.js';
 import { blankDef, cloneDef, forkDef, validateDef, customIdFor } from './vehicleDraft.js';
 import { loadCustomDefs, saveCustomVehicle, deleteCustomVehicle } from './customVehicles.js';
 
@@ -184,6 +184,13 @@ export class BuilderScreen {
       input.type = 'checkbox';
       input.addEventListener('change', () => {
         setPath(this.def, control.path, input.checked);
+        // Switching to tracks removes the steered axle entirely; switching
+        // back restores it. Leaving the old ratios would describe a tank as
+        // steering like a lorry.
+        if (control.path === 'shape.tracked') {
+          resyncTracked(this.def);
+          this.syncParams();
+        }
         this.onEdit();
       });
       read = () => (input.checked = !!getPath(this.def, control.path));

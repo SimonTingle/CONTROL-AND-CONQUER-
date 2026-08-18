@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { buildVehicleMesh } from './vehicleFactory.js';
+import { buildVehicleMesh, isTracked, trackThicknessOf } from './vehicleFactory.js';
 import { VEHICLE_CATALOG } from './catalog.js';
 import { disposeObject3D } from '../core/disposeObject3D.js';
 import { simClock } from '../core/simClock.js';
@@ -89,6 +89,9 @@ class VehicleInstance {
     this.steer = 0;
     this.accelerating = false;
     this.steerAngle = 0; // current front-wheel angle, radians
+    // Cached rather than re-read per tick: it is a property of the def, and
+    // applySteering branches on it every frame for every vehicle.
+    this.tracked = isTracked(def);
     this.grade = 0;
     this.blocked = false;
     // Set fresh each tick by TrafficController, ahead of movement — true holds
@@ -130,6 +133,13 @@ class VehicleInstance {
    * this is what makes each vehicle handle distinctly.
    */
   get turningRadius() {
+    // A track has no steering geometry, so `wheelbase` is Infinity and the
+    // bicycle-model division gives Infinity back — "can never turn", the exact
+    // opposite of the truth. A tracked vehicle pivots about its own centre, so
+    // its tightest circle is its own width. Consumers that plan turns
+    // (harvesterAI, aiCommander) read this, and Infinity would make them
+    // believe a tank can only drive in a straight line.
+    if (this.tracked) return this.group.userData.track / 2;
     return this.group.userData.wheelbase / Math.tan(this.def.maxSteerAngle);
   }
 
@@ -153,7 +163,10 @@ class VehicleInstance {
 
   /** Screen-space anchor for the radial menu, so it need not know about wheels. */
   get menuAnchorHeight() {
-    return this.def.dims.hullHeight + this.def.dims.wheelRadius * 2;
+    // Tracks lift the body by a belt thickness, so anchoring off the bare
+    // wheel radius would put the menu inside a tank's hull.
+    const ride = this.def.dims.wheelRadius + (this.tracked ? trackThicknessOf(this.def) : 0);
+    return this.def.dims.hullHeight + ride * 2;
   }
 
   /** Deployed or deploying: the vehicle is committed to a spot and cannot drive. */
@@ -376,6 +389,22 @@ class VehicleInstance {
     const clamped = THREE.MathUtils.clamp(targetAngle, -maxAngle, maxAngle);
     const step = this.def.steerRate * this.steerFactor * dt;
     this.steerAngle += THREE.MathUtils.clamp(clamped - this.steerAngle, -step, step);
+
+    // Tracks steer by running one belt faster than the other, so the bicycle
+    // model does not apply: there is no steered axle, `wheelbase` is correctly
+    // Infinity, and yaw does not depend on forward speed at all. That last
+    // part is the whole character of a tracked vehicle — it can spin on the
+    // spot, which no amount of steering lock will do for a wheeled one.
+    if (this.tracked) {
+      // steerAngle carries the *fraction* of full lock the driver is asking
+      // for; scaled by the pivot rate that gives radians per second.
+      const demand = maxAngle !== 0 ? this.steerAngle / maxAngle : 0;
+      const rate = (this.def.pivotRate ?? 0.9) * this.steerFactor;
+      if (demand !== 0) {
+        this.heading = wrapAngle(this.heading + demand * rate * dt);
+      }
+      return;
+    }
 
     if (this.steerAngle !== 0 && this.forwardSpeed !== 0) {
       const wheelbase = this.group.userData.wheelbase;
