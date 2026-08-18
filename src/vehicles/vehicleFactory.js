@@ -89,8 +89,31 @@ export function rigOf(def) {
   };
 }
 
-/** Kerb-to-kerb turning circle implied by a vehicle's steering geometry. */
+/** Does this def run on tracks rather than steered wheels? */
+export const isTracked = (def) => def?.shape?.tracked === true;
+
+/**
+ * Road wheels per side. Tracks want more, smaller wheels than a lorry wants
+ * axles, so this is its own number rather than a reading of `axles` — and it
+ * has a floor of two, because one road wheel is a unicycle.
+ */
+export const roadWheelCount = (def) => Math.max(2, Math.round(def.dims?.roadWheels ?? 5));
+
+/** Thickness of the track belt itself. Also how far the hull rides up. */
+export const trackThicknessOf = (def) =>
+  def.dims?.trackThickness ?? def.dims.wheelRadius * 0.22;
+
+/**
+ * Kerb-to-kerb turning circle implied by a vehicle's steering geometry.
+ *
+ * A tracked vehicle has no steering geometry at all — it turns by driving its
+ * two tracks at different speeds, so the bicycle model does not describe it
+ * and `steeringWheelbase` correctly returns Infinity for its all-zero steer
+ * ratios. Its real limit is that it pivots about its own centre, which is a
+ * circle the width of the vehicle.
+ */
 export function turningCircleOf(def) {
+  if (isTracked(def)) return rigOf(def).track;
   return (rigOf(def).wheelbase / Math.tan(def.maxSteerAngle)) * 2;
 }
 
@@ -119,9 +142,16 @@ export function buildVehicleMesh(def) {
   const wheelMat = new THREE.MeshStandardMaterial({ color: colors.wheel, roughness: 0.9, metalness: 0.05 });
   const trimMat = new THREE.MeshStandardMaterial({ color: colors.trim, roughness: 0.4, metalness: 0.6 });
 
+  // How high the body rides above the ground plane. A wheeled vehicle sits on
+  // its axle line; a tracked one sits on the top of its belt loop, which is
+  // one belt thickness higher — otherwise the hull sinks into the track.
+  const rideHeight = isTracked(def)
+    ? dims.wheelRadius + trackThicknessOf(def)
+    : dims.wheelRadius;
+
   // Hull: a box with the front two top edges tapered by bevelling a wedge.
   const hull = new THREE.Mesh(new THREE.BoxGeometry(dims.hullLength, dims.hullHeight, dims.hullWidth), hullMat);
-  hull.position.y = dims.wheelRadius + dims.hullHeight / 2;
+  hull.position.y = rideHeight + dims.hullHeight / 2;
   hull.castShadow = true;
   hull.receiveShadow = true;
   group.add(hull);
@@ -220,22 +250,30 @@ export function buildVehicleMesh(def) {
   const { axleZ } = rig;
   const contacts = [];
   const steeredWheels = [];
-  for (let a = 0; a < rig.offsets.length; a++) {
-    const ax = rig.offsets[a];
-    const ratio = rig.ratios[a] ?? 0;
-    for (const sz of [-1, 1]) {
-      const wheel = new THREE.Mesh(wheelGeo, wheelMat);
-      // Wheel centre sits one radius up, so the tyre bottoms out at local y = 0
-      // — the group origin IS the ground contact plane.
-      wheel.position.set(ax, dims.wheelRadius, sz * axleZ);
-      wheel.castShadow = true;
-      wheel.receiveShadow = true;
-      // Kept per wheel rather than per array so a partially-steering axle needs
-      // no change to how the controller iterates.
-      wheel.userData.steerRatio = ratio;
-      group.add(wheel);
-      contacts.push({ x: ax, z: sz * axleZ, mesh: wheel, baseY: dims.wheelRadius });
-      if (ratio !== 0) steeredWheels.push(wheel);
+
+  if (isTracked(def)) {
+    // Road wheels become the contacts, so suspension, the contact-plane fit
+    // and everything downstream of `wheelContacts` work unchanged — a track
+    // is a different set of contact points, not a different physics model.
+    buildTracks(group, def, rig, wheelMat, trimMat, contacts);
+  } else {
+    for (let a = 0; a < rig.offsets.length; a++) {
+      const ax = rig.offsets[a];
+      const ratio = rig.ratios[a] ?? 0;
+      for (const sz of [-1, 1]) {
+        const wheel = new THREE.Mesh(wheelGeo, wheelMat);
+        // Wheel centre sits one radius up, so the tyre bottoms out at local
+        // y = 0 — the group origin IS the ground contact plane.
+        wheel.position.set(ax, dims.wheelRadius, sz * axleZ);
+        wheel.castShadow = true;
+        wheel.receiveShadow = true;
+        // Kept per wheel rather than per array so a partially-steering axle
+        // needs no change to how the controller iterates.
+        wheel.userData.steerRatio = ratio;
+        group.add(wheel);
+        contacts.push({ x: ax, z: sz * axleZ, mesh: wheel, baseY: dims.wheelRadius });
+        if (ratio !== 0) steeredWheels.push(wheel);
+      }
     }
   }
 
@@ -314,7 +352,7 @@ export function buildVehicleMesh(def) {
   // tight fit: comfortably covering the nose/turret/barrel overhang matters
   // far more here than pixel-precise bounds. See selectionHitbox.js.
   const topY =
-    dims.wheelRadius * 2 +
+    rideHeight * 2 +
     dims.hullHeight +
     Math.max(dims.cabinHeight ?? 0, shape.turret ? dims.turretHeight : 0);
   const hitbox = addSelectionHitbox(
@@ -342,6 +380,91 @@ export function buildVehicleMesh(def) {
  * round central reversing lamp. Only the *lenses* differ — beam placement and
  * behaviour are shared, so a bar-lit vehicle drives at night like any other.
  */
+/**
+ * Two track units — belt, road wheels, drive sprocket and idler — one per side.
+ *
+ * The belt is a stadium outline (an arc at each end joined by straight top and
+ * bottom runs) with the same outline inset by the belt thickness punched out of
+ * it, extruded across the track width. That gives a real loop with the road
+ * wheels visible inside it, rather than a slab that hides them.
+ *
+ * Heights are measured from the belt's *bottom*, which is the ground contact
+ * surface: the arc centres sit at `wheelRadius + thickness` so the outer edge
+ * of the loop lands exactly on local y = 0, the same plane a wheeled vehicle's
+ * tyres bottom out on. Everything downstream — the contact-plane fit, the
+ * suspension travel, the hull height — therefore needs no special case.
+ *
+ * Only the road wheels are pushed as contacts. The sprocket and idler sit up
+ * inside the end arcs and never touch ground, exactly as on the real thing.
+ */
+function buildTracks(group, def, rig, wheelMat, trimMat, contacts) {
+  const { dims } = def;
+  const thickness = trackThicknessOf(def);
+  const outerR = dims.wheelRadius + thickness;
+  const width = dims.trackWidth ?? dims.wheelWidth * 1.6;
+  // The belt reaches the outermost axle positions; road wheels sit between.
+  const frontX = rig.offsets[0];
+  const rearX = rig.offsets[rig.offsets.length - 1];
+  const axleZ = rig.axleZ;
+
+  const beltShape = new THREE.Shape();
+  beltShape.absarc(frontX, outerR, outerR, -Math.PI / 2, Math.PI / 2, false);
+  beltShape.absarc(rearX, outerR, outerR, Math.PI / 2, (3 * Math.PI) / 2, false);
+  beltShape.closePath();
+
+  const hole = new THREE.Path();
+  const innerR = Math.max(outerR - thickness, dims.wheelRadius * 0.15);
+  hole.absarc(frontX, outerR, innerR, -Math.PI / 2, Math.PI / 2, false);
+  hole.absarc(rearX, outerR, innerR, Math.PI / 2, (3 * Math.PI) / 2, false);
+  hole.closePath();
+  beltShape.holes.push(hole);
+
+  // Extrusion runs along +Z, which is the vehicle's lateral axis, so the shape's
+  // own XY plane is already forward/up — no rotation needed.
+  const beltGeo = new THREE.ExtrudeGeometry(beltShape, { depth: width, bevelEnabled: false });
+  beltGeo.translate(0, 0, -width / 2);
+
+  const count = roadWheelCount(def);
+  const roadGeo = new THREE.CylinderGeometry(dims.wheelRadius, dims.wheelRadius, width * 0.75, 14);
+  roadGeo.rotateX(Math.PI / 2);
+  // Sprocket and idler are cosmetic: smaller, tucked inside the end arcs.
+  const endGeo = new THREE.CylinderGeometry(innerR * 0.62, innerR * 0.62, width * 0.6, 12);
+  endGeo.rotateX(Math.PI / 2);
+
+  for (const sz of [-1, 1]) {
+    const z = sz * axleZ;
+
+    const belt = new THREE.Mesh(beltGeo, wheelMat);
+    belt.position.set(0, 0, z);
+    belt.castShadow = true;
+    belt.receiveShadow = true;
+    group.add(belt);
+
+    for (const endX of [frontX, rearX]) {
+      const end = new THREE.Mesh(endGeo, trimMat);
+      end.position.set(endX, outerR, z);
+      end.castShadow = true;
+      group.add(end);
+    }
+
+    for (let i = 0; i < count; i++) {
+      // Inset from the end arcs so road wheels sit under the flat run of the
+      // belt rather than overlapping the sprocket and idler.
+      const t = (i + 0.5) / count;
+      const x = frontX + (rearX - frontX) * t;
+      const wheel = new THREE.Mesh(roadGeo, wheelMat);
+      wheel.position.set(x, outerR, z);
+      wheel.castShadow = true;
+      wheel.receiveShadow = true;
+      // Nothing on a track steers, but the controller reads this on every
+      // wheel it is handed, so it must be present rather than undefined.
+      wheel.userData.steerRatio = 0;
+      group.add(wheel);
+      contacts.push({ x, z, mesh: wheel, baseY: outerR });
+    }
+  }
+}
+
 function buildLights(group, dims, cfg, shape = {}) {
   const bar = cfg.style === 'bar';
   const bodyY = dims.wheelRadius + dims.hullHeight;

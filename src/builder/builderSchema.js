@@ -58,14 +58,22 @@ export const BUILDER_GROUPS = [
     ],
   },
   {
-    title: 'Wheels',
+    title: 'Running gear',
     controls: [
+      // Tracks replace the steered wheels entirely: the belt's road wheels
+      // become the suspension contacts and the vehicle pivots instead of
+      // steering, so `Axles` below only positions the belt's end arcs.
+      bool('shape.tracked', 'Tracks'),
       // Two is the floor: axleOffsets() spreads extra axles with
       // `2 * axleX * i / (count - 1)`, which is a divide-by-zero at one axle.
       num('axles', 'Axles', 2, 6, 1),
       num('dims.wheelRadius', 'Wheel radius', 0.3, 2, 0.05),
       num('dims.wheelWidth', 'Wheel width', 0.2, 1.5, 0.05),
       num('dims.suspensionTravel', 'Suspension travel', 0.1, 3, 0.05),
+      num('dims.roadWheels', 'Road wheels (tracked)', 2, 10, 1),
+      num('dims.trackWidth', 'Track width (tracked)', 0.3, 3, 0.05),
+      num('dims.trackThickness', 'Track thickness (tracked)', 0.05, 0.8, 0.01),
+      num('pivotRate', 'Pivot rate (tracked)', 0.2, 3, 0.05),
     ],
   },
   {
@@ -150,7 +158,24 @@ export function resyncAxles(def) {
   for (let i = 0; i < count; i++) fractions.push(1 - (2 * i) / (count - 1));
   def.axleFractions = fractions;
 
+  def.steerRatios = defaultSteerRatios(def, count);
+}
+
+/**
+ * A track has no steered axle at all — it turns by running its two belts at
+ * different speeds. Leaving a front-axle steer ratio on a tracked def would be
+ * a lie about the vehicle: `steeringWheelbase` would report a finite wheelbase
+ * for running gear that has none, and anything reading it would describe a
+ * tank as if it steered like a lorry.
+ */
+function defaultSteerRatios(def, count) {
   const ratios = new Array(count).fill(0);
-  ratios[0] = 1;
-  def.steerRatios = ratios;
+  if (!def.shape?.tracked) ratios[0] = 1; // front axle only, as on a real 8x8
+  return ratios;
+}
+
+/** Re-derive the steering arrays after the tracked flag is switched. */
+export function resyncTracked(def) {
+  const count = def.axleFractions?.length ?? def.axles ?? 2;
+  def.steerRatios = defaultSteerRatios(def, count);
 }
