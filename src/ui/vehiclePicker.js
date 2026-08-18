@@ -83,6 +83,20 @@ export class VehiclePicker {
     this.buildPreviews();
   }
 
+  /**
+   * Swap the catalog and redraw the drawer — how author-built vehicles appear
+   * (and, at the start of an online match, disappear again). Newly-added
+   * entries with no `unlock` requirement are available immediately, matching
+   * the rule the constructor applies to the built-ins.
+   */
+  setCatalog(catalog) {
+    this.catalog = catalog;
+    for (const def of catalog) {
+      if (!def.unlock) this.unlocked.add(def.id);
+    }
+    this.buildPreviews();
+  }
+
   buildPreviews() {
     this.grid.replaceChildren();
     this.previews = [];

@@ -34,6 +34,8 @@ export class PortalScreen {
    * @param {() => object|null} [account.getAccount] current signed-in user, or null.
    * @param {() => void} [account.onSignIn] opens the sign-in/register overlay.
    * @param {() => void} [account.onSignOut] signs out.
+   * @param {() => void} [account.onGodMode] opens the vehicle builder. Only
+   *   ever reachable from the God Mode button, which renders for one account.
    */
   constructor(onChoose, account = {}) {
     this.onChoose = onChoose;
@@ -99,7 +101,7 @@ export class PortalScreen {
       godBtn.type = 'button';
       godBtn.className = 'portal-mode-btn god-mode-btn';
       godBtn.textContent = 'God Mode';
-      // Not wired to anything yet.
+      godBtn.addEventListener('click', () => this.account.onGodMode?.());
       this.buttonRow.appendChild(godBtn);
     }
   }

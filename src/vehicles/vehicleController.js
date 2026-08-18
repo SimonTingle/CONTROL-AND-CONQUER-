@@ -824,9 +824,24 @@ export class VehicleController {
     disposeObject3D(inst.group);
   }
 
-  /** Catalog lookup by id, so commands can price a unit without importing the catalog. */
+  /**
+   * Author-built vehicles, added to the catalog this controller resolves ids
+   * against. Empty in an online match — see src/builder/customCatalog.js for
+   * why a vehicle only one peer knows about cannot be allowed into one.
+   */
+  setExtraDefs(defs = []) {
+    this.extraDefs = defs;
+  }
+
+  /**
+   * Catalog lookup by id, so commands can price a unit without importing the
+   * catalog. Custom vehicles are searched after the built-ins, so a custom def
+   * can never shadow a shipped one even if their ids somehow collided.
+   */
   defOf(id) {
-    return VEHICLE_CATALOG.find((d) => d.id === id) ?? null;
+    return VEHICLE_CATALOG.find((d) => d.id === id)
+      ?? this.extraDefs?.find((d) => d.id === id)
+      ?? null;
   }
 
   /**
