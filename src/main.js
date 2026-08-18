@@ -14,6 +14,9 @@ import { VehiclePicker } from './ui/vehiclePicker.js';
 import { DifficultyScreen, DIFFICULTIES } from './ui/difficultyScreen.js';
 import { PortalScreen } from './ui/portalScreen.js';
 import { AuthScreen } from './ui/authScreen.js';
+import { BuilderScreen } from './builder/builderScreen.js';
+import { loadCustomDefs } from './builder/customVehicles.js';
+import { catalogFor } from './builder/customCatalog.js';
 import { api } from './net/api.js';
 import { serialize, deserialize } from './core/snapshot.js';
 import { AiDifficultyScreen } from './ui/aiDifficultyScreen.js';
@@ -1872,6 +1875,11 @@ function isSkirmish() {
 function beginMatch(difficulty) {
   game.difficulty = difficulty;
   game.matchOver = false;
+  // Re-evaluated per match, not once at startup: `game.mode` is what decides
+  // whether author-built vehicles are allowed, and it is only final by the
+  // time a match actually begins. Online matches get the built-in catalog back
+  // even if a sandbox session just added to it.
+  applyCustomCatalog();
   // A match is the unit of simulated time — tick 0 is its first step. Every
   // ban, threat memory and (later) lockstep turn number is relative to this.
   resetSimClock(0);
@@ -2016,6 +2024,8 @@ game.signOut = async () => {
   game.account = null;
   menu.rebuild();
   game.portalScreen?.refreshAccount();
+  // Another player's vehicles must not stay in the drawer after a sign-out.
+  refreshCustomDefs();
 };
 
 game.lobbyScreen = new LobbyScreen({
@@ -2050,8 +2060,61 @@ game.portalScreen = new PortalScreen(
     getAccount: () => game.account,
     onSignIn: () => game.signIn(),
     onSignOut: () => game.signOut(),
+    onGodMode: () => game.openBuilder(),
   }
 );
+
+/**
+ * Author-built vehicles, loaded once per sign-in and kept here so
+ * `applyCustomCatalog()` can re-apply them whenever the mode changes.
+ */
+game.customDefs = [];
+
+/**
+ * Point the picker and the vehicle controller at the catalog this mode is
+ * allowed to see.
+ *
+ * `catalogFor` is the whole rule — an allowlist of offline modes, so anything
+ * it does not recognise gets the built-in catalog only. Both consumers have to
+ * be updated together: the picker decides what can be *chosen*, `defOf`
+ * decides what an id can still *resolve to*, and a mismatch between them is a
+ * vehicle that can be spawned but not restored, or listed but not built.
+ */
+function applyCustomCatalog() {
+  const catalog = catalogFor(game.mode, game.customDefs);
+  const extras = catalog.filter((d) => !VEHICLE_CATALOG.includes(d));
+  vehicles.setExtraDefs(extras);
+  vehiclePicker.setCatalog(catalog);
+}
+
+/** Reload the signed-in author's vehicles and make them available. */
+async function refreshCustomDefs() {
+  if (!api.isConfigured || !game.account) {
+    game.customDefs = [];
+    applyCustomCatalog();
+    return;
+  }
+  try {
+    const { defs } = await loadCustomDefs();
+    game.customDefs = defs;
+  } catch {
+    // A builder that cannot reach the backend must not stop the game starting.
+    game.customDefs = [];
+  }
+  applyCustomCatalog();
+}
+
+game.openBuilder = () => {
+  if (!game.builderScreen) {
+    game.builderScreen = new BuilderScreen({
+      toast: (m) => showToast(m),
+      // Reloading on close is what makes a vehicle saved in the editor appear
+      // in the drawer without a page refresh.
+      onClose: () => refreshCustomDefs(),
+    });
+  }
+  game.builderScreen.open();
+};
 
 // Restores an existing session on load. Never throws and never blocks startup:
 // `api.me()` resolves to null for signed-out, no-backend, and unreachable
@@ -2061,6 +2124,7 @@ api.me().then((user) => {
   game.account = user;
   menu.rebuild();
   game.portalScreen?.refreshAccount();
+  refreshCustomDefs();
 });
 
 // A mailed reset link points back at this page with the token in the query
