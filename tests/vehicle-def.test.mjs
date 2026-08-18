@@ -146,3 +146,40 @@ test('forking a built-in produces an editable, valid, non-colliding copy', () =>
   fork.dims.hullLength = 999;
   assert.notEqual(source.dims.hullLength, 999, 'the built-in is untouched');
 });
+
+test('producedBy must name a structure that actually produces units', () => {
+  const def = blankDef();
+  def.producedBy = 'repair-bay'; // real structure, but it produces nothing
+  assert.ok(validateDef(def).some((p) => p.includes('producedBy')));
+
+  def.producedBy = 'not-a-structure';
+  assert.ok(validateDef(def).some((p) => p.includes('producedBy')));
+});
+
+test('the two real factories, and "not buildable", are all accepted', () => {
+  for (const producedBy of ['armed-factory', 'harvester-facility', null]) {
+    const def = blankDef();
+    def.producedBy = producedBy;
+    assert.deepEqual(validateDef(def), [], `${producedBy} is valid`);
+  }
+});
+
+test('unlock accepts only the value the picker actually understands', () => {
+  // An unrecognised string is not ignored — vehiclePicker leaves the vehicle
+  // permanently locked behind a generic "Locked" label, which looks like a bug
+  // rather than a typo.
+  const def = blankDef();
+  def.unlock = 'exploration';
+  assert.deepEqual(validateDef(def), []);
+
+  def.unlock = 'someday';
+  assert.ok(validateDef(def).some((p) => p.includes('unlock')));
+});
+
+test('a negative price is rejected', () => {
+  const def = blankDef();
+  def.cost = -50;
+  assert.ok(validateDef(def).some((p) => p.includes('cost')));
+  def.cost = 0; // free is odd but legitimate
+  assert.deepEqual(validateDef(def), []);
+});

@@ -203,18 +203,25 @@ export class BuilderScreen {
       });
       read = () => (input.value = getPath(this.def, control.path) ?? '#ffffff');
     } else if (control.type === 'select') {
+      // Options are either bare strings or {value, label} — the latter so a
+      // choice can carry a null (`producedBy: null` = not buildable), which a
+      // <select> can only represent as the empty string.
+      const opts = control.options.map((o) => (typeof o === 'string' ? { value: o, label: o } : o));
       input = document.createElement('select');
-      for (const opt of control.options) {
+      for (const opt of opts) {
         const o = document.createElement('option');
-        o.value = opt;
-        o.textContent = opt;
+        o.value = opt.value;
+        o.textContent = opt.label;
         input.appendChild(o);
       }
       input.addEventListener('change', () => {
-        setPath(this.def, control.path, input.value);
+        // Empty string means "none" — stored as null so the def matches what
+        // the catalog's own entries look like (`unlock: null`), rather than an
+        // empty string nothing else in the game would recognise.
+        setPath(this.def, control.path, input.value === '' ? null : input.value);
         this.onEdit();
       });
-      read = () => (input.value = getPath(this.def, control.path) ?? control.options[0]);
+      read = () => (input.value = getPath(this.def, control.path) ?? '');
     } else {
       input = document.createElement('input');
       input.type = 'text';

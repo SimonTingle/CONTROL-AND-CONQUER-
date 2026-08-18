@@ -1548,7 +1548,10 @@ vehiclePicker.lockText = (def) =>
 function updateProgression(explored) {
   if (game.unlocked || explored < game.difficulty.unlockAt) return;
   game.unlocked = true;
-  for (const def of VEHICLE_CATALOG) {
+  // The picker's own catalog, not VEHICLE_CATALOG: it is the merged list
+  // applyCustomCatalog() maintains, so an author-built vehicle set to unlock
+  // by exploration is released here too rather than staying locked forever.
+  for (const def of vehiclePicker.catalog) {
     if (def.unlock === 'exploration') vehiclePicker.setUnlocked(def.id, true);
   }
 }
@@ -1905,7 +1908,7 @@ function beginMatch(difficulty) {
   // teams build from tick one would not be a fair opening.
   if (isSkirmish()) {
     game.unlocked = true;
-    for (const def of VEHICLE_CATALOG) {
+    for (const def of vehiclePicker.catalog) {
       if (def.unlock === 'exploration') vehiclePicker.setUnlocked(def.id, true);
     }
     deployStartingForces();

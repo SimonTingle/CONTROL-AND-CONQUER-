@@ -107,13 +107,57 @@ export const BUILDER_GROUPS = [
     ],
   },
   {
+    title: 'Production',
+    controls: [
+      // `producedBy` had no reader at all until custom vehicles needed one:
+      // built-in units are listed by their factory in `structures.js`, which a
+      // player cannot edit. See producedUnitIds() in vehicles/commands.js.
+      {
+        type: 'select',
+        path: 'producedBy',
+        label: 'Built at',
+        options: [
+          { value: '', label: 'Not buildable' },
+          { value: 'armed-factory', label: 'Armed Factory' },
+          { value: 'harvester-facility', label: 'Harvester Facility' },
+        ],
+      },
+      {
+        type: 'select',
+        path: 'unlock',
+        label: 'Availability',
+        options: [
+          { value: '', label: 'From the start' },
+          { value: 'exploration', label: 'After exploring' },
+        ],
+      },
+      // `tags` — not the factory — is what aiCommander selects on: it asks for
+      // an 'economy' unit, then a 'combat' one. A vehicle built at the
+      // harvester facility but tagged 'combat' would never be bought by an AI
+      // as part of its economy. Written as tags[0] so the array shape the rest
+      // of the game reads stays intact.
+      {
+        type: 'select',
+        path: 'tags.0',
+        label: 'Role (AI picks by this)',
+        options: [
+          { value: 'combat', label: 'Combat' },
+          { value: 'economy', label: 'Economy' },
+          { value: 'recon', label: 'Recon' },
+        ],
+      },
+      // The build price, charged at the factory. Also what the AI weighs when
+      // it decides whether it can afford one.
+      num('cost', 'Price (cr)', 0, 5000, 25),
+      bool('spawnable', 'In sandbox drawer'),
+    ],
+  },
+  {
     title: 'Stats',
     controls: [
       num('maxHealth', 'Max health', 20, 2000, 10),
-      num('cost', 'Cost', 0, 5000, 25),
       num('sightRadius', 'Sight radius', 10, 150, 1),
       num('weight', 'Weight (t)', 0.2, 60, 0.1),
-      bool('spawnable', 'In sandbox drawer'),
     ],
   },
   {

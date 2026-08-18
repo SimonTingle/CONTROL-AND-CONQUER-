@@ -30,7 +30,7 @@
  * handler does: pick a slot, spend, place, in one step.
  */
 
-import { commandsFor, basePad } from './commands.js';
+import { commandsFor, basePad, producedUnitIds } from './commands.js';
 import { findSpawnPointNear } from '../core/pick.js';
 import { STRUCTURE_CATALOG } from '../structures/structures.js';
 
@@ -295,8 +295,11 @@ export class AiCommander {
   _tryBuildUnit(tag, cap) {
     if (cap <= 0) return false;
     for (const s of this.ctx.structures.instances) {
-      if (s.teamId !== this.team.id || s.mode !== 'idle' || !s.def.produces) continue;
-      for (const unitId of s.def.produces) {
+      if (s.teamId !== this.team.id || s.mode !== 'idle') continue;
+      // Not `s.def.produces` directly: an author-built vehicle names its
+      // factory in `producedBy` and never appears in that array, so reading it
+      // raw would make the AI blind to every custom unit.
+      for (const unitId of producedUnitIds(s.def, this.ctx)) {
         const def = this.ctx.vehicles.defOf(unitId);
         if (!def?.tags?.includes(tag)) continue;
         if (this._ownUnits(unitId).length >= cap) continue;

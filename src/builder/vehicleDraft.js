@@ -17,6 +17,7 @@
  *   peer doesn't have this vehicle" rather than a corrupt save.
  */
 import { VEHICLE_CATALOG } from '../vehicles/catalog.js';
+import { STRUCTURE_CATALOG } from '../structures/structures.js';
 
 export const CUSTOM_ID_PREFIX = 'custom:';
 
@@ -142,6 +143,10 @@ const REQUIRED_DIMS = [
   'wheelRadius', 'wheelWidth',
 ];
 const REQUIRED_COLORS = ['hull', 'cabin', 'wheel', 'trim'];
+// Structures with a `produces` list — the only ones a `producedBy` can name
+// and have it mean anything. Derived rather than hardcoded so a new producing
+// structure is picked up without editing this file.
+const PRODUCERS = STRUCTURE_CATALOG.filter((d) => d.produces?.length).map((d) => d.id);
 // The subset buildLights reads without a default — anything here being absent
 // is a thrown TypeError at render time, not a cosmetic problem.
 const REQUIRED_LIGHTS = ['headlampInset', 'headlampDrop', 'beamColor', 'tailColor', 'reverseColor'];
@@ -253,6 +258,29 @@ export function validateDef(def, { catalog = VEHICLE_CATALOG } = {}) {
     for (const key of REQUIRED_LIGHTS) {
       if (def.lights[key] === undefined) problems.push(`lights.${key} is required.`);
     }
+  }
+
+  // `producedBy` names the structure that can build this vehicle. Only
+  // structures that actually produce units can honour it — pointing at the
+  // repair bay would leave a vehicle that claims to be buildable and never
+  // appears in any menu.
+  if (def.producedBy !== null && def.producedBy !== undefined) {
+    if (!PRODUCERS.includes(def.producedBy)) {
+      problems.push(`producedBy must be one of: ${PRODUCERS.join(', ')} (or none).`);
+    }
+  }
+  if (def.unlock !== null && def.unlock !== undefined && def.unlock !== 'exploration') {
+    // An unrecognised unlock string is not ignored by the picker — it leaves
+    // the vehicle permanently locked with a generic "Locked" label.
+    problems.push("unlock must be 'exploration', or none.");
+  }
+  if (!Number.isFinite(def.cost) || def.cost < 0) {
+    problems.push('cost must be zero or more.');
+  }
+  if (def.producedBy && !Array.isArray(def.tags)) {
+    // aiCommander selects produced units by tag, so a buildable vehicle with
+    // no tags can be built by a player but never by an AI.
+    problems.push('A buildable vehicle needs at least one tag.');
   }
 
   for (const key of ['speed', 'reverseSpeed', 'acceleration', 'braking', 'maxHealth', 'sightRadius']) {
