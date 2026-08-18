@@ -293,8 +293,8 @@ export function buildSchema(world, view, game) {
         // is no heavier lighting state to measure. Turn this on, press `p`, and
         // the fps shown is the floor. Watch the HUD's light count while you do:
         // if it isn't 6, something has started creating per-entity lights again.
-        toggle('Headlights (force on)',
-          () => view.lighting.forceHeadlights, (v) => (view.lighting.forceHeadlights = v)),
+        simState(toggle('Headlights (force on)',
+          () => view.lighting.forceHeadlights, (v) => (view.lighting.forceHeadlights = v))),
         // TESTING ONLY, and expect it to hurt — that's the point. This gives
         // every vehicle its own pair of real beams, which is the expensive
         // shape headlightPool.js exists to avoid: light cost scales with fleet
@@ -303,8 +303,8 @@ export function buildSchema(world, view, game) {
         // cost on your own hardware, and for confirming the HUD's light-count
         // warning fires. Pair it with 'Headlights (force on)' to see the beams
         // in daylight. Leave it off for real play.
-        toggle('Flood: beams on ALL vehicles (test)',
-          () => view.lighting.floodHeadlights, (v) => (view.lighting.floodHeadlights = v)),
+        simState(toggle('Flood: beams on ALL vehicles (test)',
+          () => view.lighting.floodHeadlights, (v) => (view.lighting.floodHeadlights = v))),
         toggle('Tap-to-move (mobile)',
           () => view.input.tapToMove, (v) => (view.input.tapToMove = v)),
         toggle('Buildable-ground overlay',
