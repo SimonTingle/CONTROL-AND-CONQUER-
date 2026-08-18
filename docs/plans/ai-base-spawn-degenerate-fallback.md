@@ -107,3 +107,33 @@ opposed to the synthetic heightmap here) is capable of producing a bearing
 degenerate enough to exercise this path at all, in single-player, AI, or
 online multiplayer. This closes the gap in the logic for if/when it does,
 without claiming to have observed it happen in a real match.
+
+## Confirmed: also covers Multiplayer Online
+
+Asked separately whether this fix reaches Multiplayer Online (the networked
+lockstep mode) or only Multiplayer AI, tracing the call chain in
+`src/main.js` found no separate implementation to worry about:
+
+- `startOnlineMatch` sets `game.aiMatch.teamCount` from the lobby roster
+  (`info.maxPlayers + info.aiCount - 1`), rebuilds the heightmap from the
+  server-issued `welcome.seed` via `world.regenerate({ ...DEFAULT_TERRAIN,
+  seed: welcome.seed })` — deliberately not spreading any locally-mutated
+  params, per the comment already at that call site — then calls the same
+  `beginMatch()` every skirmish mode uses.
+- `beginMatch` → `isSkirmish()` (true for both `multiplayer-ai` and
+  `multiplayer-online`) → `deployStartingForces()` → the identical
+  `findTeamSpawnPoints(heightmap, game.teams.length)` call, line for line.
+- The server's `welcome` frame carries only match metadata (seed, teamId,
+  timing params) — never spawn coordinates. `matchClient.js` imports
+  `findTeamSpawnPoints` and friends directly from `src/core/pick.js`, the
+  same module the sandbox/AI path uses. No parallel spawn-placement code
+  exists for the online path.
+- Determinism holds by construction: both peers regenerate the heightmap
+  from the identical server-issued seed through the same pure
+  `heightmap.generate(params)`, so both independently hit — or don't hit —
+  the degenerate-fallback sweep in lockstep. There is no way for one peer to
+  take the sweep path while the other falls to centre.
+
+No code change followed from this — the fix already covers online play
+because it lives in the one function every mode calls, not because anything
+mode-specific needed touching.
