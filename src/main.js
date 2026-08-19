@@ -1525,7 +1525,10 @@ function updateRespawns(dt) {
 const navGrid = new NavGrid(heightmap);
 
 /** Everything a command might need, so commands.js imports no game systems. */
-const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit, navGrid };
+// `entities` is here for the deployDefense intent, which consumes the vehicle
+// it deploys from and must do so through the destroy pipeline rather than
+// splicing an array another system may still be walking.
+const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit, navGrid, entities };
 
 /**
  * Everything core/snapshot.js needs to read or rebuild a world.

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { buildTurretMesh, updateTurretRig, turretBearingOf } from '../vehicles/turretRig.js';
 import { disposeObject3D } from '../core/disposeObject3D.js';
 import { addSelectionHitbox } from '../core/selectionHitbox.js';
 
@@ -83,7 +84,7 @@ export const STRUCTURE_CATALOG = [
     // Light Tank checked first: while under its own cap, aiCommander's
     // per-structure produce scan (_tryBuildUnit) prefers it over topping up
     // scouts, since produces order is the tie-break within one structure.
-    produces: ['gun-platform', 'scout-buggy'],
+    produces: ['gun-platform', 'scout-buggy', 'field-engineer'],
     // Deliberately no freeUnitOnComplete — unlike the harvester facility this
     // isn't bootstrapping a team from zero credits, so it ships nothing free.
     // Spawn location is handled entirely by commands.js's armed-factory build
@@ -173,6 +174,72 @@ export const STRUCTURE_CATALOG = [
     colors: { shell: '#2b2f38', accent: '#9aa6b2', dark: '#1c2026' },
     beacon: { color: '#ff3b3b', rate: 1.6, baseIntensity: 0.8, amplitude: 2.4 },
   },
+
+  // ---- defensive emplacements ----
+  //
+  // Deployed from a vehicle rather than built on a pad. `canPlaceAt` requires a
+  // structure's whole footprint inside the base pad — a radius-40 disc holding
+  // two or three buildings — so anything placed the normal way could only ever
+  // defend the pad's interior. Perimeter defence has to arrive by driving
+  // there, so these are deployed from a vehicle instead — selected by their
+  // 'defense' tag rather than by naming a specific deployer.
+  {
+    id: 'gun-turret',
+    name: 'Gun Turret',
+    description: 'Static emplacement. Engages anything hostile that comes into range.',
+    role: 'structure',
+    // Not 'production': aiCommander's BUILDABLE_DEFS picks off those tags, and
+    // a turret is not something it can build on a pad anyway.
+    tags: ['defense', 'combat'],
+    cost: 500,
+    maxHealth: 420,
+    sightRadius: 40,
+    buildTime: 3,
+    footprint: 5,
+    // The same block a vehicle's turret reads — combatController and the
+    // shared turret rig make no distinction between the two mounts.
+    turret: {
+      range: 74,
+      fireArc: Math.PI * 2, // no hull to shoot through; a full circle is honest
+      sweepRate: 0.5,
+      rotationRate: 1.9,
+      damage: 20,
+      fireInterval: 1.5,
+      muzzleHeight: 3.0,
+      projectileColor: 0xffa018,
+      projectileSpeed: 190,
+    },
+    dims: {
+      baseRadius: 2.6,
+      baseHeight: 2.2,
+      turretRadius: 1.25,
+      turretHeight: 0.9,
+      barrelRadius: 0.2,
+      barrelLength: 3.6,
+    },
+    colors: { shell: '#404742', trim: '#8f9a86', dark: '#1c2026', accent: '#2ad9ff' },
+  },
+  {
+    id: 'sensor-tower',
+    name: 'Sensor Tower',
+    description: 'Unarmed mast. Reveals a wide circle of ground around itself.',
+    role: 'structure',
+    tags: ['defense', 'recon'],
+    cost: 300,
+    maxHealth: 220,
+    // The whole point of the building. sightRadius already feeds the fog mask,
+    // so this needs no new machinery — a tower simply sees further than
+    // anything else that stands still.
+    sightRadius: 115,
+    buildTime: 3,
+    footprint: 4,
+    dims: {
+      baseRadius: 1.9,
+      height: 16,
+      dishRadius: 2.4,
+    },
+    colors: { shell: '#343a44', trim: '#9aa6b2', dark: '#1c2026', accent: '#2ad9ff' },
+  },
 ];
 
 /** Ring of slots inside the pad. The base station itself sits at the centre. */
@@ -195,6 +262,10 @@ export function buildStructureMesh(def) {
       return buildRepairBayMesh(def);
     case 'power-spire':
       return buildSpireMesh(def);
+    case 'gun-turret':
+      return buildGunTurretMesh(def);
+    case 'sensor-tower':
+      return buildSensorTowerMesh(def);
     default:
       return buildFacilityMesh(def);
   }
@@ -392,6 +463,123 @@ function buildRepairBayMesh(def) {
  * codebase's primitive-only toolkit has no spiral geometry, so the twist is
  * composed rather than modelled directly.
  */
+/**
+ * The rising-construction ring every structure shows while it builds, plus the
+ * two userData keys StructureInstance dereferences unconditionally.
+ *
+ * A helper rather than three hand-written copies because forgetting either key
+ * is not a cosmetic bug: `update()` reads `buildRing.visible` and iterates
+ * `shadowCasters` on the very first tick, so a structure missing them throws
+ * the moment it is placed.
+ */
+function addBuildRing(group, def, radius, casters) {
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(radius * 1.35, radius * 1.6, 24),
+    new THREE.MeshBasicMaterial({
+      color: def.colors.accent ?? '#2ad9ff',
+      transparent: true,
+      opacity: 0.75,
+      side: THREE.DoubleSide,
+    })
+  );
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.y = 0.15;
+  group.add(ring);
+
+  group.userData.buildRing = ring;
+  group.userData.shadowCasters = casters;
+}
+
+/**
+ * Gun turret: a squat plinth with the shared turret assembly on top.
+ *
+ * The rotating part comes from vehicles/turretRig.js — the same builder the
+ * vehicle factory uses — and is stashed under the same `userData.turret` key,
+ * because combatController and the turret rig both address it that way and
+ * neither should care whether it is bolted to a hull or to a plinth.
+ */
+function buildGunTurretMesh(def) {
+  const { dims, colors } = def;
+  const group = new THREE.Group();
+  group.name = def.id;
+
+  const shellMat = new THREE.MeshStandardMaterial({ color: colors.shell, roughness: 0.7, metalness: 0.3 });
+  const trimMat = new THREE.MeshStandardMaterial({ color: colors.trim, roughness: 0.4, metalness: 0.6 });
+  const darkMat = new THREE.MeshStandardMaterial({ color: colors.dark, roughness: 0.85, metalness: 0.1 });
+
+  // Splayed base, so it reads as planted rather than balanced.
+  const skirt = new THREE.Mesh(
+    new THREE.CylinderGeometry(dims.baseRadius * 0.82, dims.baseRadius, dims.baseHeight * 0.45, 8),
+    darkMat
+  );
+  skirt.position.y = dims.baseHeight * 0.225;
+  skirt.castShadow = true;
+  skirt.receiveShadow = true;
+  group.add(skirt);
+
+  const plinth = new THREE.Mesh(
+    new THREE.CylinderGeometry(dims.baseRadius * 0.62, dims.baseRadius * 0.82, dims.baseHeight * 0.55, 8),
+    shellMat
+  );
+  plinth.position.y = dims.baseHeight * 0.45 + dims.baseHeight * 0.275;
+  plinth.castShadow = true;
+  group.add(plinth);
+
+  const turret = buildTurretMesh(dims, trimMat);
+  turret.position.y = dims.baseHeight + dims.turretHeight / 2;
+  group.add(turret);
+  group.userData.turret = turret;
+
+  addBuildRing(group, def, dims.baseRadius, [skirt, plinth, turret]);
+  return group;
+}
+
+/**
+ * Sensor tower: a mast under a dish. No weapon — its whole contribution is
+ * `sightRadius`, which the fog mask already reads for every structure.
+ */
+function buildSensorTowerMesh(def) {
+  const { dims, colors } = def;
+  const group = new THREE.Group();
+  group.name = def.id;
+
+  const shellMat = new THREE.MeshStandardMaterial({ color: colors.shell, roughness: 0.7, metalness: 0.35 });
+  const trimMat = new THREE.MeshStandardMaterial({ color: colors.trim, roughness: 0.4, metalness: 0.55 });
+  const darkMat = new THREE.MeshStandardMaterial({ color: colors.dark, roughness: 0.9, metalness: 0.1 });
+
+  const foot = new THREE.Mesh(
+    new THREE.CylinderGeometry(dims.baseRadius, dims.baseRadius * 1.25, dims.height * 0.08, 8),
+    darkMat
+  );
+  foot.position.y = dims.height * 0.04;
+  foot.castShadow = true;
+  foot.receiveShadow = true;
+  group.add(foot);
+
+  const mast = new THREE.Mesh(
+    new THREE.CylinderGeometry(dims.baseRadius * 0.3, dims.baseRadius * 0.5, dims.height * 0.92, 6),
+    shellMat
+  );
+  mast.position.y = dims.height * 0.08 + dims.height * 0.46;
+  mast.castShadow = true;
+  group.add(mast);
+
+  // Open-face dish, tilted skyward. ThetaLength short of a full sphere leaves
+  // it a bowl rather than a ball.
+  const dish = new THREE.Mesh(
+    new THREE.SphereGeometry(dims.dishRadius, 14, 8, 0, Math.PI * 2, 0, Math.PI * 0.42),
+    trimMat
+  );
+  dish.material.side = THREE.DoubleSide;
+  dish.position.y = dims.height;
+  dish.rotation.x = Math.PI * 0.78;
+  dish.castShadow = true;
+  group.add(dish);
+
+  addBuildRing(group, def, dims.baseRadius * 1.25, [foot, mast, dish]);
+  return group;
+}
+
 function buildSpireMesh(def) {
   const { dims, colors, beacon } = def;
   const group = new THREE.Group();
@@ -481,7 +669,24 @@ class StructureInstance {
     this.buildTimeOverride = buildTimeOverride;
 
     this.health = def.maxHealth;
-    this.mode = 'building'; // 'building' | 'idle'
+    this.mode = 'building'; // 'building' | 'idle' | 'armed' (defences only)
+
+    // Turret state, present only on emplacements that mount one. Named
+    // identically to VehicleInstance's fields on purpose: combatController
+    // iterates shooters without caring which kind it has, and a structure that
+    // spelled these differently would need a branch in every one of its
+    // methods.
+    if (def.turret) {
+      // A building does not steer, so its heading is fixed at construction.
+      // The mesh is yawed by -angle (doors face outward), and turretBearingOf
+      // adds this to the turret's local rotation — so it has to be the same
+      // angle, or the gun would report a bearing it is not pointing at.
+      this.heading = angle;
+      this.turretAim = null;
+      this.sweepPhase = 0;
+      this.combatTarget = null;
+      this._fireCooldown = 0;
+    }
     this.progress = 0;
     // 0 = base, unupgraded. 1-10 index into def.upgradeTiers. Per-instance —
     // upgrading one repair bay never affects another.
@@ -540,6 +745,11 @@ class StructureInstance {
     return 0;
   }
 
+  /** World-space bearing the barrel is actually pointing right now. */
+  get turretBearing() {
+    return turretBearingOf(this);
+  }
+
   update(dt, heightmap) {
     const groundY = this.hN * heightmap.params.amplitude;
     const g = this.group;
@@ -554,13 +764,21 @@ class StructureInstance {
       g.userData.buildRing.rotation.z += dt * 1.2;
 
       if (this.progress >= 1) {
-        this.mode = 'idle';
+        // An emplacement comes up armed. Unlike a vehicle, where arming is a
+        // deliberate act that costs mobility, a turret has no other job and
+        // nothing to trade away — leaving it 'idle' would build a gun that
+        // never fires and give the player no control that would change it.
+        this.mode = this.def.turret ? 'armed' : 'idle';
         g.userData.buildRing.visible = false;
         for (const m of g.userData.shadowCasters) m.castShadow = true;
       }
     } else {
       g.position.set(this.x, groundY, this.z);
     }
+
+    // Scan, track and come to bear. The identical rig a vehicle's turret uses
+    // — see vehicles/turretRig.js for why it is shared rather than copied.
+    if (this.def.turret) updateTurretRig(this, dt);
 
     // Beacon pulse — only the power spire's def carries a `beacon` block, and
     // only once it has finished rising, so it doesn't strobe while still buried.
@@ -766,7 +984,10 @@ export class StructureController {
     for (const instance of this.instances) {
       const wasBuilding = instance.mode === 'building';
       instance.update(dt, heightmap);
-      if (wasBuilding && instance.mode === 'idle') this.onComplete?.(instance);
+      // Any transition *out of* building, not specifically into 'idle': a
+      // defensive emplacement finishes into 'armed', and testing for 'idle'
+      // would silently skip the completion hook for every one of them.
+      if (wasBuilding && instance.mode !== 'building') this.onComplete?.(instance);
     }
   }
 

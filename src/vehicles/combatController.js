@@ -74,7 +74,14 @@ export class CombatController {
 
   update(dt) {
     this._tick++;
-    const shooters = this.vehicles.instances;
+    // Structures were always valid *targets* (see _candidates) but never
+    // shooters — the loop below read only vehicles, so a defensive emplacement
+    // would have sat there aiming at nothing. Concatenated rather than given
+    // its own loop: every check in here is about `def.turret`, `heading`,
+    // `mode` and `group.position`, all of which a turret structure carries
+    // under the same names, so a second copy of this loop would be the same
+    // code with a different array in front of it.
+    const shooters = this._shooters();
 
     for (let i = 0; i < shooters.length; i++) {
       const inst = shooters[i];
@@ -123,6 +130,17 @@ export class CombatController {
     }
   }
 
+  /**
+   * Everything that can shoot: every vehicle, plus any structure mounting a
+   * turret. Rebuilt per tick rather than cached — both arrays change as things
+   * are built and destroyed, and a stale shooter list would keep firing a gun
+   * that no longer exists.
+   */
+  _shooters() {
+    const armed = this.structures.instances.filter((s) => s.def.turret);
+    return armed.length ? [...this.vehicles.instances, ...armed] : this.vehicles.instances;
+  }
+
   /** Everything that could be shot at, on any team but this one. */
   *_candidates(inst) {
     for (const v of this.vehicles.instances) {
@@ -131,7 +149,7 @@ export class CombatController {
     for (const s of this.structures.instances) {
       // Decorations are scenery, not targets — shooting a power spire is
       // noise, and it would pull fire off the things that decide a match.
-      if (!s.dead && s.teamId !== inst.teamId && !s.def.tags?.includes('decoration')) yield s;
+      if (s !== inst && !s.dead && s.teamId !== inst.teamId && !s.def.tags?.includes('decoration')) yield s;
     }
   }
 

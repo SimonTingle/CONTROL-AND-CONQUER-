@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { buildVehicleMesh, isTracked, trackThicknessOf } from './vehicleFactory.js';
+import { updateTurretRig, turretBearingOf } from './turretRig.js';
 import { VEHICLE_CATALOG } from './catalog.js';
 import { disposeObject3D } from '../core/disposeObject3D.js';
 import { simClock } from '../core/simClock.js';
@@ -628,37 +629,15 @@ class VehicleInstance {
    * not there) keeps every angle this class exposes in its own frame.
    */
   updateTurret(dt) {
-    const turret = this.group.userData.turret;
-    if (!turret) return;
-
-    if (this.mode === 'armed' && this.turretAim != null) {
-      // Shortest way round to the target bearing, expressed turret-locally,
-      // then clamped into the arc so a gun can never point through its own
-      // hull to reach something behind it.
-      const half = this.def.turret.fireArc / 2;
-      const local = wrapAngle(this.turretAim - this.heading);
-      const wanted = THREE.MathUtils.clamp(local, -half, half);
-      const delta = wrapAngle(wanted - turret.rotation.y);
-      const maxStep = this.def.turret.rotationRate * dt;
-      turret.rotation.y += THREE.MathUtils.clamp(delta, -maxStep, maxStep);
-      // Resume the scan from where the barrel actually is, not from wherever
-      // the sine happened to be when a target appeared.
-      this.sweepPhase = Math.asin(THREE.MathUtils.clamp(turret.rotation.y / half, -1, 1));
-    } else if (this.mode === 'armed') {
-      this.sweepPhase += dt * this.def.turret.sweepRate;
-      turret.rotation.y = Math.sin(this.sweepPhase) * (this.def.turret.fireArc / 2);
-    } else if (turret.rotation.y !== 0) {
-      // Stow forward when disarmed, rather than freezing mid-sweep.
-      turret.rotation.y = THREE.MathUtils.damp(turret.rotation.y, 0, 6, dt);
-      if (Math.abs(turret.rotation.y) < 1e-3) turret.rotation.y = 0;
-      this.sweepPhase = 0;
-    }
+    // Delegated: a defensive structure mounts the identical rig, and two
+    // copies of scan/track/stow would drift apart the first time either was
+    // tuned. See vehicles/turretRig.js.
+    updateTurretRig(this, dt);
   }
 
   /** World-space bearing the barrel is actually pointing right now. */
   get turretBearing() {
-    const turret = this.group.userData.turret;
-    return this.heading + (turret ? turret.rotation.y : 0);
+    return turretBearingOf(this);
   }
 
   updateLOD(camera) {
