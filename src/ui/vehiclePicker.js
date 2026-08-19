@@ -294,6 +294,10 @@ export class VehiclePicker {
     this.panel.setAttribute('aria-hidden', String(!open));
     this.toggleButton.classList.toggle('active', open);
     this.toggleButton.setAttribute('aria-expanded', String(open));
+    // Published rather than reaching for the minimap directly: this drawer is
+    // a 320px panel on the right edge, and anything else anchored there needs
+    // to move aside. CSS owns what "aside" means.
+    document.body.classList.toggle('drawer-open', open);
   }
 
   /** Spins and renders every preview. Cheap no-op while the drawer is closed. */

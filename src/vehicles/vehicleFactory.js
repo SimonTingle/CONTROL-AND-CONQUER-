@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { buildTurretMesh } from './turretRig.js';
 import { addSelectionHitbox } from '../core/selectionHitbox.js';
 
 /**
@@ -277,27 +278,13 @@ export function buildVehicleMesh(def) {
     }
   }
 
-  // Turret + barrel on top, forward-facing along +X.
+  // Turret + barrel on top, forward-facing along +X. The assembly itself is
+  // built by the shared rig, so a defensive emplacement mounts the identical
+  // thing rather than a lookalike.
   if (shape.turret) {
-    const turret = new THREE.Mesh(
-      new THREE.CylinderGeometry(dims.turretRadius, dims.turretRadius * 1.1, dims.turretHeight, 10),
-      trimMat
-    );
+    const turret = buildTurretMesh(dims, trimMat);
     turret.position.set(dims.hullLength * 0.06, hull.position.y + dims.hullHeight / 2 + dims.turretHeight / 2, 0);
-    turret.castShadow = true;
     group.add(turret);
-
-    const barrel = new THREE.Mesh(
-      new THREE.CylinderGeometry(dims.barrelRadius, dims.barrelRadius, dims.barrelLength, 8),
-      trimMat
-    );
-    barrel.rotation.z = Math.PI / 2;
-    // Parented to the turret, not the group, so traversing the turret carries
-    // the gun with it — the position is therefore turret-local. The cylinder's
-    // own axis is Y, so `turret.rotation.y` traverses it in place.
-    barrel.position.set(dims.barrelLength / 2 + dims.turretRadius * 0.5, 0, 0);
-    barrel.castShadow = true;
-    turret.add(barrel);
 
     // Kept addressable so the controller can aim it; the wheels and lights use
     // the same userData convention.

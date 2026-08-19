@@ -1478,3 +1478,43 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
   .builder-cols { grid-template-columns: 1fr; grid-template-rows: auto 1fr auto; }
   .builder-left, .builder-right { max-height: 30vh; border: none; }
 }
+
+/* ---- minimap ---- */
+
+/* Bottom-right: the only free corner. #hud owns bottom-left, both top corners
+   hold the drawer toggles, and toasts land bottom-centre. */
+#minimap {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  width: 200px;
+  height: 200px;
+  z-index: 15;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: rgba(6, 8, 11, 0.82);
+  backdrop-filter: blur(4px);
+  overflow: hidden;
+  /* Slides aside rather than being covered when the vehicle drawer opens —
+     the drawer is a 320px full-height panel along this same edge. */
+  transition: transform 0.25s ease, opacity 0.25s ease;
+}
+
+#minimap.hidden { opacity: 0; pointer-events: none; }
+
+#minimap canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+}
+
+/* Set by vehiclePicker.setOpen when the right-hand drawer opens. */
+body.drawer-open #minimap { transform: translateX(calc(-1 * var(--panel-width) + 8px)); }
+
+/* On a narrow screen a 200px map plus a 320px drawer leaves nothing; shrink
+   rather than shift, since there is nowhere to shift to. */
+@media (max-width: 720px) {
+  #minimap { width: 132px; height: 132px; }
+  body.drawer-open #minimap { transform: none; opacity: 0; pointer-events: none; }
+}

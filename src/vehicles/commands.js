@@ -321,6 +321,45 @@ function producedNearBaseCommands(structureId) {
 /** Structures whose produced units wait by the base rather than at the works. */
 const SPAWNS_AT_BASE = new Set(['armed-factory']);
 
+/**
+ * "Deploy X" for every defensive structure, offered by the field engineer.
+ *
+ * No new intent type: a radial command already crosses the wire as a `cmd`
+ * intent, which every client resolves through commandsFor and executes
+ * identically — the same route the base station's own `deploy` takes. Adding a
+ * bespoke intent would be redundant wire format, and intent shapes are the one
+ * thing peers on different builds cannot detect a mismatch in.
+ *
+ * The engineer is consumed. That is what makes placement a real commitment
+ * rather than a free sprinkle of turrets, and it is why the cost lives on the
+ * *vehicle* rather than being charged again here.
+ */
+function deployDefenseCommands() {
+  return STRUCTURE_CATALOG.filter((d) => d.tags?.includes('defense')).map((def) => ({
+    id: `deploy-${def.id}`,
+    label: `Deploy ${def.name}`,
+    hint: def.description,
+    enabled(instance, ctx) {
+      // Deployed on open ground, deliberately outside any pad: the whole point
+      // is perimeter cover, and canPlaceAt would confine it to the base disc.
+      // The one thing worth refusing is ground the building would stand in.
+      const pos = instance.group.position;
+      if (ctx.heightmap.heightAt(pos.x, pos.z) <= ctx.heightmap.seaLevelY) {
+        return 'Cannot deploy in water';
+      }
+      return true;
+    },
+    execute(instance, ctx) {
+      const pos = instance.group.position;
+      ctx.structures.placeAt(def, pos.x, pos.z, ctx.heightmap, { teamId: instance.teamId });
+      // Spent. Queued through the destroy pipeline rather than spliced here,
+      // so nothing is removed from an array another system is still walking
+      // this tick.
+      ctx.entities.queueDestroy(instance);
+    },
+  }));
+}
+
 const COMMANDS = {
   'scout-buggy': {
     mobile: [
@@ -497,6 +536,10 @@ const COMMANDS = {
         },
       },
     ],
+  },
+
+  'field-engineer': {
+    mobile: deployDefenseCommands(),
   },
 
   'harvester-facility': {
