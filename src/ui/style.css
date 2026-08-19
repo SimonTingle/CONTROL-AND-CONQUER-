@@ -17,6 +17,19 @@ html, body {
   color: var(--text);
   font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
+  /* #viewport already refuses pinch/scroll gestures on the canvas so they
+     don't fight MapControls' own touch handling (see that rule's comment).
+     This extends the same refusal to the rest of the page — empty chrome
+     margins, drawer backgrounds — so a pinch that happens to start a few
+     pixels off the canvas (e.g. near a toggle button) still can't reach the
+     browser's native page zoom. Combined with the viewport meta's
+     maximum-scale/user-scalable, since Safari's history of honouring each on
+     its own is inconsistent enough to want both. Scrollable regions
+     (#panel, #vehicle-panel, the save-field suggestion list, the builder's
+     side columns) opt back into vertical panning explicitly below — an
+     ancestor's touch-action restricts descendants by default in every
+     engine, so without that override this would also kill their scrolling. */
+  touch-action: none;
 }
 
 #viewport {
@@ -35,8 +48,12 @@ html, body {
 
 #menu-toggle {
   position: fixed;
-  top: 16px;
-  left: 16px;
+  /* calc(...) rather than a flat 16px: env() resolves to 0px with no
+     notch/home-indicator, so this is additive-only and changes nothing on
+     a device this already looked right on — but keeps this corner clear
+     of one that isn't. */
+  top: calc(16px + env(safe-area-inset-top));
+  left: calc(16px + env(safe-area-inset-left));
   z-index: 20;
   width: 44px;
   height: 44px;
@@ -80,6 +97,11 @@ html, body {
   height: 100%;
   padding: 76px 0 20px;
   overflow-y: auto;
+  /* Re-opts into vertical touch scrolling — html/body's touch-action: none
+     would otherwise silence it, since an ancestor's touch-action restricts
+     descendant gesture handling by default. pan-y still excludes pinch-zoom,
+     unlike `manipulation`, which would let it back in. */
+  touch-action: pan-y;
   overscroll-behavior: contain;
   background: var(--panel-bg);
   backdrop-filter: blur(14px);
@@ -250,6 +272,7 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
   z-index: 5;
   max-height: 160px;
   overflow-y: auto;
+  touch-action: pan-y; /* see #panel's comment */
   border: 1px solid var(--panel-border);
   border-radius: 6px;
   background: var(--panel-bg);
@@ -355,8 +378,12 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
 
 #vehicle-toggle {
   position: fixed;
-  top: 16px;
-  right: 16px;
+  /* calc(...) rather than a flat 16px: env() resolves to 0px with no
+     notch/home-indicator, so this is additive-only and changes nothing on
+     a device this already looked right on — but keeps this corner clear
+     of one that isn't. */
+  top: calc(16px + env(safe-area-inset-top));
+  right: calc(16px + env(safe-area-inset-right));
   z-index: 20;
   width: 44px;
   height: 44px;
@@ -398,6 +425,7 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
   height: 100%;
   padding: 76px 18px 20px;
   overflow-y: auto;
+  touch-action: pan-y; /* see #panel's comment */
   overscroll-behavior: contain;
   background: var(--panel-bg);
   backdrop-filter: blur(14px);
@@ -560,8 +588,12 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
 
 #hud {
   position: fixed;
-  bottom: 16px;
-  left: 16px;
+  /* calc(...) rather than a flat 16px: env() resolves to 0px with no
+     notch/home-indicator, so this is additive-only and changes nothing on
+     a device this already looked right on — but keeps this corner clear
+     of one that isn't. */
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  left: calc(16px + env(safe-area-inset-left));
   z-index: 15;
   width: 260px;
   padding: 12px 14px;
@@ -1370,6 +1402,7 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
 
 .builder-left, .builder-right {
   overflow-y: auto;
+  touch-action: pan-y; /* see #panel's comment */
   padding: 12px;
 }
 
@@ -1485,8 +1518,12 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
    hold the drawer toggles, and toasts land bottom-centre. */
 #minimap {
   position: fixed;
-  right: 16px;
-  bottom: 16px;
+  /* calc(...) rather than a flat 16px: env() resolves to 0px with no
+     notch/home-indicator, so this is additive-only and changes nothing on
+     a device this already looked right on — but keeps this corner clear
+     of one that isn't. */
+  right: calc(16px + env(safe-area-inset-right));
+  bottom: calc(16px + env(safe-area-inset-bottom));
   width: 200px;
   height: 200px;
   z-index: 15;
@@ -1517,4 +1554,20 @@ body.drawer-open #minimap { transform: translateX(calc(-1 * var(--panel-width) +
 @media (max-width: 720px) {
   #minimap { width: 132px; height: 132px; }
   body.drawer-open #minimap { transform: none; opacity: 0; pointer-events: none; }
+
+  /* Both drawers were a flat 320px at every viewport size — on a 360px-wide
+     phone that is most of the screen. min() rather than a second guessed
+     breakpoint: it scales correctly at any width under 720px instead of
+     assuming one particular phone, and 340px caps it back to roughly the
+     desktop size once there's room to spare (a large phone / small tablet in
+     this range). The minimap's open-drawer shift-aside distance already
+     reads this same variable (see body.drawer-open #minimap above the
+     720px query), so it follows with no separate change. */
+  :root { --panel-width: min(88vw, 340px); }
+}
+
+/* A tighter step for actual phone-portrait widths (roughly iPhone SE up to a
+   large Android phone) — 132px still crowds a 360-390px-wide screen. */
+@media (max-width: 480px) {
+  #minimap { width: 104px; height: 104px; }
 }

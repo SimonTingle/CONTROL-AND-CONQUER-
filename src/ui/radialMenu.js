@@ -16,6 +16,14 @@ import * as THREE from 'three';
 
 const RING_RADIUS = 96; // px from the anchor to the button centres
 const CLOSE_SPEED = 0.5; // drive away faster than this and the menu closes
+// The ring's on-screen size is entirely CSS+JS geometry (RING_RADIUS above,
+// .rm-ring's own px width) with no stylesheet hook to shrink it from — a
+// 196px ring is comfortable on a desktop pointer and dominates a phone
+// screen. Scaled in update() by appending to the same transform already set
+// there each frame, rather than a second property, since a plain CSS rule
+// can't reach an inline style JS overwrites wholesale every call.
+const MOBILE_RING = matchMedia('(max-width: 480px)');
+const MOBILE_RING_SCALE = 0.72;
 
 const _anchor = new THREE.Vector3();
 
@@ -152,7 +160,12 @@ export class RadialMenu {
 
     const x = (_anchor.x * 0.5 + 0.5) * window.innerWidth;
     const y = (-_anchor.y * 0.5 + 0.5) * window.innerHeight;
-    this.root.style.transform = `translate(${x}px, ${y}px)`;
+    // scale() after translate() composes about the *translated* origin, i.e.
+    // the anchor point itself — exactly what's wanted, since #radial-menu is
+    // a zero-size point and every child (ring, buttons) is positioned
+    // relative to it. The anchor doesn't move; only the ring shrinks around it.
+    const scale = MOBILE_RING.matches ? ` scale(${MOBILE_RING_SCALE})` : '';
+    this.root.style.transform = `translate(${x}px, ${y}px)${scale}`;
   }
 }
 

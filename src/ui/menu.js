@@ -82,6 +82,10 @@ export class Menu {
     this.panel.setAttribute('aria-hidden', String(!open));
     this.toggleButton.classList.toggle('active', open);
     this.toggleButton.setAttribute('aria-expanded', String(open));
+    // Set by main.js once the vehicle picker also exists, so opening this
+    // drawer can close that one on a narrow screen — see the wiring site for
+    // why: the two are otherwise unaware of each other.
+    if (open) this.onOpen?.();
   }
 
   render(schema) {

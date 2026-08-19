@@ -1590,6 +1590,19 @@ const vehiclePicker = new VehiclePicker(VEHICLE_CATALOG, {
   },
 });
 
+// The settings menu and the vehicle drawer are two independently built
+// components, neither aware the other exists. On a desktop-width window that
+// is harmless — two 320px panels from opposite edges of a much wider screen
+// never meet — but below the same ~720px width style.css shrinks the panels
+// at, both open together cover most of the screen and overlap unreadably.
+// Sandbox mode makes this the *default* state on a phone, since it opens the
+// vehicle drawer automatically at start (see beginMatch). Below that width,
+// opening one now closes the other; above it, both can stay open exactly as
+// they always could, since nothing here changes desktop behaviour at all.
+const NARROW_VIEWPORT = matchMedia('(max-width: 720px)');
+menu.onOpen = () => { if (NARROW_VIEWPORT.matches) vehiclePicker.setOpen(false); };
+vehiclePicker.onOpen = () => { if (NARROW_VIEWPORT.matches) menu.setOpen(false); };
+
 vehiclePicker.lockText = (def) =>
   def.unlock === 'exploration'
     ? `Locked — chart ${Math.round(game.difficulty.unlockAt * 100)}% of the island`

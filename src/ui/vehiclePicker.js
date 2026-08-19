@@ -298,6 +298,9 @@ export class VehiclePicker {
     // a 320px panel on the right edge, and anything else anchored there needs
     // to move aside. CSS owns what "aside" means.
     document.body.classList.toggle('drawer-open', open);
+    // Set by main.js once the settings menu also exists — see its own
+    // onOpen comment.
+    if (open) this.onOpen?.();
   }
 
   /** Spins and renders every preview. Cheap no-op while the drawer is closed. */

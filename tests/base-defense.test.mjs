@@ -16,6 +16,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { updateTurretRig, turretBearingOf } from '../src/vehicles/turretRig.js';
+import { commandsFor } from '../src/vehicles/commands.js';
 import { STRUCTURE_CATALOG } from '../src/structures/structures.js';
 import { VEHICLE_CATALOG } from '../src/vehicles/catalog.js';
 
@@ -152,4 +153,61 @@ test('every defence has a mesh case — none falls through to the facility defau
     const def = defenseOf(id);
     assert.ok(def.dims && def.colors, `${id} carries the blocks its mesh builder reads`);
   }
+});
+
+// ---- selling a defense: the reclaim mechanic that did not exist before ----
+
+/** Minimal command-context stub: a team that records what it earns, an
+ * entities pipeline that records what it's asked to destroy. */
+function sellCtx() {
+  const earned = [];
+  const destroyed = [];
+  return {
+    earned,
+    destroyed,
+    game: { teamOf: () => ({ earn: (n) => earned.push(n) }) },
+    entities: { queueDestroy: (inst) => destroyed.push(inst) },
+  };
+}
+
+function placedDefense(id, { health } = {}) {
+  const def = defenseOf(id);
+  return { def, health: health ?? def.maxHealth, mode: def.turret ? 'armed' : 'idle' };
+}
+
+test('a full-health gun turret sells for half its cost', () => {
+  const inst = placedDefense('gun-turret');
+  const ctx = sellCtx();
+  const sell = commandsFor(inst, ctx).find((c) => c.id === 'sell');
+
+  assert.ok(sell, 'the sell command is offered');
+  sell.execute(inst, ctx);
+
+  assert.deepEqual(ctx.earned, [defenseOf('gun-turret').cost * 0.5]);
+  assert.deepEqual(ctx.destroyed, [inst], 'the structure is queued for removal');
+});
+
+test('a half-dead sensor tower sells for a quarter of its cost, not half', () => {
+  // The refund is scaled by remaining health, not a flat fraction of the
+  // sticker price — otherwise whittling a defense down before selling it
+  // would be irrelevant, and a nearly-dead structure would refund as much
+  // as a pristine one.
+  const def = defenseOf('sensor-tower');
+  const inst = placedDefense('sensor-tower', { health: def.maxHealth * 0.5 });
+  const ctx = sellCtx();
+  const sell = commandsFor(inst, ctx).find((c) => c.id === 'sell');
+
+  sell.execute(inst, ctx);
+
+  assert.deepEqual(ctx.earned, [Math.round(def.cost * 0.5 * 0.5)]);
+});
+
+test('sell is not offered on a defense still under construction', () => {
+  // 'building' mode has no entry in COMMANDS['gun-turret']/['sensor-tower'] —
+  // commandsFor falls back to [] for a mode with no listed commands, so a
+  // half-built turret must not be sellable out from under itself mid-rise.
+  const inst = { def: defenseOf('gun-turret'), health: 1, mode: 'building' };
+  const ctx = sellCtx();
+
+  assert.deepEqual(commandsFor(inst, ctx), []);
 });

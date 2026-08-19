@@ -161,6 +161,38 @@ const UPGRADE_COMMAND = {
 };
 
 /**
+ * Reclaim a deployed defense for a fraction of its cost, scaled by how much
+ * health it has left — a turret whittled down to the floor by an attack
+ * shouldn't refund the same as one that was never touched. There was
+ * previously no way at all to get rid of a defense placed somewhere it
+ * turns out to be wrong (blocking a build, guarding a perimeter the map
+ * doesn't actually need) short of letting the enemy destroy it for free.
+ *
+ * Not wired to any structure by default — see the 'gun-turret'/
+ * 'sensor-tower' entries below — since nothing here reads anything
+ * defense-specific and a future structure could reuse it unchanged.
+ */
+const SELL_REFUND_FRACTION = 0.5;
+function sellRefund(instance) {
+  const { cost = 0, maxHealth = 1 } = instance.def;
+  return Math.round(cost * SELL_REFUND_FRACTION * (instance.health / maxHealth));
+}
+const SELL_COMMAND = {
+  id: 'sell',
+  label: 'Sell',
+  hint(instance) {
+    return `+${sellRefund(instance)} cr`;
+  },
+  execute(instance, ctx) {
+    ctx.game.teamOf(instance).earn(sellRefund(instance));
+    // Queued through the destroy pipeline, same as deployDefenseCommands'
+    // engineer-consuming execute() — not spliced here directly, so nothing
+    // is removed from an array another system is still walking this tick.
+    ctx.entities.queueDestroy(instance);
+  },
+};
+
+/**
  * Team-scoped counterpart to UPGRADE_COMMAND — same hint/enabled/execute
  * shape, but reads and writes `team.weaponTier`/`WEAPON_TIERS` instead of a
  * building's own `instance.upgradeLevel`/`def.upgradeTiers`. One purchase
@@ -540,6 +572,17 @@ const COMMANDS = {
 
   'field-engineer': {
     mobile: deployDefenseCommands(),
+  },
+
+  // Sell is the only command either defense has: a gun-turret comes up
+  // 'armed' (it has a turret block — see StructureInstance's own comment on
+  // why), a sensor-tower 'idle' (it never does). Neither has anything else
+  // to offer a player once placed — no upgrade tiers, nothing to produce.
+  'gun-turret': {
+    armed: [SELL_COMMAND],
+  },
+  'sensor-tower': {
+    idle: [SELL_COMMAND],
   },
 
   'harvester-facility': {
