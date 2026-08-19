@@ -23,6 +23,7 @@ import { AiDifficultyScreen } from './ui/aiDifficultyScreen.js';
 import { createTeams, PLAYER_TEAM_ID } from './core/team.js';
 import { FogMask } from './core/fogOfWar.js';
 import { Hud } from './ui/hud.js';
+import { Minimap } from './ui/minimap.js';
 import { RadialMenu } from './ui/radialMenu.js';
 import { VehicleController } from './vehicles/vehicleController.js';
 import { HeadlightPool } from './vehicles/headlightPool.js';
@@ -1071,6 +1072,53 @@ const menu = new Menu(() => buildSchema(world, view, game));
 const hud = new Hud();
 
 /**
+ * Bottom-right minimap. Presentation only — a click moves the camera, which
+ * is not simulated, so this needs no intent (see renderTick's header).
+ */
+const minimap = new Minimap({
+  onJump(x, z) {
+    // Setting controls.target alone would silently do nothing while the chase
+    // rig is active: renderTick forces controls.enabled = false every frame
+    // whenever isChasing(). So hand the camera back the same way setChase does.
+    chase.enabled = false;
+    controls.enabled = true;
+    controls.target.set(x, heightmap.heightAt(x, z), z);
+    controls.update();
+  },
+});
+
+/**
+ * A box on the ground showing roughly where the camera is looking.
+ *
+ * Deliberately an approximation rather than the true frustum footprint, after
+ * two attempts at exactness both failed for the same reason: with the camera
+ * angled the way an RTS view is, the upper screen corners look at or above the
+ * horizon and have no ground intersection at all. Raymarching the terrain
+ * returned nothing there, so the rectangle never drew; intersecting a ground
+ * plane pushed those corners to the map edge, so it drew as a diagonal streak
+ * across the whole map. The visible ground in that direction really is
+ * unbounded — there is no honest quad to draw.
+ *
+ * So this is a square centred on what the camera is pointed at, sized from its
+ * distance and field of view. It answers the question the minimap is actually
+ * asked ("where am I looking?") and cannot degenerate.
+ */
+function cameraGroundQuad() {
+  const t = controls.target;
+  const dist = camera.position.distanceTo(t);
+  if (!Number.isFinite(dist) || dist <= 0) return null;
+  // Half-width of the ground the camera covers at that distance. Widened a
+  // little because a tilted view sees further than a head-on one.
+  const half = dist * Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5)) * 1.25;
+  return [
+    { x: t.x - half, z: t.z - half },
+    { x: t.x + half, z: t.z - half },
+    { x: t.x + half, z: t.z + half },
+    { x: t.x - half, z: t.z + half },
+  ];
+}
+
+/**
  * Every radial-menu command in the game funnels through here, which is what
  * makes routing them through the intent queue a two-line change rather than a
  * rewrite: a command is fully described by its id plus the instance it was
@@ -1903,6 +1951,10 @@ function beginMatch(difficulty) {
     world.fogMasks.push(team.fog);
   }
   vehiclePicker.playerTeamId = game.localTeamId;
+  // The minimap is match-only. Built once here rather than waiting for the
+  // half-second poll, so it is not blank for the first half second.
+  minimap.root?.classList.remove('hidden');
+  minimap.rebuildRaster(world.fogTerrain, game.playerTeam?.fog ?? world.fog);
   // Sandbox keeps the explore-to-unlock pacing untouched. An AI match starts
   // every team on equal footing — making the human scout first while AI
   // teams build from tick one would not be a fair opening.
@@ -2471,6 +2523,19 @@ function renderTick(dt) {
   // Per-frame, unlike the rest of the HUD's half-second poll — see
   // Hud.updateHealth for why health specifically cannot wait.
   p.time('hudHealth', () => hud.updateHealth(vehicles.active));
+  // Blips and the view rectangle move every frame; the terrain+fog raster
+  // behind them is rebuilt on the half-second poll below instead.
+  p.time('minimap', () => {
+    if (minimap.root?.classList.contains('hidden')) return;
+    minimap.draw({
+      size: heightmap.params.size,
+      fogMask: game.playerTeam?.fog ?? world.fog,
+      vehicles: vehicles.instances,
+      structures: structures.instances,
+      colorOf: (teamId) => game.teams?.find((t) => t.id === teamId)?.color ?? '#8ea3b6',
+      viewCorners: cameraGroundQuad(),
+    });
+  });
   p.time('markers', () => {
     updateMarker(clock.elapsedTime);
     updateHarvestMarker(clock.elapsedTime);
@@ -2510,6 +2575,13 @@ function renderTick(dt) {
     let lights = 0;
     world.scene.traverse((o) => { if (o.isLight) lights++; });
     perfHud.setLightCount(lights);
+
+    // One fused pass over the fog's own 256x256 grid. Same cadence and same
+    // reasoning as the light count above: 65 K cells is cheap but pointless
+    // to redo per frame, since fog reveals at walking pace.
+    if (!minimap.root?.classList.contains('hidden')) {
+      minimap.rebuildRaster(world.fogTerrain, game.playerTeam?.fog ?? world.fog);
+    }
 
     // Exploration is polled here rather than per frame: it re-derives the land
     // mask whenever the sea-level slider has moved, and twice a second is
