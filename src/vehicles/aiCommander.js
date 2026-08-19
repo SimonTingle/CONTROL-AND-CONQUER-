@@ -62,11 +62,16 @@ const ADVANCE_DETOURS = [0.8, -0.8, 1.5, -1.5, 2.3, -2.3];
 // knobs built for "scarier at higher tiers" that don't carry that cost:
 // buildInterval (how often it acts at all) and combatCap/attackAt (how big
 // and how eager its army gets once it exists).
+// defenseCap counts gun-turret + sensor-tower together, the same way
+// harvesterCap/combatCap already cap their own unit — a team that never stops
+// planting turrets is no more interesting than one that never stops massing
+// tanks. Deliberately flat across difficulty rather than scaled like combatCap:
+// a fortified perimeter is a one-time investment, not an ongoing arms race.
 const DIFFICULTY_ECONOMY = {
-  easy: { harvesterCap: 2, buildInterval: 20, combatCap: 1, attackAt: 2 },
-  normal: { harvesterCap: 2, buildInterval: 15, combatCap: 3, attackAt: 2 },
-  hard: { harvesterCap: 2, buildInterval: 11, combatCap: 5, attackAt: 3 },
-  expert: { harvesterCap: 2, buildInterval: 8, combatCap: 7, attackAt: 3 },
+  easy: { harvesterCap: 2, buildInterval: 20, combatCap: 1, attackAt: 2, defenseCap: 1 },
+  normal: { harvesterCap: 2, buildInterval: 15, combatCap: 3, attackAt: 2, defenseCap: 2 },
+  hard: { harvesterCap: 2, buildInterval: 11, combatCap: 5, attackAt: 3, defenseCap: 3 },
+  expert: { harvesterCap: 2, buildInterval: 8, combatCap: 7, attackAt: 3, defenseCap: 3 },
 };
 const DEFAULT_ECONOMY = DIFFICULTY_ECONOMY.normal;
 
@@ -92,6 +97,17 @@ const SCOUT_STUCK_TIMEOUT = 25; // seconds
 // Irrational-ish fraction of a turn, so successive rotations keep landing on
 // fresh compass points instead of cycling through a short repeating set.
 const SCOUT_ANGLE_STEP = 2.399; // radians (~137.5°, the golden angle)
+
+// Field-engineer deploy ring, centred on the team's home point rather than
+// the base's live position — a deployed base's own disc is already covered
+// by its own buildings; perimeter defence goes further out. Sized off the
+// defense structures' own reach: gun-turret's 74u range and sensor-tower's
+// 115u sight, so the ring lands somewhere that actually extends the team's
+// covered ground instead of overlapping the base or missing both. The
+// minimum also doubles as the floor _driveOneEngineer checks before letting
+// an engineer deploy in place — see that method for why that matters.
+const DEFENSE_MIN_RADIUS = 55;
+const DEFENSE_MAX_RADIUS = 140;
 
 export class AiCommander {
   /**
@@ -138,6 +154,11 @@ export class AiCommander {
     // a second scout continues widening from where the first left off rather
     // than re-exploring the same near ring.
     this.scoutState = new Map();
+    // One entry per owned field-engineer, same shape and reasoning as
+    // scoutState: a team can be walking more than one engineer to a deploy
+    // site at once, and one going stuck must not stall another's order or
+    // rotate its search sweep.
+    this.engineerState = new Map();
 
     const diffId = ctx.game.difficulty?.id;
     this.economy = DIFFICULTY_ECONOMY[diffId] ?? DEFAULT_ECONOMY;
@@ -156,6 +177,7 @@ export class AiCommander {
     }
 
     this._driveScout(dt);
+    this._driveEngineer(dt);
     this._manageBase(dt);
     this._manageEconomy(dt);
     this._manageArmy(dt);
@@ -173,6 +195,14 @@ export class AiCommander {
 
   _scouts() {
     return this._ownUnits('scout-buggy');
+  }
+
+  /** This team's already-deployed defenses — gun-turret and sensor-tower
+   * together, the same grouping defenseCap counts them under. */
+  _ownDefenses() {
+    return this.ctx.structures.instances.filter(
+      (s) => s.teamId === this.team.id && !s.dead && s.def.tags?.includes('defense')
+    );
   }
 
   // ---- deploy, once — self-gating: COMMANDS['base-station'] only lists
@@ -279,9 +309,31 @@ export class AiCommander {
     this.buildTimer = this.economy.buildInterval;
     // Economy before army: a team with no income cannot sustain either, and a
     // harvester that pays for itself is worth more than a gun that does not.
+    // Defense sits between the two: cheaper and more one-off than the ongoing
+    // combat cap, but only worth a look once the harvester cap is already met.
     if (!this._tryBuildUnit('economy', this.economy.harvesterCap)) {
-      this._tryBuildUnit('combat', this.economy.combatCap);
+      if (!this._manageDefense()) {
+        this._tryBuildUnit('combat', this.economy.combatCap);
+      }
     }
+  }
+
+  /**
+   * Queue one field-engineer, if this team's defenses (built + already
+   * walking to be built) are still under defenseCap.
+   *
+   * Counts in-flight engineers against the cap, not just finished
+   * structures — otherwise a 15s buildInterval spent watching one engineer
+   * walk its ~100+ unit ring queues a second and third before the first ever
+   * plants anything, blowing straight past the cap the moment they all land.
+   * Same one-action-per-tick contract as _tryBuildUnit, so the caller can
+   * chain it the same way.
+   */
+  _manageDefense() {
+    const built = this._ownDefenses().length;
+    const engineers = this._ownUnits('field-engineer').length;
+    if (built + engineers >= this.economy.defenseCap) return false;
+    return this._tryBuildUnit('support', engineers + 1);
   }
 
   /**
@@ -630,5 +682,100 @@ export class AiCommander {
       // spinning on the exact same rejected point every frame.
       st.retryTimer = RETRY_PAUSE;
     }
+  }
+
+  // ---- defense: walk a field-engineer out to the perimeter and deploy it ----
+
+  _driveEngineer(dt) {
+    // Same independence as _driveScout, for the same reason: _manageDefense
+    // caps how many exist, but nothing stops two from being mid-walk at
+    // once (one built while an earlier one is still en route), and one
+    // going stuck must not stall the other's order or rotate its sweep.
+    for (const engineer of this._ownUnits('field-engineer')) {
+      this._driveOneEngineer(engineer, dt);
+    }
+  }
+
+  _driveOneEngineer(engineer, dt) {
+    let st = this.engineerState.get(engineer);
+    if (!st) {
+      st = { stuckTimer: 0, angleOffset: 0, retryTimer: 0 };
+      this.engineerState.set(engineer, st);
+    }
+
+    if (st.retryTimer > 0) {
+      st.retryTimer -= dt;
+      return;
+    }
+    if (engineer.mode !== 'mobile' || engineer.menuOpen) return;
+
+    if (engineer.hasOrder) {
+      // Same stuck-timeout escalation _driveOneScout uses: give up on a
+      // target that is not actually being reached rather than orbiting it
+      // (or grinding on blocked-damage against it) forever.
+      st.stuckTimer += dt;
+      if (st.stuckTimer > SCOUT_STUCK_TIMEOUT) {
+        st.stuckTimer = 0;
+        st.angleOffset += SCOUT_ANGLE_STEP;
+        engineer.arrive('cancelled'); // drop the doomed order so a new one is issued
+        this._sendEngineerToDeploySite(engineer, st);
+      }
+      return;
+    }
+
+    // No order outstanding: either this engineer has never been sent
+    // anywhere yet, or it just walked into range of its last target — both
+    // read the same way through hasOrder, so the distance floor below is
+    // what actually tells them apart. A freshly built engineer starts on
+    // the base pad, which deployDefenseCommands' own enabled() never
+    // refuses (it only checks for water) — without a floor here, a new
+    // engineer would plant its turret at the factory door on its very
+    // first tick instead of ever walking to the perimeter.
+    const home = this.team.homePoint ?? engineer.group.position;
+    const pos = engineer.group.position;
+    const farEnough = Math.hypot(pos.x - home.x, pos.z - home.z) >= DEFENSE_MIN_RADIUS;
+    const cmd = farEnough ? this._preferredDefenseCommand(engineer) : null;
+    if (cmd?.enabledResult === true) {
+      cmd.execute(engineer, this.ctx);
+      this.engineerState.delete(engineer);
+      return;
+    }
+
+    this._sendEngineerToDeploySite(engineer, st);
+  }
+
+  _sendEngineerToDeploySite(engineer, st) {
+    const origin = this.team.homePoint ?? engineer.group.position;
+    const spot = findSpawnPointNear(this.ctx.heightmap, origin, {
+      minRadius: DEFENSE_MIN_RADIUS,
+      maxRadius: DEFENSE_MAX_RADIUS,
+      angleOffset: st.angleOffset,
+      camera: this.camera,
+    });
+    if (!engineer.setTarget(spot.point.x, spot.point.z, this.ctx.heightmap)) {
+      // Water, or too steep — try a different ring next tick rather than
+      // spinning on the exact same rejected point every frame.
+      st.retryTimer = RETRY_PAUSE;
+    }
+  }
+
+  /**
+   * Sensor tower first, for the vision it gives everything else this team
+   * builds — then gun turrets up to the shared defenseCap. Both draw from
+   * the one command list deployDefenseCommands() builds off the 'defense'
+   * tag, so a third defense structure added later is offered here with no
+   * change beyond adding it to this preference order.
+   */
+  _preferredDefenseCommand(engineer) {
+    const cmds = commandsFor(engineer, this.ctx).filter((c) => c.id.startsWith('deploy-'));
+    const haveSensor = this._ownDefenses().some((d) => d.def.id === 'sensor-tower');
+    const order = haveSensor
+      ? ['deploy-gun-turret', 'deploy-sensor-tower']
+      : ['deploy-sensor-tower', 'deploy-gun-turret'];
+    for (const id of order) {
+      const cmd = cmds.find((c) => c.id === id);
+      if (cmd) return cmd;
+    }
+    return cmds[0] ?? null;
   }
 }
