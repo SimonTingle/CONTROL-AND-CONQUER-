@@ -12,8 +12,48 @@
 
 import { z } from 'zod';
 import { query, transaction } from '../db/pool.js';
+import { boundsProblems } from '../vehicles/validateDef.js';
 
 const uuid = z.string().uuid();
+
+/** Matches the client's VEHICLE_SAVE_MODE — how a vehicle row is told from a world save. */
+const VEHICLE_SAVE_MODE = 'vehicle-def';
+/**
+ * A ceiling on how many vehicles one host can push into a match. Every def is
+ * relayed to every peer in the `welcome` frame, which the relay caps at 64 KiB
+ * per message, so this is a real transport limit and not a tidiness rule.
+ */
+const MAX_MATCH_DEFS = 16;
+
+/**
+ * The host's finished vehicles, bounds-checked, ready to pin into a match.
+ *
+ * Drafts are excluded for the same reason `catalogFor` excludes them on the
+ * client — a draft is explicitly allowed to be unfinished. Anything failing
+ * the bounds check is dropped rather than failing the whole match: one bad
+ * vehicle should not stop a lobby opening, but it must not reach the other
+ * players either.
+ */
+async function hostLoadout(userId) {
+  const { rows } = await query(
+    `select name, payload from saves
+      where user_id = $1 and mode = $2
+      order by updated_at desc
+      limit $3`,
+    [userId, VEHICLE_SAVE_MODE, MAX_MATCH_DEFS]
+  );
+
+  const defs = [];
+  const rejected = [];
+  for (const row of rows) {
+    if (row.payload?.draft === true) continue;
+    const def = row.payload?.def;
+    const problems = boundsProblems(def);
+    if (problems.length) rejected.push({ name: row.name, problems });
+    else defs.push(def);
+  }
+  return { defs, summary: { included: defs.length, rejected } };
+}
 
 const createBody = z.object({
   name: z.string().trim().min(1).max(64),
@@ -108,12 +148,18 @@ export async function matchRoutes(app) {
     const { name, maxPlayers, aiCount, difficultyId } = parsed.data;
     const seed = parsed.data.seed ?? randomSeed();
 
+    // The host's finished vehicles become the match's vehicle set. Read here
+    // from their own saves rather than accepted from the request body: the
+    // client that authored a def is the one party with a motive to skip the
+    // bounds check, so it does not get to assert what the match will play.
+    const loadout = await hostLoadout(req.user.id);
+
     const match = await transaction(async (client) => {
       const { rows } = await client.query(
-        `insert into matches (host_user_id, name, seed, max_players, ai_count, difficulty_id)
-         values ($1, $2, $3, $4, $5, $6)
+        `insert into matches (host_user_id, name, seed, max_players, ai_count, difficulty_id, custom_defs)
+         values ($1, $2, $3, $4, $5, $6, $7)
          returning *`,
-        [req.user.id, name, seed, maxPlayers, aiCount, difficultyId]
+        [req.user.id, name, seed, maxPlayers, aiCount, difficultyId, JSON.stringify(loadout.defs)]
       );
       await client.query(
         'insert into match_players (match_id, user_id, team_id) values ($1, $2, 0)',
@@ -122,7 +168,9 @@ export async function matchRoutes(app) {
       return rows[0];
     });
 
-    return reply.code(201).send({ match: toMatch(match) });
+    // `rejected` is reported rather than fatal: a host with one bad vehicle
+    // among five should still get a match, and should still be told.
+    return reply.code(201).send({ match: toMatch(match), customVehicles: loadout.summary });
   });
 
   /**

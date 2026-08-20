@@ -80,7 +80,7 @@ export const INPUT_DELAY_TURNS = 2;
  * which is what catches an *old* server that predates this file's check
  * entirely and so never rejects the query param at all.
  */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 /** A player silent this long is dropped so the rest of the match can continue. */
 const DROP_AFTER_MS = 15000;
 /**
@@ -117,7 +117,7 @@ const rooms = new Map();
  * playable, and they are worth checking without standing up a database and two
  * browsers to do it.
  */
-export function createRoom(matchId, seed, expectedPlayers) {
+export function createRoom(matchId, seed, expectedPlayers, customDefs = []) {
   // A missing or malformed roster count must not become an unsatisfiable
   // barrier: `players.size >= NaN` is false forever, which would leave the
   // match waiting forever with no indication why. Fall back to "just me", so
@@ -126,6 +126,14 @@ export function createRoom(matchId, seed, expectedPlayers) {
   return {
     matchId,
     seed,
+    /**
+     * The match's vehicle set, snapshotted from the host's loadout when the
+     * lobby was created (see routes/matches.js). Relayed verbatim in `welcome`
+     * so every peer resolves the same `defId` to the same vehicle — without it
+     * a custom def is a silent divergence, which is why custom vehicles were
+     * offline-only before this existed.
+     */
+    customDefs,
     /**
      * How many players the roster says to wait for. The turn clock must not
      * start until they are all here — see `maybeBegin`.
@@ -160,7 +168,7 @@ export function checkProtocolVersion(rawVersion) {
   return { ok: false, clientVersion: Number.isInteger(clientVersion) ? clientVersion : null };
 }
 
-function roomFor(matchId, seed, expectedPlayers) {
+function roomFor(matchId, seed, expectedPlayers, customDefs) {
   let room = rooms.get(matchId);
   if (!room) {
     // Diagnostic only: rooms are in-memory and per-process (see the module
@@ -170,7 +178,7 @@ function roomFor(matchId, seed, expectedPlayers) {
     // one process; it has no way to see the other room. This log is the only
     // trace of that ever left behind.
     console.log(`[match] new room for ${matchId}: seed=${seed} expectedPlayers=${expectedPlayers}`);
-    room = createRoom(matchId, seed, expectedPlayers);
+    room = createRoom(matchId, seed, expectedPlayers, customDefs);
     rooms.set(matchId, room);
   }
   return room;
@@ -396,7 +404,7 @@ async function handleMatchSocket(socket, req) {
 
   const matchId = req.params.id;
   const { rows } = await query(
-    `select m.seed, m.status, m.host_user_id, p.team_id,
+    `select m.seed, m.status, m.host_user_id, m.custom_defs, p.team_id,
             (select count(*) from match_players mp where mp.match_id = m.id) as roster_size
        from matches m
        join match_players p on p.match_id = m.id and p.user_id = $2
@@ -410,8 +418,11 @@ async function handleMatchSocket(socket, req) {
     socket.close(4003, 'not a member');
     return;
   }
-  const { seed, team_id: teamId, host_user_id: hostUserId, roster_size: rosterSize } = rows[0];
-  const room = roomFor(matchId, Number(seed), Number(rosterSize));
+  const {
+    seed, team_id: teamId, host_user_id: hostUserId, roster_size: rosterSize,
+    custom_defs: customDefs,
+  } = rows[0];
+  const room = roomFor(matchId, Number(seed), Number(rosterSize), customDefs ?? []);
 
   // A second socket for the same user replaces the first — a reload should
   // reclaim the seat rather than leave a ghost the match waits on forever.
@@ -435,6 +446,11 @@ async function handleMatchSocket(socket, req) {
     // and can refuse to proceed rather than trusting an unversioned peer.
     protocolVersion: PROTOCOL_VERSION,
     seed: room.seed,
+    // The match's vehicle set. Read from the room rather than this socket's
+    // own row so every peer is handed the same array even if the match row
+    // were somehow edited after the first player connected — the room is the
+    // snapshot, and it is written once.
+    customDefs: room.customDefs,
     teamId,
     userId: user.id,
     // Who supplies the snapshot when someone diverges. The host is simply the

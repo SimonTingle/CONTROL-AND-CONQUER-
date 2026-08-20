@@ -18,19 +18,72 @@
  */
 import { VEHICLE_CATALOG } from '../vehicles/catalog.js';
 import { STRUCTURE_CATALOG } from '../structures/structures.js';
+import { fnv1a64 } from '../core/fnv1a.js';
+import { deriveBounds, getPath } from './builderSchema.js';
+
+/** The editor's own slider ranges, made binding. See deriveBounds(). */
+const BOUNDS = deriveBounds();
 
 export const CUSTOM_ID_PREFIX = 'custom:';
 
 /** Save-format version, stored alongside the def. Bump on a breaking change. */
 export const DRAFT_SCHEMA_VERSION = 1;
 
-/** `My Tank Mk II` -> `custom:my-tank-mk-ii`. */
-export function customIdFor(name) {
-  const slug = String(name ?? '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  return CUSTOM_ID_PREFIX + slug;
+/**
+ * Keys that describe *which* vehicle this is rather than *what* it is, plus the
+ * runtime-only bookkeeping `loadCustomDefs` attaches. All excluded from the
+ * fingerprint, so renaming a vehicle does not change its identity and two
+ * authors who build the same thing under different names converge on one id.
+ */
+const IDENTITY_KEYS = ['id', 'name', 'description', 'draft', 'saveId', 'saveName'];
+
+/**
+ * `JSON.stringify` with object keys sorted at every depth, so two structurally
+ * identical defs serialise identically regardless of the order their keys were
+ * assigned in. Sound because defs are pure data — no functions, no THREE
+ * objects — which the round-trip test in tests/vehicle-def.test.mjs pins.
+ */
+export function canonicalJson(value) {
+  if (Array.isArray(value)) return '[' + value.map(canonicalJson).join(',') + ']';
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalJson(value[k])).join(',') + '}';
+  }
+  return JSON.stringify(value ?? null);
+}
+
+/** The canonical serialisation a def's id is derived from. */
+export function defFingerprint(def) {
+  const stats = {};
+  for (const key of Object.keys(def ?? {})) {
+    if (!IDENTITY_KEYS.includes(key)) stats[key] = def[key];
+  }
+  return canonicalJson(stats);
+}
+
+/**
+ * A vehicle's id, derived from its contents.
+ *
+ * Previously this slugged the name (`My Tank` -> `custom:my-tank`), which meant
+ * two accounts with entirely different vehicles both called "My Tank" produced
+ * the *same id for different defs*. Nothing caught that: only `defId` strings
+ * cross the wire, `snapshot.js` skips ids it cannot resolve without erroring,
+ * and `stateHash.js` hashes instance ids and positions rather than defs. Two
+ * peers would each simulate a different tank under one id — the exact silent
+ * divergence class this project has already fixed three times.
+ *
+ * Content-addressing removes the collision by construction and, as a side
+ * effect, makes the name a free-text label: call it whatever you like, and so
+ * can everyone else.
+ */
+export function customIdFor(def) {
+  return CUSTOM_ID_PREFIX + fnv1a64(defFingerprint(def));
+}
+
+/** Recompute `def.id` from its contents, in place. Returns the same def. */
+export function syncId(def) {
+  def.id = customIdFor(def);
+  return def;
 }
 
 export const isCustomId = (id) => typeof id === 'string' && id.startsWith(CUSTOM_ID_PREFIX);
@@ -41,8 +94,10 @@ export const isCustomId = (id) => typeof id === 'string' && id.startsWith(CUSTOM
  * and every slider starts somewhere sensible.
  */
 export function blankDef(name = 'New Vehicle') {
-  return {
-    id: customIdFor(name),
+  // `id` is filled in by syncId() at the end — it is derived from everything
+  // below it, so it cannot be written here.
+  const def = {
+    id: '',
     name,
     description: 'Built in the vehicle editor.',
     role: 'unit',
@@ -122,6 +177,7 @@ export function blankDef(name = 'New Vehicle') {
     colors: { hull: '#4b4f46', cabin: '#292d28', wheel: '#161616', trim: '#8f9a86' },
     previewDistance: 16,
   };
+  return syncId(def);
 }
 
 /**
@@ -130,12 +186,19 @@ export function blankDef(name = 'New Vehicle') {
  */
 export const cloneDef = (def) => JSON.parse(JSON.stringify(def));
 
-/** Copy a built-in (or any) vehicle into an editable custom one. */
+/**
+ * Copy a built-in (or any) vehicle into an editable custom one.
+ *
+ * The runtime-only keys are stripped rather than carried: a fork is a new
+ * vehicle, not a second handle on the save row the original came from.
+ */
 export function forkDef(def, name) {
   const copy = cloneDef(def);
   copy.name = name ?? `${def.name} (copy)`;
-  copy.id = customIdFor(copy.name);
-  return copy;
+  delete copy.draft;
+  delete copy.saveId;
+  delete copy.saveName;
+  return syncId(copy);
 }
 
 const REQUIRED_DIMS = [
@@ -153,6 +216,30 @@ const REQUIRED_LIGHTS = ['headlampInset', 'headlampDrop', 'beamColor', 'tailColo
 
 const isPositive = (v) => Number.isFinite(v) && v > 0;
 
+/** Paths the mesh builder only reads when the matching shape flag is on. */
+const TURRET_ONLY_PATHS = [
+  'dims.turretRadius', 'dims.turretHeight', 'dims.barrelRadius', 'dims.barrelLength',
+];
+const TRACKED_ONLY_PATHS = [
+  'dims.roadWheels', 'dims.trackWidth', 'dims.trackThickness', 'pivotRate',
+];
+
+/**
+ * Is this bounded path inert for this def?
+ *
+ * Range-checking a field nothing reads would be a validator stricter than the
+ * engine — the failure mode this file's axle rules already exist to avoid. Two
+ * shipped vehicles prove it is not hypothetical: `base-station` and
+ * `crystal-harvester` both carry `dims.turretRadius: 0` and friends, well under
+ * the editor's minimum, because they have no turret to size. Both render fine,
+ * and forking either one must stay valid.
+ */
+function isDormantPath(path, def) {
+  if (!def.shape?.turret && TURRET_ONLY_PATHS.includes(path)) return true;
+  if (!def.shape?.tracked && TRACKED_ONLY_PATHS.includes(path)) return true;
+  return false;
+}
+
 /**
  * @returns {string[]} human-readable problems; empty means the def is safe to
  *   hand to `buildVehicleMesh` and to save.
@@ -163,8 +250,14 @@ export function validateDef(def, { catalog = VEHICLE_CATALOG } = {}) {
 
   if (!def.id || typeof def.id !== 'string') problems.push('Needs an id.');
   else if (!isCustomId(def.id)) problems.push(`Custom vehicle ids must start with "${CUSTOM_ID_PREFIX}".`);
-  else if (def.id === CUSTOM_ID_PREFIX) problems.push('Name produces an empty id.');
-  else if (catalog.some((d) => d.id === def.id)) problems.push(`Id "${def.id}" is already taken.`);
+  // The id is a content address, so it has to actually address this content.
+  // A def whose id does not match its own stats is either hand-edited or was
+  // written by an older build; either way it must not be trusted, because the
+  // whole point of the scheme is that one id means one vehicle everywhere.
+  else if (def.id !== customIdFor(def)) problems.push('Id does not match the vehicle — re-save it.');
+  // Now that ids are derived, a match means the two defs are byte-identical
+  // rather than merely same-named: a real duplicate, not a name clash.
+  else if (catalog.some((d) => d.id === def.id)) problems.push('An identical vehicle already exists.');
 
   if (!def.name || typeof def.name !== 'string') problems.push('Needs a name.');
 
@@ -282,12 +375,32 @@ export function validateDef(def, { catalog = VEHICLE_CATALOG } = {}) {
     // no tags can be built by a player but never by an AI.
     problems.push('A buildable vehicle needs at least one tag.');
   }
+  // Harvesting needs `capacity`, `fillRate` and `unloadRate`, which harvesterAI
+  // reads with no defaults and the editor cannot author. Without this, the
+  // combination the Production panel actively offers — built at the harvester
+  // facility, tagged 'economy' — produces a vehicle aiCommander buys as part of
+  // its economy and which can then never harvest anything.
+  if (def.tags?.includes('economy') && def.capacity === undefined) {
+    problems.push('An economy vehicle needs harvesting stats, which the editor cannot set yet — use another role.');
+  }
 
   for (const key of ['speed', 'reverseSpeed', 'acceleration', 'braking', 'maxHealth', 'sightRadius']) {
     if (!isPositive(def[key])) problems.push(`${key} must be a positive number.`);
   }
   if (!Number.isFinite(def.maxClimbGrade) || def.maxClimbGrade <= 0) {
     problems.push('maxClimbGrade must be a positive number.');
+  }
+
+  // Every slider's own range, now binding rather than advisory.
+  for (const [path, { min, max }] of Object.entries(BOUNDS)) {
+    if (isDormantPath(path, def)) continue;
+    const value = getPath(def, path);
+    if (value === undefined || value === null) continue;
+    if (!Number.isFinite(value)) {
+      problems.push(`${path} must be a number.`);
+    } else if (value < min || value > max) {
+      problems.push(`${path} must be between ${min} and ${max}.`);
+    }
   }
 
   return problems;
