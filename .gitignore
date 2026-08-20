@@ -6,3 +6,9 @@ dist
 .env
 .env.local
 .env.*.local
+
+# Bash
+*.sh
+
+#itchio
+*.zip
