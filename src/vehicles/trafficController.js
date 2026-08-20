@@ -2,9 +2,13 @@
  * Two independent checks over the same vehicle-pair distances, once a tick:
  *
  * - Avoidance: an autonomous vehicle (not the one the player is currently
- *   driving, and only while it actually has somewhere to be) holds in place
- *   rather than push through anything genuinely ahead of it — moving or not.
- *   A forward cone, not a "does the other vehicle also have an order" gate:
+ *   driving, and only while it actually has somewhere to be) yields to
+ *   anything genuinely ahead of it — moving or not — by steering around it
+ *   rather than pushing through. `computeAvoidOffset` nudges the vehicle's
+ *   steering aim point sideways (vehicleController.js's `driveToTarget`
+ *   consumes it via `steeringAimPoint`); arrival distance is always measured
+ *   against the real target, so a swerve can never cause a false arrival. A
+ *   forward cone, not a "does the other vehicle also have an order" gate:
  *   the earlier version treated any arrived/parked vehicle as invisible to
  *   avoidance (`arrive()` nulls `target`, so a vehicle stopped on purpose
  *   dropped out of the check the instant it stopped) and got driven into.
@@ -13,7 +17,8 @@
  *   briefly stuck. The player's own vehicle never yields — ramming one is
  *   still possible, on purpose. Yielding that drags on past a short
  *   threshold triggers a reverse (vehicleController.js's `beginReverse`)
- *   rather than freezing indefinitely against a permanently parked obstacle.
+ *   rather than circling the same obstacle indefinitely — the same escape
+ *   this always had, now the backstop for swerves that can't clear it too.
  * - Collision: any pair that actually makes contact — a much tighter radius
  *   than avoidance — takes a damage hit scaled by how fast they were closing
  *   (a slow jostle in a queue does nothing; a real ram still hurts) and a
@@ -30,6 +35,7 @@
 
 const AVOIDANCE_MARGIN = 6; // world units of clearance beyond both hulls before yielding
 const AVOIDANCE_CONE_HALF_ANGLE = Math.PI / 3; // 60° either side of heading — a 120° forward arc
+const AVOIDANCE_LATERAL_SCALE = 0.6; // fraction of (a's + b's) hull radius used as the aim-point nudge
 const COLLISION_MARGIN = 0.5; // world units of tolerance before overlap counts as a hit
 const COLLISION_COOLDOWN = 1.5; // seconds a pair is immune to re-damage after a hit
 const MIN_IMPACT_SPEED = 1.5; // u/s of closing speed below which contact is harmless jostling
@@ -64,6 +70,31 @@ function isAhead(observer, target) {
 }
 
 /**
+ * Lateral nudge for `a`'s steering aim point that clears `b`, rather than the
+ * flat stop `yielding` used to mean on its own. Which side to swerve to is a
+ * pure function of relative position (the sign of forward x bearing-to-b);
+ * dead on the centerline has no side to prefer from that alone, so it falls
+ * back to the same `createdAt` tie-break the head-on branch already uses,
+ * keeping every branch of "which way" a function of simulated state, never
+ * arbitrary. Magnitude scales with both hull radii and fades toward the edge
+ * of the avoidance cone, so a glancing sighting barely nudges the aim point
+ * while a dead-ahead one gets the full swerve.
+ */
+export function computeAvoidOffset(a, b) {
+  const dx = b.group.position.x - a.group.position.x;
+  const dz = b.group.position.z - a.group.position.z;
+  const fx = Math.cos(a.heading);
+  const fz = Math.sin(a.heading);
+  const cross = fx * dz - fz * dx;
+  const side = Math.abs(cross) > 1e-6 ? Math.sign(cross) : (a.createdAt <= b.createdAt ? 1 : -1);
+  const bearingWeight = 1 - Math.abs(bearingDelta(a, b, a.heading)) / AVOIDANCE_CONE_HALF_ANGLE;
+  const magnitude =
+    (hullRadius(a.def) + hullRadius(b.def)) * AVOIDANCE_LATERAL_SCALE * Math.max(0.2, bearingWeight);
+  // Right-perpendicular of a's heading (fz, -fx), scaled by side and magnitude.
+  return { x: fz * side * magnitude, z: -fx * side * magnitude };
+}
+
+/**
  * Exported so harvesterAI and repairController can guard their own
  * `beginReverse` calls with it — reversing is "drive blind", and nothing
  * about backing away from one obstacle should walk it straight into another.
@@ -89,7 +120,10 @@ export class TrafficController {
   update(dt) {
     const instances = this.vehicles.instances;
 
-    for (const inst of instances) inst.yielding = false;
+    for (const inst of instances) {
+      inst.yielding = false;
+      inst.avoidOffset = null;
+    }
     this._tickCooldowns(dt);
 
     for (let i = 0; i < instances.length; i++) {
@@ -138,12 +172,17 @@ export class TrafficController {
     if (aSeesB && bSeesA) {
       // True head-on: both see the other as blocking. Yielding both would
       // deadlock forever, so break the tie deterministically.
-      if (a.createdAt <= b.createdAt) a.yielding = true;
-      else b.yielding = true;
+      if (a.createdAt <= b.createdAt) this._yieldTo(a, b);
+      else this._yieldTo(b, a);
       return;
     }
-    if (aSeesB) a.yielding = true;
-    if (bSeesA) b.yielding = true;
+    if (aSeesB) this._yieldTo(a, b);
+    if (bSeesA) this._yieldTo(b, a);
+  }
+
+  _yieldTo(inst, obstacle) {
+    inst.yielding = true;
+    inst.avoidOffset = computeAvoidOffset(inst, obstacle);
   }
 
   _resolveCollision(a, b, dist, hitRadius) {
