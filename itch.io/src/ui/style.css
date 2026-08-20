@@ -1,0 +1,1573 @@
+:root {
+  --panel-bg: rgba(14, 19, 26, 0.86);
+  --panel-border: rgba(120, 190, 220, 0.18);
+  --text: #dbe6ef;
+  --text-dim: #8ea3b6;
+  --accent: #4fd1c5;
+  --panel-width: 320px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #05080c;
+  color: var(--text);
+  font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  /* #viewport already refuses pinch/scroll gestures on the canvas so they
+     don't fight MapControls' own touch handling (see that rule's comment).
+     This extends the same refusal to the rest of the page — empty chrome
+     margins, drawer backgrounds — so a pinch that happens to start a few
+     pixels off the canvas (e.g. near a toggle button) still can't reach the
+     browser's native page zoom. Combined with the viewport meta's
+     maximum-scale/user-scalable, since Safari's history of honouring each on
+     its own is inconsistent enough to want both. Scrollable regions
+     (#panel, #vehicle-panel, the save-field suggestion list, the builder's
+     side columns) opt back into vertical panning explicitly below — an
+     ancestor's touch-action restricts descendants by default in every
+     engine, so without that override this would also kill their scrolling. */
+  touch-action: none;
+}
+
+#viewport {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+}
+
+/* Armed to pick a bloom: the pointer says so, since the next click is special. */
+#viewport.crosshair-mode { cursor: crosshair; }
+
+/* ---- hamburger ---- */
+
+#menu-toggle {
+  position: fixed;
+  /* calc(...) rather than a flat 16px: env() resolves to 0px with no
+     notch/home-indicator, so this is additive-only and changes nothing on
+     a device this already looked right on — but keeps this corner clear
+     of one that isn't. */
+  top: calc(16px + env(safe-area-inset-top));
+  left: calc(16px + env(safe-area-inset-left));
+  z-index: 20;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+#menu-toggle:hover { border-color: rgba(120, 190, 220, 0.45); }
+
+#menu-toggle span {
+  display: block;
+  width: 20px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--text);
+  transition: transform 0.22s ease, opacity 0.18s ease;
+}
+
+#menu-toggle.active span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+#menu-toggle.active span:nth-child(2) { opacity: 0; }
+#menu-toggle.active span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
+
+/* ---- drawer ---- */
+
+#panel {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 15;
+  width: var(--panel-width);
+  height: 100%;
+  padding: 76px 0 20px;
+  overflow-y: auto;
+  /* Re-opts into vertical touch scrolling — html/body's touch-action: none
+     would otherwise silence it, since an ancestor's touch-action restricts
+     descendant gesture handling by default. pan-y still excludes pinch-zoom,
+     unlike `manipulation`, which would let it back in. */
+  touch-action: pan-y;
+  overscroll-behavior: contain;
+  background: var(--panel-bg);
+  backdrop-filter: blur(14px);
+  border-right: 1px solid var(--panel-border);
+  transform: translateX(-100%);
+  transition: transform 0.26s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+#panel.open { transform: translateX(0); }
+
+#panel header { padding: 0 18px 14px; }
+
+#panel h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+#hud-stats {
+  margin: 6px 0 0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  white-space: pre-line;
+}
+
+.group { border-top: 1px solid rgba(255, 255, 255, 0.06); }
+
+.group > summary {
+  padding: 11px 18px;
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+.group > summary::-webkit-details-marker { display: none; }
+.group > summary::before { content: '▸ '; color: var(--accent); }
+.group[open] > summary::before { content: '▾ '; }
+.group > summary:hover { color: var(--text); }
+
+.control { padding: 4px 18px 9px; }
+
+.control label {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 3px;
+}
+
+.readout {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.control-toggle, .control-color { display: flex; align-items: center; gap: 10px; }
+.control-toggle label, .control-color label { flex: 1; margin: 0; }
+
+input[type='range'] {
+  width: 100%;
+  height: 18px;
+  margin: 0;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+
+input[type='range']::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 13px;
+  height: 13px;
+  margin-top: -5px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+input[type='range']::-moz-range-track {
+  height: 3px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+input[type='range']::-moz-range-thumb {
+  width: 13px;
+  height: 13px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+input[type='checkbox'] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+
+input[type='color'] {
+  width: 38px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  background: none;
+  cursor: pointer;
+}
+
+button.action {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: rgba(79, 209, 197, 0.12);
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button.action:hover { background: rgba(79, 209, 197, 0.22); }
+
+/* ---- save-field: Save/Load's autocomplete name field ---- */
+
+/* Save/Load buttons stack full-width below the input rather than sitting
+   beside it — every other button in this drawer is already width:100%, and at
+   the panel's fixed 320px there's no room to keep two real touch targets next
+   to a usable text field. */
+.control-save-field { display: flex; flex-direction: column; gap: 6px; }
+
+.save-field-input-wrap { position: relative; }
+
+.control-save-field input[type='text'] {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font: inherit;
+}
+
+.control-save-field input[type='text']:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* Built by hand rather than a native <datalist> — iOS Safari has never
+   reliably rendered a datalist's dropdown, and "pick an existing save from a
+   list" needs to work on every platform, not just desktop. */
+.save-field-suggestions {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 5;
+  max-height: 160px;
+  overflow-y: auto;
+  touch-action: pan-y; /* see #panel's comment */
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(14px);
+}
+
+.save-field-suggestions.hidden { display: none; }
+
+.save-field-suggestion {
+  min-height: 44px; /* real touch target, not just a dense list row */
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.save-field-suggestion:hover { background: rgba(79, 209, 197, 0.14); }
+.save-field-suggestion + .save-field-suggestion { border-top: 1px solid rgba(255, 255, 255, 0.05); }
+
+/* Right-click / long-press export menu. Overlays the suggestion list (higher
+   z-index), anchored under the field, styled to match it. */
+.save-field-export-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 6;
+  min-width: 160px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(14px);
+  overflow: hidden;
+}
+
+.save-field-export-item {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.save-field-export-item:hover { background: rgba(79, 209, 197, 0.14); }
+.save-field-export-item + .save-field-export-item { border-top: 1px solid rgba(255, 255, 255, 0.05); }
+
+.control-save-field button.save-field-disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.control-save-field button.save-field-disabled:hover { background: rgba(79, 209, 197, 0.12); }
+
+/* ---- toast: transient, non-blocking messages (autosave, etc.) ---- */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  z-index: 40; /* above every overlay screen — a background event still deserves to be seen */
+  transform: translateX(-50%);
+  padding: 10px 18px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(14px);
+  color: var(--text);
+  font-size: 12px;
+  pointer-events: none; /* never blocks a click the way window.alert would */
+  opacity: 1;
+  transition: opacity 0.4s ease;
+}
+
+.toast.hidden { opacity: 0; }
+
+/* The toast itself is pointer-events: none so a background message can never
+   swallow a click. An action button is the deliberate exception — it exists to
+   be clicked — so it opts back in, and opts out again while hidden so a faded
+   toast cannot be hit by an invisible target. */
+.toast-action {
+  margin-left: 12px;
+  padding: 4px 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.toast-action:hover { background: rgba(255, 255, 255, 0.12); }
+
+.toast.hidden .toast-action { pointer-events: none; }
+
+/* ---- vehicle picker (mirrors the settings hamburger/drawer, right side) ---- */
+
+#vehicle-toggle {
+  position: fixed;
+  /* calc(...) rather than a flat 16px: env() resolves to 0px with no
+     notch/home-indicator, so this is additive-only and changes nothing on
+     a device this already looked right on — but keeps this corner clear
+     of one that isn't. */
+  top: calc(16px + env(safe-area-inset-top));
+  right: calc(16px + env(safe-area-inset-right));
+  z-index: 20;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+#vehicle-toggle:hover { border-color: rgba(120, 190, 220, 0.45); }
+
+#vehicle-toggle span {
+  display: block;
+  width: 20px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--text);
+  transition: transform 0.22s ease, opacity 0.18s ease;
+}
+
+#vehicle-toggle.active span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+#vehicle-toggle.active span:nth-child(2) { opacity: 0; }
+#vehicle-toggle.active span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
+
+#vehicle-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 15;
+  width: var(--panel-width);
+  height: 100%;
+  padding: 76px 18px 20px;
+  overflow-y: auto;
+  touch-action: pan-y; /* see #panel's comment */
+  overscroll-behavior: contain;
+  background: var(--panel-bg);
+  backdrop-filter: blur(14px);
+  border-left: 1px solid var(--panel-border);
+  transform: translateX(100%);
+  transition: transform 0.26s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+#vehicle-panel.open { transform: translateX(0); }
+
+#vehicle-panel header { padding-bottom: 14px; }
+
+#vehicle-panel h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+#vehicle-panel .hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+#vehicle-grid {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Uniform square cells, reflowing on their own: 1 column on a narrow panel,
+   2, 3, etc. as it widens — no hardcoded breakpoint per column count. */
+.vehicle-section-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 10px;
+}
+
+.vehicle-card {
+  position: relative;
+  aspect-ratio: 1;
+  padding: 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.vehicle-card:hover {
+  border-color: var(--accent);
+  background: rgba(79, 209, 197, 0.08);
+}
+
+/* Fills the square so the preview centers inside it rather than being framed
+   for a wide rectangle and then squashed by CSS — createPreview() renders at
+   a matching square resolution. */
+.vehicle-card canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Name (and, on hover, stats/lock reason) live inside the square as a bottom
+   overlay rather than pushing the card taller — the square shape is the
+   point, so text has to fit inside it, not stack below it. */
+.vehicle-card-caption {
+  position: absolute;
+  inset: auto 0 0 0;
+  padding: 3px 5px 4px;
+  background: linear-gradient(to top, rgba(5, 8, 12, 0.88), rgba(5, 8, 12, 0));
+  pointer-events: none;
+}
+
+.vehicle-card-label {
+  display: block;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vehicle-card-stats {
+  display: block;
+  font-size: 8px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-height: 0;
+  opacity: 0;
+  transition: max-height 0.15s ease, opacity 0.15s ease;
+}
+
+.vehicle-card:hover .vehicle-card-stats {
+  max-height: 12px;
+  opacity: 1;
+}
+
+/* Active cards show their live stat line at all times — it's the point of the
+   card, not a hover detail like the spawn cards' fixed spec. */
+.vehicle-card-active .vehicle-card-stats {
+  max-height: 12px;
+  opacity: 1;
+}
+
+/* ---- locked vehicle cards ---- */
+
+.vehicle-card.locked {
+  cursor: default;
+  opacity: 0.45;
+  filter: grayscale(0.7);
+}
+
+/* Hover feedback would imply it can be clicked. */
+.vehicle-card.locked:hover {
+  border-color: var(--panel-border);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.vehicle-card-lock {
+  display: block;
+  font-size: 8px;
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vehicle-section {
+  margin-bottom: 24px;
+}
+
+.vehicle-section-title {
+  margin: 0 0 10px 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.vehicle-card-active {
+  opacity: 0.9;
+}
+
+.vehicle-card-active:hover {
+  border-color: var(--accent);
+  background: rgba(79, 209, 197, 0.12);
+}
+
+/* ---- HUD ---- */
+
+#hud {
+  position: fixed;
+  /* calc(...) rather than a flat 16px: env() resolves to 0px with no
+     notch/home-indicator, so this is additive-only and changes nothing on
+     a device this already looked right on — but keeps this corner clear
+     of one that isn't. */
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  left: calc(16px + env(safe-area-inset-left));
+  z-index: 15;
+  width: 260px;
+  padding: 12px 14px;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(14px);
+  pointer-events: none;
+}
+
+#hud.hidden { display: none; }
+
+/* ---- perf HUD — docs/performance-optimization-plan.md Phase 0 ---- */
+
+#perf-hud {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 50;
+  margin: 0;
+  padding: 6px 9px;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  color: #7fffb0;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 6px;
+  white-space: pre;
+  pointer-events: none;
+}
+
+#perf-hud.hidden { display: none; }
+
+.hud-name {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.hud-health {
+  position: relative;
+  height: 10px;
+  margin: 8px 0 4px;
+  border: 1px solid var(--panel-border);
+  border-radius: 3px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+/* Dotted rather than solid: repeating hard-stop gradient makes the bar read as
+   discrete cells, so a partial bar is countable at a glance. */
+.hud-health-fill {
+  height: 100%;
+  background: repeating-linear-gradient(
+    90deg,
+    #46e08a 0 5px,
+    transparent 5px 8px
+  );
+  /* Short enough that a hit reads as immediate — the bar is updated every
+     frame now, so a longer ease would smear several hits into one motion. */
+  transition: width 0.12s linear;
+}
+
+/* Critically damaged: the same 30% threshold at which an unattended vehicle
+   takes itself off to a repair bay, so the colour and the behaviour agree. */
+.hud-health-fill.hud-health-critical {
+  background: repeating-linear-gradient(
+    90deg,
+    #ff5a5a 0 5px,
+    transparent 5px 8px
+  );
+}
+
+.hud-line {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.hud-line-done { color: var(--accent); }
+
+.hud-discovery {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.hud-discovery.hidden { display: none; }
+
+.hud-economy.hidden,
+.hud-selection.hidden,
+.hud-load.hidden { display: none; }
+
+/* Credits sit above the selection, since they survive having nothing selected. */
+.hud-economy {
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.hud-credits {
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: #f0c65a;
+  text-shadow: 0 0 10px rgba(240, 198, 90, 0.35);
+}
+
+.hud-load { margin-top: 6px; }
+
+.hud-load-track {
+  height: 8px;
+  margin-bottom: 3px;
+  border: 1px solid var(--panel-border);
+  border-radius: 3px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.hud-load-fill {
+  height: 100%;
+  background: repeating-linear-gradient(90deg, #7ce8ff 0 6px, transparent 6px 9px);
+  /* Longer than the half-second stats tick that feeds it, so the bar lerps
+     between samples instead of stepping. */
+  transition: width 0.35s ease;
+}
+
+.hud-discovery-value {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+/* ---- radial command menu ---- */
+
+/* A zero-size anchor translated to the vehicle's projected screen position;
+   everything inside is placed relative to that point. pointer-events is off so
+   the canvas underneath stays draggable — only the buttons take clicks. */
+#radial-menu {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 25;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+#radial-menu.hidden { display: none; }
+
+.rm-ring {
+  position: absolute;
+  width: 196px;
+  height: 196px;
+  margin: -98px 0 0 -98px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(79, 209, 197, 0.65);
+  background: radial-gradient(circle, rgba(79, 209, 197, 0.05) 55%, rgba(79, 209, 197, 0.16) 100%);
+  box-shadow: 0 0 22px rgba(79, 209, 197, 0.4), inset 0 0 28px rgba(79, 209, 197, 0.22);
+  animation: rm-open 0.18s ease-out;
+}
+
+@keyframes rm-open {
+  from { transform: scale(0.6); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+.rm-title {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+  text-shadow: 0 0 8px rgba(79, 209, 197, 0.7);
+  white-space: nowrap;
+}
+
+.rm-item {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px 14px;
+  border: 1px solid rgba(79, 209, 197, 0.75);
+  border-radius: 999px;
+  background: rgba(8, 24, 28, 0.82);
+  backdrop-filter: blur(6px);
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  text-shadow: 0 0 6px rgba(79, 209, 197, 0.7);
+  box-shadow: 0 0 12px rgba(79, 209, 197, 0.3);
+  transition: background 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.rm-item:hover:not(.disabled) {
+  background: rgba(79, 209, 197, 0.22);
+  border-color: var(--accent);
+  box-shadow: 0 0 20px rgba(79, 209, 197, 0.55);
+}
+
+.rm-item.disabled {
+  cursor: default;
+  opacity: 0.5;
+  border-color: rgba(142, 163, 182, 0.35);
+  background: rgba(14, 19, 26, 0.8);
+  color: var(--text-dim);
+  text-shadow: none;
+  box-shadow: none;
+}
+
+.rm-sub {
+  display: none;
+  font-size: 9px;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+  text-shadow: none;
+}
+
+/* Desktop: show hints on hover */
+.rm-item:hover:not(.disabled) .rm-sub {
+  display: block;
+}
+
+/* Mobile: show hints when user holds finger on button */
+.rm-item.hint-active .rm-sub {
+  display: block;
+}
+
+/* ---- difficulty select ---- */
+
+#difficulty {
+  position: fixed;
+  inset: 0;
+  z-index: 31; /* above the loading screen, which fades out behind it */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(5, 8, 12, 0.94);
+  backdrop-filter: blur(6px);
+  transition: opacity 0.35s ease;
+}
+
+#difficulty.hidden { opacity: 0; pointer-events: none; }
+
+.difficulty-panel {
+  width: 100%;
+  max-width: 720px;
+  text-align: center;
+}
+
+.difficulty-panel h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.difficulty-panel .hint {
+  margin: 10px auto 24px;
+  max-width: 460px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.difficulty-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.difficulty-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 18px 14px;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.difficulty-card:hover {
+  border-color: var(--accent);
+  background: rgba(79, 209, 197, 0.08);
+}
+
+.difficulty-card-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.difficulty-card-target {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+.difficulty-card-blurb {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+@media (max-width: 620px) {
+  .difficulty-grid { grid-template-columns: 1fr; }
+}
+
+.difficulty-card.selected {
+  border-color: var(--accent);
+  background: rgba(79, 209, 197, 0.12);
+}
+
+/* ---- portal (landing screen) ---- */
+
+/* The lobby is the same kind of overlay as the portal and deliberately shares
+   its chrome — one place to change how a full-screen screen looks. */
+#portal, #lobby {
+  position: fixed;
+  inset: 0;
+  z-index: 32; /* above the difficulty/AI-difficulty screens it routes to */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 24px;
+  transition: opacity 0.35s ease;
+}
+
+#lobby {
+  justify-content: center;
+  background: rgba(5, 8, 12, 0.94);
+  backdrop-filter: blur(6px);
+}
+
+/* landscape-game-photo.png is faded to black across its lower third by
+   design — the button row below lands there and needs no extra darkening
+   of its own. The gradient only has to cover the upper two thirds, where
+   the title sits directly on open sky/terrain. */
+#portal {
+  justify-content: flex-start;
+  background:
+    linear-gradient(to bottom, rgba(5, 8, 12, 0.6) 0%, rgba(5, 8, 12, 0.2) 45%, rgba(5, 8, 12, 0) 62%),
+    url('/landscape-game-photo.png') center / cover no-repeat;
+}
+
+#portal.hidden, #lobby.hidden { opacity: 0; pointer-events: none; }
+
+.portal-panel {
+  width: 100%;
+  max-width: 760px;
+  margin-top: 9vh;
+  text-align: center;
+}
+
+/* Empty (zero height) whenever there's no backend configured —
+   renderAccountBar() leaves it childless in that case, so it collapses to
+   nothing rather than leaving a gap. In normal document flow (not absolutely
+   positioned) so it can't clip off-screen on short viewports. */
+.portal-account-bar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 16px;
+}
+
+.portal-account-btn {
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+  background: rgba(8, 12, 17, 0.7);
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.portal-account-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.portal-panel h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.portal-panel .hint {
+  margin: 10px auto 24px;
+  max-width: 460px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* Sits directly on #portal (not inside .portal-panel) so it can be pinned to
+   the image's black lower third independently of where the title lands. */
+.portal-button-row {
+  position: absolute;
+  left: 50%;
+  bottom: 6%;
+  transform: translateX(-50%);
+  width: min(94vw, 920px);
+  display: flex;
+  gap: 12px;
+}
+
+.portal-mode-btn {
+  flex: 1 1 0;
+  padding: 14px 10px;
+  border: 1px solid rgba(79, 209, 197, 0.75);
+  border-radius: 8px;
+  background: rgba(8, 12, 17, 0.55);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  text-shadow: 0 0 6px rgba(79, 209, 197, 0.7);
+  box-shadow: 0 0 12px rgba(79, 209, 197, 0.3);
+  cursor: pointer;
+  transition: box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.portal-mode-btn:hover {
+  background: rgba(79, 209, 197, 0.12);
+  box-shadow: 0 0 20px rgba(79, 209, 197, 0.55);
+}
+
+/* Same styling as the rest of the row today — a hook to give this button its
+   own look later without touching the shared .portal-mode-btn rule. */
+.god-mode-btn {}
+
+@media (max-width: 620px) {
+  .portal-button-row { flex-wrap: wrap; bottom: 4%; }
+  .portal-mode-btn { flex: 1 1 40%; }
+}
+
+.portal-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 22px 16px;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.portal-card:hover {
+  border-color: var(--accent);
+  background: rgba(79, 209, 197, 0.08);
+}
+
+.portal-card-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.portal-card-blurb {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.portal-back {
+  margin: 0 auto;
+  max-width: 160px;
+  text-align: center;
+  align-items: center;
+}
+
+/* ---- match end (victory / defeat) ---- */
+
+#match-end {
+  position: fixed;
+  inset: 0;
+  z-index: 33; /* above every setup screen — nothing outranks the result */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(5, 8, 12, 0.94);
+  backdrop-filter: blur(6px);
+  transition: opacity 0.35s ease;
+}
+
+#match-end.hidden { opacity: 0; pointer-events: none; }
+
+.match-end-panel { max-width: 620px; }
+
+.match-end-win { color: #39ff6a !important; }
+.match-end-lose { color: #ff5a5a !important; }
+
+.match-summary {
+  width: 100%;
+  margin: 20px 0 24px;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.match-summary th {
+  text-align: right;
+  padding: 6px 10px;
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.match-summary th:first-child,
+.match-summary td:first-child { text-align: left; }
+
+.match-summary td {
+  text-align: right;
+  padding: 7px 10px;
+  color: var(--text);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+/* An eliminated team's row reads as history, not standings. */
+.match-summary tr.defeated td { opacity: 0.45; }
+
+/* ---- AI difficulty select ---- */
+
+#ai-difficulty {
+  position: fixed;
+  inset: 0;
+  z-index: 31;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(5, 8, 12, 0.94);
+  backdrop-filter: blur(6px);
+  transition: opacity 0.35s ease;
+}
+
+#ai-difficulty.hidden { opacity: 0; pointer-events: none; }
+
+.ai-difficulty-grid { grid-template-columns: repeat(4, 1fr); }
+
+@media (max-width: 780px) {
+  .ai-difficulty-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+.ai-difficulty-delay {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: center;
+  margin: 20px auto 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.ai-difficulty-delay .readout {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  min-width: 34px;
+}
+
+.ai-difficulty-note {
+  margin-top: 16px !important;
+}
+
+.ai-difficulty-start {
+  margin: 4px auto 0;
+  max-width: 220px;
+  align-items: center;
+  text-align: center;
+  border-color: var(--accent);
+}
+
+/* ---- loading ---- */
+
+#loading {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #05080c;
+  color: var(--text-dim);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  transition: opacity 0.5s ease;
+}
+
+#loading.hidden { opacity: 0; pointer-events: none; }
+
+/* ---- auth screen ---------------------------------------------------- */
+/* Same full-screen overlay treatment as #portal, so signing in reads as
+   part of the same flow rather than a separate dialog system. */
+
+#auth-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 33; /* above #portal, since it can be opened from in front of it */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(5, 8, 12, 0.94);
+  backdrop-filter: blur(6px);
+  transition: opacity 0.35s ease;
+}
+
+#auth-screen.hidden { opacity: 0; pointer-events: none; }
+
+.auth-panel { max-width: 380px; }
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  text-align: left;
+}
+
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.auth-field[hidden] { display: none; }
+
+.auth-field input {
+  padding: 9px 11px;
+  font: inherit;
+  font-size: 13px;
+  text-transform: none;
+  letter-spacing: normal;
+  color: #dce8f2;
+  background: rgba(8, 12, 17, 0.9);
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+}
+
+.auth-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.auth-error {
+  margin: 0;
+  font-size: 12px;
+  color: #ff8a7a;
+}
+
+.auth-error[hidden] { display: none; }
+
+/* The success/confirmation counterpart to .auth-error — "check your email",
+   "password changed" — deliberately not red, and not role="alert" in the
+   markup, since neither is a failure. */
+.auth-status {
+  margin: 0;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.auth-status[hidden] { display: none; }
+
+.auth-submit {
+  margin-top: 4px;
+  padding: 10px;
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #04231f;
+  background: var(--accent);
+  border: 0;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.auth-submit:disabled { opacity: 0.55; cursor: default; }
+
+.auth-toggle,
+.auth-skip {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  padding: 4px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.auth-toggle:hover,
+.auth-skip:hover { color: var(--accent); }
+
+/* Without this, `.hidden = true` in JS has no visible effect: the [hidden]
+   attribute and the .auth-toggle { display: block } rule above have equal
+   specificity, so whichever is declared later in the stylesheet wins — and
+   it was this one. forgotLink relies on real hiding to disappear outside
+   the login form. */
+.auth-toggle[hidden],
+.auth-skip[hidden] { display: none; }
+
+/* Visually quieter than the toggle — it's the way out, not a second action. */
+.auth-skip { font-size: 11px; opacity: 0.75; }
+
+/* ---- vehicle builder (God Mode) ---- */
+
+/* Above every setup screen: it is a tool, not a step in starting a match. */
+#builder {
+  position: fixed;
+  inset: 0;
+  z-index: 34;
+  display: flex;
+  flex-direction: column;
+  background: rgba(5, 8, 12, 0.97);
+}
+
+#builder.hidden { display: none; }
+
+.builder-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.builder-bar h1 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.builder-bar-spacer { flex: 1; }
+
+.builder-status { font-size: 11px; color: var(--text-dim); }
+.builder-status-bad { color: #ff8f6a; }
+
+.builder-btn {
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.builder-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+.builder-btn-primary {
+  color: #04231f;
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.builder-btn-primary:hover { color: #04231f; filter: brightness(1.1); }
+
+/* Fixed side columns, elastic middle — the preview should take the slack. */
+.builder-cols {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 220px 1fr 300px;
+  min-height: 0;
+}
+
+.builder-left, .builder-right {
+  overflow-y: auto;
+  touch-action: pan-y; /* see #panel's comment */
+  padding: 12px;
+}
+
+.builder-left { border-right: 1px solid var(--panel-border); }
+.builder-right { border-left: 1px solid var(--panel-border); }
+
+.builder-centre {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* The canvas is sized from this box's client rect, so it must not be zero. */
+.builder-stage { flex: 1; min-height: 0; position: relative; }
+.builder-stage canvas { display: block; width: 100%; height: 100%; }
+
+.builder-viewbar {
+  display: flex;
+  gap: 14px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--panel-border);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.builder-check { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+
+.builder-group { margin-bottom: 16px; }
+
+.builder-group h2 {
+  margin: 0 0 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+/* Drafts are unfinished by definition — quieter, but still reachable. */
+.builder-group-dim { opacity: 0.62; }
+
+.builder-empty { margin: 0; font-size: 11px; color: var(--text-dim); }
+
+.builder-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 8px;
+}
+
+.builder-row label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.builder-readout { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
+.builder-row input[type='range'] { width: 100%; }
+
+.builder-row input[type='text'],
+.builder-row select {
+  width: 100%;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+}
+
+.builder-card { display: flex; gap: 4px; margin-bottom: 4px; }
+
+.builder-card-open {
+  flex: 1;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.builder-card-open:hover { border-color: var(--accent); color: var(--accent); }
+
+.builder-card-del {
+  padding: 0 8px;
+  font: inherit;
+  color: var(--text-dim);
+  background: none;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.builder-card-del:hover { color: #ff8f6a; border-color: #ff8f6a; }
+
+/* Below this the three columns cannot all be useful at once; the preview
+   keeps the space and the panels scroll under it. */
+@media (max-width: 900px) {
+  .builder-cols { grid-template-columns: 1fr; grid-template-rows: auto 1fr auto; }
+  .builder-left, .builder-right { max-height: 30vh; border: none; }
+}
+
+/* ---- minimap ---- */
+
+/* Bottom-right: the only free corner. #hud owns bottom-left, both top corners
+   hold the drawer toggles, and toasts land bottom-centre. */
+#minimap {
+  position: fixed;
+  /* calc(...) rather than a flat 16px: env() resolves to 0px with no
+     notch/home-indicator, so this is additive-only and changes nothing on
+     a device this already looked right on — but keeps this corner clear
+     of one that isn't. */
+  right: calc(16px + env(safe-area-inset-right));
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  width: 200px;
+  height: 200px;
+  z-index: 15;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: rgba(6, 8, 11, 0.82);
+  backdrop-filter: blur(4px);
+  overflow: hidden;
+  /* Slides aside rather than being covered when the vehicle drawer opens —
+     the drawer is a 320px full-height panel along this same edge. */
+  transition: transform 0.25s ease, opacity 0.25s ease;
+}
+
+#minimap.hidden { opacity: 0; pointer-events: none; }
+
+#minimap canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+}
+
+/* Set by vehiclePicker.setOpen when the right-hand drawer opens. */
+body.drawer-open #minimap { transform: translateX(calc(-1 * var(--panel-width) + 8px)); }
+
+/* On a narrow screen a 200px map plus a 320px drawer leaves nothing; shrink
+   rather than shift, since there is nowhere to shift to. */
+@media (max-width: 720px) {
+  #minimap { width: 132px; height: 132px; }
+  body.drawer-open #minimap { transform: none; opacity: 0; pointer-events: none; }
+
+  /* Both drawers were a flat 320px at every viewport size — on a 360px-wide
+     phone that is most of the screen. min() rather than a second guessed
+     breakpoint: it scales correctly at any width under 720px instead of
+     assuming one particular phone, and 340px caps it back to roughly the
+     desktop size once there's room to spare (a large phone / small tablet in
+     this range). The minimap's open-drawer shift-aside distance already
+     reads this same variable (see body.drawer-open #minimap above the
+     720px query), so it follows with no separate change. */
+  :root { --panel-width: min(88vw, 340px); }
+}
+
+/* A tighter step for actual phone-portrait widths (roughly iPhone SE up to a
+   large Android phone) — 132px still crowds a 360-390px-wide screen. */
+@media (max-width: 480px) {
+  #minimap { width: 104px; height: 104px; }
+}
