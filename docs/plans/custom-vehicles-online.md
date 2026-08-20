@@ -186,12 +186,38 @@ restarting the API on the clean tree, and re-running: **it fails identically
 there.** A timing-sensitive assertion around the waiting reporter, unrelated to
 anything here.
 
+## Follow-up: the name wasn't actually showing (found after this shipped)
+
+The user reported that a typed vehicle name wasn't appearing as the vehicle's
+name — they wanted the name displayed, with the hash staying internal. An
+audit of every place a custom vehicle's name reaches the player (picker cards,
+HUD, radial-menu title, the builder's own saved-vehicle list) found all of
+them correctly reading `.name`. One place wasn't: `buildCommandFor` in
+`src/vehicles/commands.js` computed a factory's "Build X" button label once,
+at generation time, from `VEHICLE_CATALOG` — the built-ins-only array — so a
+custom vehicle's lookup always missed and fell back to the raw id:
+**"Build custom:834c51a4f58a34db."** The adjacent `hint` field already
+resolved correctly through `ctx.vehicles.defOf`; `label` was never updated to
+match, and the function's own doc comment claiming both were fixed had
+drifted from the code. This is exactly what the old slug ids
+(`custom:my-tank`) had been masking — a slug at least read as name-shaped, a
+hash obviously doesn't.
+
+Fixed by making `label` a function, resolved the same way `hint` already is,
+in `commandsFor`'s existing resolution step — one mechanism, both fields, no
+behavior change for any built-in vehicle. See `bug-fixed.md` for the full
+verification, including a live-browser confirmation: a custom vehicle named
+"Devastator" wired to the Armed Factory now shows exactly **"Build
+Devastator"** in the real radial menu.
+
 ## Not done, and what it would cost
 
-- **Nothing has been driven in a real browser.** The transport, the filters and
-  the byte-identical guarantee are proven at the wire level; an actual match
-  played with a custom vehicle on two clients is not. Given the AI path is
-  id-agnostic this is expected to work, but expected is not verified.
+- **A full match has still not been played in a real browser** — the label
+  fix above was verified live for the build-button case, but two real clients
+  actually playing a match with a shared custom vehicle has not been. The
+  transport, the filters and the byte-identical guarantee are proven at the
+  wire level. Given the AI path is id-agnostic this is expected to work, but
+  expected is not verified.
 - **Simulation parity with a custom vehicle is untested.** The e2e proves both
   peers *receive* the same def. That they then *simulate* it identically rests
   on the same determinism arguments as every built-in vehicle, and on
