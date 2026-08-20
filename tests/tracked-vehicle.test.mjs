@@ -16,14 +16,17 @@ import assert from 'node:assert/strict';
 import {
   isTracked, roadWheelCount, trackThicknessOf, turningCircleOf, rigOf, steeringWheelbase,
 } from '../src/vehicles/vehicleFactory.js';
-import { blankDef, validateDef } from '../src/builder/vehicleDraft.js';
+import { blankDef, validateDef, syncId } from '../src/builder/vehicleDraft.js';
 import { VEHICLE_CATALOG } from '../src/vehicles/catalog.js';
 
 function tank(overrides = {}) {
   const def = blankDef('Tank');
   def.shape.tracked = true;
   def.steerRatios = [0, 0];
-  return Object.assign(def, overrides);
+  Object.assign(def, overrides);
+  // Ids are content-addressed, so anything that edits a def has to re-derive
+  // it — the editor does this in onEdit for exactly the same reason.
+  return syncId(def);
 }
 
 test('no shipped vehicle is tracked — this is additive, nothing changes underfoot', () => {
@@ -73,7 +76,7 @@ test('belt thickness must stay under the wheel radius or the loop has no hole', 
 
   const ok = tank();
   ok.dims.trackThickness = ok.dims.wheelRadius * 0.5;
-  assert.deepEqual(validateDef(ok), []);
+  assert.deepEqual(validateDef(syncId(ok)), []);
 });
 
 test('a tracked vehicle with no pivot rate is rejected — it would never turn', () => {
@@ -85,7 +88,7 @@ test('a tracked vehicle with no pivot rate is rejected — it would never turn',
 test('track defaults are derived from the wheel, so a bare tracked def still builds', () => {
   const t = tank();
   delete t.dims.trackThickness;
-  assert.deepEqual(validateDef(t), [], 'optional, like the axle fields');
+  assert.deepEqual(validateDef(syncId(t)), [], 'optional, like the axle fields');
   assert.ok(trackThicknessOf(t) > 0, 'still resolves to a real thickness');
   assert.ok(trackThicknessOf(t) < t.dims.wheelRadius, 'and one the belt can be cut from');
 });

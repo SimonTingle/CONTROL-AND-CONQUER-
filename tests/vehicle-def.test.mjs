@@ -17,7 +17,20 @@ import assert from 'node:assert/strict';
 import { VEHICLE_CATALOG } from '../src/vehicles/catalog.js';
 import {
   blankDef, cloneDef, forkDef, validateDef, customIdFor, isCustomId, CUSTOM_ID_PREFIX,
+  syncId, canonicalJson,
 } from '../src/builder/vehicleDraft.js';
+import { deriveBounds, setPath } from '../src/builder/builderSchema.js';
+
+/**
+ * Mutate a def the way the editor does — every widget funnels through
+ * `onEdit`, which re-derives the id, so a test that changes a stat and then
+ * validates has to do the same or it is checking a stale id rather than the
+ * thing it means to check.
+ */
+const edited = (def, mutate) => {
+  mutate(def);
+  return syncId(def);
+};
 
 test('a blank def is immediately valid — the editor never opens on a broken vehicle', () => {
   assert.deepEqual(validateDef(blankDef()), []);
@@ -73,10 +86,11 @@ test('the axle fields are optional, exactly as vehicleFactory treats them', () =
   // scout-buggy ships with no axles/axleFractions/steerRatios at all —
   // axleOffsets() defaults to two. A validator stricter than the engine would
   // reject vehicles the game already renders, so this pins the looser rule.
-  const def = blankDef();
-  delete def.axles;
-  delete def.axleFractions;
-  delete def.steerRatios;
+  const def = edited(blankDef(), (d) => {
+    delete d.axles;
+    delete d.axleFractions;
+    delete d.steerRatios;
+  });
   assert.deepEqual(validateDef(def), []);
 });
 
@@ -105,7 +119,7 @@ test('non-finite numbers are rejected wherever they appear', () => {
 test('a custom id can never collide with a built-in vehicle', () => {
   for (const builtIn of VEHICLE_CATALOG) {
     assert.equal(isCustomId(builtIn.id), false, `${builtIn.id} is not custom-namespaced`);
-    assert.notEqual(customIdFor(builtIn.name), builtIn.id, `${builtIn.name} slugs away from its built-in id`);
+    assert.notEqual(customIdFor(builtIn), builtIn.id, `${builtIn.name} hashes away from its built-in id`);
   }
 });
 
@@ -118,10 +132,50 @@ test('an id already in the catalog is rejected', () => {
   assert.ok(problems.some((p) => p.includes('already taken') || p.includes(CUSTOM_ID_PREFIX)));
 });
 
-test('a name that slugs to nothing is rejected rather than saved as "custom:"', () => {
+test('the id is content-addressed: naming does not affect it, stats do', () => {
+  // The whole point of the scheme. Ids used to be name slugs, so two accounts
+  // with entirely different vehicles both called "My Tank" produced the *same*
+  // id for different defs — and nothing caught it, because only defId strings
+  // cross the wire and snapshot.js skips ids it cannot resolve without
+  // erroring. One id has to mean one vehicle, everywhere.
+  const a = blankDef('Destroyer');
+  const b = blankDef('Peacekeeper');
+  assert.equal(a.id, b.id, 'two identical vehicles share an id regardless of name');
+
+  const faster = edited(blankDef('Destroyer'), (d) => { d.speed += 0.5; });
+  assert.notEqual(faster.id, a.id, 'a changed stat changes the id');
+});
+
+test('a name that would slug to nothing is now simply a valid name', () => {
+  // Previously "!!!" produced the bare id "custom:" and had to be rejected.
+  // With the id derived from contents, the name is free text and carries no
+  // structural meaning at all.
   const def = blankDef('!!!');
-  assert.equal(def.id, CUSTOM_ID_PREFIX);
-  assert.ok(validateDef(def).some((p) => p.includes('empty id')));
+  assert.notEqual(def.id, CUSTOM_ID_PREFIX);
+  assert.deepEqual(validateDef(def), []);
+});
+
+test('key order does not change the id', () => {
+  // JSON.stringify preserves insertion order, so without the canonical sort a
+  // def rebuilt with its keys assigned in a different sequence — which is
+  // exactly what a round trip through a different JSON writer can do — would
+  // hash differently and read as a different vehicle.
+  const def = blankDef();
+  const reordered = {};
+  for (const key of Object.keys(def).reverse()) reordered[key] = def[key];
+  assert.equal(customIdFor(reordered), customIdFor(def));
+  assert.equal(canonicalJson({ b: 1, a: 2 }), canonicalJson({ a: 2, b: 1 }));
+});
+
+test('a def whose id does not match its contents is rejected', () => {
+  // A hand-edited payload, or one written by the older slug-based build. The
+  // id is a claim about the contents; an unchecked claim is worth nothing.
+  const def = blankDef();
+  def.speed += 0.5; // deliberately *not* re-synced
+  assert.ok(
+    validateDef(def).some((p) => p.includes('does not match')),
+    'a stale id is caught'
+  );
 });
 
 test('every built-in vehicle survives a JSON round trip', () => {
@@ -139,7 +193,7 @@ test('forking a built-in produces an editable, valid, non-colliding copy', () =>
   const fork = forkDef(source, 'My Buggy');
 
   assert.deepEqual(validateDef(fork), [], 'a fork of a shipped vehicle is valid');
-  assert.equal(fork.id, 'custom:my-buggy');
+  assert.ok(isCustomId(fork.id), 'a fork is custom-namespaced');
   assert.notEqual(fork.id, source.id);
   // A deep copy, not a shared reference — editing the fork must not reach back
   // into the catalog the whole game reads from.
@@ -158,8 +212,7 @@ test('producedBy must name a structure that actually produces units', () => {
 
 test('the two real factories, and "not buildable", are all accepted', () => {
   for (const producedBy of ['armed-factory', 'harvester-facility', null]) {
-    const def = blankDef();
-    def.producedBy = producedBy;
+    const def = edited(blankDef(), (d) => { d.producedBy = producedBy; });
     assert.deepEqual(validateDef(def), [], `${producedBy} is valid`);
   }
 });
@@ -168,18 +221,84 @@ test('unlock accepts only the value the picker actually understands', () => {
   // An unrecognised string is not ignored — vehiclePicker leaves the vehicle
   // permanently locked behind a generic "Locked" label, which looks like a bug
   // rather than a typo.
-  const def = blankDef();
-  def.unlock = 'exploration';
+  const def = edited(blankDef(), (d) => { d.unlock = 'exploration'; });
   assert.deepEqual(validateDef(def), []);
 
-  def.unlock = 'someday';
-  assert.ok(validateDef(def).some((p) => p.includes('unlock')));
+  assert.ok(validateDef(edited(def, (d) => { d.unlock = 'someday'; })).some((p) => p.includes('unlock')));
 });
 
 test('a negative price is rejected', () => {
-  const def = blankDef();
-  def.cost = -50;
+  const def = edited(blankDef(), (d) => { d.cost = -50; });
   assert.ok(validateDef(def).some((p) => p.includes('cost')));
-  def.cost = 0; // free is odd but legitimate
-  assert.deepEqual(validateDef(def), []);
+  assert.deepEqual(validateDef(edited(def, (d) => { d.cost = 0; })), []); // free is odd but legitimate
+});
+
+test('forking every built-in stays valid, including the turretless ones', () => {
+  // Not redundant with the scout-buggy fork above. `base-station` and
+  // `crystal-harvester` ship with zeroed turret dimensions — far below the
+  // editor's minimums — because they have no turret to size. Bounds-checking
+  // those paths unconditionally rejected both, which is a validator stricter
+  // than the engine that renders them happily.
+  for (const builtIn of VEHICLE_CATALOG) {
+    // A price, because base-station and crystal-harvester ship without one —
+    // they are not bought at a factory. That is a pre-existing rule of its own
+    // and not what this test is about.
+    const fork = edited(forkDef(builtIn, `Fork of ${builtIn.name}`), (d) => { d.cost ??= 400; });
+    assert.deepEqual(
+      validateDef(fork), [],
+      `a fork of ${builtIn.id} is valid`
+    );
+  }
+});
+
+test('a stat beyond its slider maximum is rejected', () => {
+  // The ranges in builderSchema were UI attributes only — validateDef had no
+  // upper bound on anything, so these all passed before. Harmless while a def
+  // never left the machine that authored it; not harmless once one can arrive
+  // from another player.
+  const cases = [
+    ['speed', 1e6], ['turret.damage', 1e9], ['maxHealth', 999999], ['sightRadius', 5000],
+  ];
+  for (const [path, value] of cases) {
+    const def = edited(blankDef(), (d) => setPath(d, path, value));
+    assert.ok(
+      validateDef(def).some((p) => p.startsWith(path)),
+      `${path} = ${value} is rejected`
+    );
+  }
+});
+
+test('a stat exactly at each slider bound is accepted', () => {
+  // The complement of the test above, and the one that would catch an
+  // off-by-one turning a legitimate extreme into a rejection.
+  for (const [path, { min, max }] of Object.entries(deriveBounds())) {
+    for (const edge of [min, max]) {
+      const def = edited(blankDef(), (d) => {
+        d.shape.turret = true;
+        d.shape.tracked = true;
+        setPath(d, path, edge);
+      });
+      // Only bounds-shaped complaints: some fields also carry a cross-field
+      // rule that a value at its own extreme can still break (max
+      // trackThickness exceeds the default wheelRadius, and must — the belt
+      // would swallow the wheel). Those rules are tested on their own.
+      const problems = validateDef(def).filter((p) => p.includes('must be between'));
+      assert.deepEqual(problems, [], `${path} = ${edge} (its own bound) is accepted`);
+    }
+  }
+});
+
+test('an economy vehicle without harvesting stats is refused', () => {
+  // The Production panel offers "Harvester Facility" and the "Economy" role,
+  // but blankDef sets no capacity/fillRate/unloadRate and the editor cannot
+  // author them. aiCommander buys economy units by tag, so this combination
+  // produced a vehicle the AI spends credits on and which can never harvest.
+  const def = edited(blankDef(), (d) => {
+    d.producedBy = 'harvester-facility';
+    d.tags = ['economy'];
+  });
+  assert.ok(
+    validateDef(def).some((p) => p.includes('harvesting stats')),
+    'the unbuildable-economy combination is caught'
+  );
 });

@@ -11,7 +11,7 @@
 import { VEHICLE_CATALOG } from '../vehicles/catalog.js';
 import { BuilderPreview } from './builderPreview.js';
 import { BUILDER_GROUPS, getPath, setPath, resyncAxles, resyncTracked } from './builderSchema.js';
-import { blankDef, cloneDef, forkDef, validateDef, customIdFor } from './vehicleDraft.js';
+import { blankDef, cloneDef, forkDef, validateDef, syncId } from './vehicleDraft.js';
 import { loadCustomDefs, saveCustomVehicle, deleteCustomVehicle } from './customVehicles.js';
 
 export class BuilderScreen {
@@ -227,9 +227,6 @@ export class BuilderScreen {
       input.type = 'text';
       input.addEventListener('input', () => {
         setPath(this.def, control.path, input.value);
-        // The id follows the name, so a renamed vehicle saves as a new one
-        // rather than silently overwriting whatever shared its old slug.
-        if (control.path === 'name') this.def.id = customIdFor(input.value);
         this.onEdit();
       });
       read = () => (input.value = getPath(this.def, control.path) ?? '');
@@ -246,6 +243,11 @@ export class BuilderScreen {
   }
 
   onEdit() {
+    // The id is derived from the def's contents, so *any* edit moves it — not
+    // just a rename, as when ids were name slugs. Re-derived here, in the one
+    // place every widget already funnels through, so no control has to
+    // remember to do it.
+    syncId(this.def);
     this.preview.setDef(this.def);
     this.showProblems();
   }

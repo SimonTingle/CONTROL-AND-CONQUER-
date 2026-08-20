@@ -17,6 +17,7 @@ import { AuthScreen } from './ui/authScreen.js';
 import { BuilderScreen } from './builder/builderScreen.js';
 import { loadCustomDefs } from './builder/customVehicles.js';
 import { catalogFor } from './builder/customCatalog.js';
+import { validateDef } from './builder/vehicleDraft.js';
 import { api } from './net/api.js';
 import { serialize, deserialize } from './core/snapshot.js';
 import { AiDifficultyScreen } from './ui/aiDifficultyScreen.js';
@@ -1774,6 +1775,31 @@ async function startOnlineMatch(matchId, difficulty) {
 
   game.mode = 'multiplayer-online';
   game.localTeamId = welcome.teamId;
+
+  // The match's vehicle set, pinned from the host's loadout when the lobby was
+  // created and relayed identically to every peer. Every client validates the
+  // same received bytes with the same deterministic checker, so every client
+  // reaches the same verdict — and a def that fails ends the match here rather
+  // than being skipped, because skipping is precisely how a peer ends up
+  // simulating a different fleet from everyone else. The server has already
+  // bounds-checked these; anything failing now is a build mismatch, and a loud
+  // stop is the honest answer to that.
+  const matchDefs = Array.isArray(welcome.customDefs) ? welcome.customDefs : [];
+  for (const def of matchDefs) {
+    const problems = validateDef(def, { catalog: VEHICLE_CATALOG });
+    if (problems.length) {
+      // Not endOnlineMatch(): `match` is not assigned until further down, and
+      // that helper no-ops without it. Same effect, done directly.
+      client.close();
+      sessionStorage.setItem(
+        'pendingToast',
+        `This match uses a vehicle this build cannot load ("${def?.name ?? 'unnamed'}": ${problems[0]}).`
+      );
+      location.reload();
+      return;
+    }
+  }
+  game.matchDefs = matchDefs;
   // Team count comes from the lobby row rather than from who happens to be
   // connected: a client that joins the socket late must still build the same
   // number of teams as everyone else, or it diverges before it starts.
@@ -2142,17 +2168,27 @@ game.portalScreen = new PortalScreen(
 game.customDefs = [];
 
 /**
+ * The vehicle set an online match supplied, from its `welcome` frame.
+ *
+ * Kept separate from `customDefs` on purpose: these are not this player's
+ * vehicles, they are the match's, pinned from the host's loadout when the
+ * lobby was created and relayed identically to every peer. Online play uses
+ * this and ignores `customDefs` entirely — see catalogFor().
+ */
+game.matchDefs = [];
+
+/**
  * Point the picker and the vehicle controller at the catalog this mode is
  * allowed to see.
  *
- * `catalogFor` is the whole rule — an allowlist of offline modes, so anything
+ * `catalogFor` is the whole rule — allowlists in both directions, so anything
  * it does not recognise gets the built-in catalog only. Both consumers have to
  * be updated together: the picker decides what can be *chosen*, `defOf`
  * decides what an id can still *resolve to*, and a mismatch between them is a
  * vehicle that can be spawned but not restored, or listed but not built.
  */
 function applyCustomCatalog() {
-  const catalog = catalogFor(game.mode, game.customDefs);
+  const catalog = catalogFor(game.mode, game.customDefs, game.matchDefs);
   const extras = catalog.filter((d) => !VEHICLE_CATALOG.includes(d));
   vehicles.setExtraDefs(extras);
   vehiclePicker.setCatalog(catalog);
