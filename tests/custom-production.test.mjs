@@ -15,13 +15,22 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { producedUnitIds } from '../src/vehicles/commands.js';
+import { producedUnitIds, commandsFor } from '../src/vehicles/commands.js';
 import { STRUCTURE_CATALOG } from '../src/structures/structures.js';
+import { VEHICLE_CATALOG } from '../src/vehicles/catalog.js';
 import { blankDef } from '../src/builder/vehicleDraft.js';
 
 const structure = (id) => STRUCTURE_CATALOG.find((d) => d.id === id);
 /** The only part of the real controller this reads. */
 const ctxWith = (...extraDefs) => ({ vehicles: { extraDefs } });
+
+/** Enough of a ctx for commandsFor's own enabled()/hint()/label() calls, not just producedUnitIds. */
+function fullCtxWith(...extraDefs) {
+  return {
+    vehicles: { extraDefs, defOf: (id) => VEHICLE_CATALOG.find((d) => d.id === id) ?? extraDefs.find((d) => d.id === id) },
+    game: { teamOf: () => ({ credits: 999999, weaponTier: 0 }) },
+  };
+}
 
 function customFor(name, producedBy) {
   const def = blankDef(name);
@@ -50,6 +59,35 @@ test('a custom vehicle naming a factory is offered by it, after the built-ins', 
   // supplements the AI's build order rather than displacing its first pick.
   assert.deepEqual(ids.slice(0, factory.produces.length), factory.produces, 'built-ins keep their order and position');
   assert.deepEqual(ids.slice(factory.produces.length), [mine.id], 'the custom one is appended');
+});
+
+test('the radial menu button shows the custom vehicle\'s name, not its id', () => {
+  // buildCommandFor's label used to be computed once from VEHICLE_CATALOG —
+  // the built-ins-only array — so a custom unitId never matched and the
+  // command fell back to `Build ${unitId}`, i.e. the literal content-hash id
+  // ("Build custom:834c51a4f58a34db") in the button a player actually reads.
+  const factory = structure('armed-factory');
+  const mine = customFor('My Tank', 'armed-factory');
+  const instance = { def: factory, mode: 'idle', teamId: 0 };
+  const ctx = fullCtxWith(mine);
+
+  const built = commandsFor(instance, ctx).find((c) => c.id === `build-${mine.id}`);
+  assert.ok(built, 'the custom vehicle has a build command');
+  assert.equal(built.label, 'Build My Tank');
+});
+
+test('a built-in factory label is unchanged by resolving label lazily', () => {
+  // The fix widens buildCommandFor's label to a function for every unit, not
+  // just custom ones — confirm a shipped vehicle's button still reads exactly
+  // as it always has.
+  const factory = structure('armed-factory');
+  const instance = { def: factory, mode: 'idle', teamId: 0 };
+  const ctx = fullCtxWith();
+
+  const builtIn = factory.produces[0];
+  const expectedName = VEHICLE_CATALOG.find((d) => d.id === builtIn)?.name;
+  const cmd = commandsFor(instance, ctx).find((c) => c.id === `build-${builtIn}`);
+  assert.equal(cmd.label, `Build ${expectedName}`);
 });
 
 test('a custom vehicle is offered only by the factory it names', () => {

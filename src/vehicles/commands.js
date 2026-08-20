@@ -36,7 +36,10 @@ export function commandsFor(instance, ctx) {
 
   return [...base, ...extraBuilds].map((cmd) => ({
     ...cmd,
-    // A hint may be a function when it needs a live number, like a price.
+    // label/hint may be functions when they need something resolved at call
+    // time — a custom vehicle's name or price, neither of which exists yet
+    // when a build command is generated at module load.
+    label: typeof cmd.label === 'function' ? cmd.label(instance, ctx) : cmd.label,
     hint: typeof cmd.hint === 'function' ? cmd.hint(instance, ctx) : cmd.hint,
     enabledResult: cmd.enabled ? cmd.enabled(instance, ctx) : true,
   }));
@@ -245,6 +248,10 @@ function producedByCommands(structureId) {
  * The unit's name is resolved through `ctx.vehicles.defOf` at call time rather
  * than from `VEHICLE_CATALOG` at generation time, because a custom vehicle is
  * not in that array — `defOf` searches the built-ins and then the custom defs.
+ * `label` has to be a function for the same reason `hint` already is: this
+ * command object is built once (for a built-in, at module load; for a custom
+ * vehicle, once per `commandsFor` call), long before there's an instance or a
+ * ctx to resolve a def through.
  *
  * @param {string} unitId
  * @param {boolean} [atBase] spawn near the team's base rather than at the
@@ -253,7 +260,7 @@ function producedByCommands(structureId) {
 function buildCommandFor(unitId, { atBase = false } = {}) {
   return {
     id: `build-${unitId}`,
-    label: `Build ${VEHICLE_CATALOG.find((v) => v.id === unitId)?.name ?? unitId}`,
+    label: (instance, ctx) => `Build ${ctx.vehicles.defOf(unitId)?.name ?? unitId}`,
     hint: (instance, ctx) => `${ctx.vehicles.defOf(unitId)?.cost ?? '?'} cr`,
     enabled(instance, ctx) {
       const unitDef = ctx.vehicles.defOf(unitId);

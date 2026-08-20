@@ -266,6 +266,24 @@ tuning/balance changes are not included unless they were fixing broken behavior.
   "too many active WebGL contexts" browser error, from each preview card
   creating its own renderer without disposing old ones. Fixed and verified.
 
+- **A custom (author-built) vehicle's factory "Build" radial-menu button
+  showed its raw id instead of its name** — e.g. "Build
+  custom:834c51a4f58a34db" rather than "Build Devastator". `buildCommandFor`
+  in `src/vehicles/commands.js` computed the button's `label` once, at
+  command-generation time, by searching `VEHICLE_CATALOG` — the built-ins-only
+  array — so the lookup always missed for a custom vehicle and fell back to
+  the bare id. The adjacent `hint` field already resolved correctly through
+  `ctx.vehicles.defOf` (which searches built-ins then custom defs); `label`
+  had simply never been updated to match when that fix landed. Fixed by
+  making `label` a function resolved the same way, at render time, in
+  `commandsFor`'s existing `hint`-resolution step. Verified: a unit test
+  spawning a real custom def on a real Armed Factory def confirms the
+  returned command is `"Build My Tank"`, with a negative control (reverting
+  to the eager `VEHICLE_CATALOG.find`) reproducing the exact reported id
+  string; and confirmed live in a real browser — Multiplayer AI match, a
+  custom vehicle named "Devastator" injected and wired to the Armed Factory,
+  its radial menu button reads exactly "Build Devastator".
+
 ## Backend / deployment
 
 - **The production frontend build had no way to receive the correct backend
