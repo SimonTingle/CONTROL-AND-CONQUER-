@@ -12,6 +12,7 @@ Notes for anyone — human or AI — picking this up cold.
 | `src/vehicles/`, `src/structures/` | Simulation. `commands.js` is the radial-menu vocabulary. |
 | `src/ui/` | Screens and HUD. No simulation state. |
 | `server/` | Fastify API: accounts, cloud saves, and the match relay. Its own CapRover app. |
+| `itch.io/` | A copy of the frontend, packaged for itch.io. Deliberately forked from `src/` — see its README. |
 | `tests/` | `npm test` — dependency-free unit tests. `tests/e2e/` needs a database. |
 | `docs/plans/` | One document per substantial change. See below. |
 | `bug-fixed.md` | Confirmed-fixed bugs, with root cause and how it was verified. |

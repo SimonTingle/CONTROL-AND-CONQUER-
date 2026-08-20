@@ -1,0 +1,6 @@
+node_modules
+dist
+
+# The uploadable artefact produced by `npm run zip`. Built from committed
+# source on demand — never committed.
+control-and-conquer-itch.zip

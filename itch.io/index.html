@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Procedural Terrain — RTS Sandbox</title>
+    <link rel="stylesheet" href="/src/ui/style.css" />
+  </head>
+  <body>
+    <canvas id="viewport"></canvas>
+
+    <button id="menu-toggle" aria-label="Open settings" aria-expanded="false">
+      <span></span><span></span><span></span>
+    </button>
+
+    <aside id="panel" aria-hidden="true">
+      <header>
+        <h1>World Settings</h1>
+        <p id="hud-stats">—</p>
+      </header>
+      <div id="panel-body"></div>
+    </aside>
+
+    <button id="vehicle-toggle" aria-label="Choose vehicle" aria-expanded="false">
+      <span></span><span></span><span></span>
+    </button>
+
+    <aside id="vehicle-panel" aria-hidden="true">
+      <header>
+        <h1>Vehicles</h1>
+        <p class="hint">Click a vehicle to spawn it at the map edge.</p>
+      </header>
+      <div id="vehicle-grid"></div>
+    </aside>
+
+    <div id="hud" class="hidden"></div>
+    <div id="minimap" class="hidden"></div>
+
+    <div id="radial-menu" class="hidden"></div>
+
+    <div id="portal"></div>
+
+    <div id="difficulty" class="hidden"></div>
+
+    <div id="ai-difficulty" class="hidden"></div>
+
+    <div id="auth-screen" class="hidden"></div>
+    <div id="builder" class="hidden"></div>
+
+    <div id="match-end" class="hidden"></div>
+
+    <pre id="perf-hud" class="hidden"></pre>
+
+    <div id="loading">generating world…</div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
