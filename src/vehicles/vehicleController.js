@@ -19,6 +19,17 @@ const STEER_GAIN = 1.8; // how hard a click order leans on the steering
 // the same three-point turn a real driver would make.
 const SHARP_TURN_ANGLE = 1.92; // radians (~110°)
 const SHARP_TURN_REVERSE = 1.2; // seconds of backing off per attempt
+
+/**
+ * Combine the raw vector-to-target with an avoidance nudge, if any. Kept
+ * separate from driveToTarget so the aim-point math is unit-testable without
+ * a real mesh, and so it's obvious this never touches arrival distance —
+ * callers compute `dist` from the un-offset `dx`/`dz` before calling this.
+ */
+export function steeringAimPoint(dx, dz, avoidOffset) {
+  if (!avoidOffset) return { x: dx, z: dz };
+  return { x: dx + avoidOffset.x, z: dz + avoidOffset.z };
+}
 // Backing away from a slope too steep to climb. Longer than the sharp-turn
 // reverse: the point is to end up somewhere materially different, not to pivot.
 const BLOCKED_REVERSE = 1.5; // seconds
@@ -58,7 +69,11 @@ function wrapAngle(a) {
 }
 
 /** One spawned, drivable vehicle. */
-class VehicleInstance {
+// Exported for tests only — driveToTarget's climbable-recheck guard (see
+// tests/vehicle-steering-aim.test.mjs) is only reachable as a method on a
+// real instance, unlike steeringAimPoint which was deliberately pulled out
+// as a standalone pure function.
+export class VehicleInstance {
   constructor(def, spawnPoint, facing, teamId = 0) {
     this.def = def;
     // Discriminates the two destroyable kinds without a fragile array lookup
@@ -95,9 +110,13 @@ class VehicleInstance {
     this.tracked = isTracked(def);
     this.grade = 0;
     this.blocked = false;
-    // Set fresh each tick by TrafficController, ahead of movement — true holds
-    // an autonomous vehicle in place rather than push through one nearby.
+    // Set fresh each tick by TrafficController, ahead of movement — true
+    // means something else is nearby and driveToTarget should steer around
+    // it rather than through it.
     this.yielding = false;
+    // Lateral steering nudge set fresh each tick by TrafficController
+    // alongside `yielding`; null when not yielding. See `steeringAimPoint`.
+    this.avoidOffset = null;
     // Seconds remaining in a reverse maneuver, or null when not reversing —
     // see beginReverse().
     this.reverseTimer = null;
@@ -481,16 +500,6 @@ class VehicleInstance {
 
   /** Click-to-move (mobile): steer toward the order and drive it out. */
   driveToTarget(dt, heightmap) {
-    // Set by TrafficController just before this runs, for autonomous vehicles
-    // with another one nearby. A hold, not an abandonment — the order stays
-    // live, and driving resumes on its own the moment the flag clears.
-    if (this.yielding) {
-      this.forwardSpeed = 0;
-      this.speed = 0;
-      this.accelerating = false;
-      return;
-    }
-
     const pos = this.group.position;
     const dx = this.target.x - pos.x;
     const dz = this.target.y - pos.z;
@@ -501,12 +510,33 @@ class VehicleInstance {
       return;
     }
 
-    const desiredHeading = Math.atan2(dz, dx);
+    // Set by TrafficController just before this runs, for autonomous
+    // vehicles with another one nearby: bends only the steering aim point,
+    // never the arrival distance above, so a swerve can never cause a false
+    // arrival. Clears itself the tick TrafficController stops flagging it.
+    const aim = this.yielding ? steeringAimPoint(dx, dz, this.avoidOffset) : { x: dx, z: dz };
+    const desiredHeading = Math.atan2(aim.z, aim.x);
     let delta = desiredHeading - this.heading;
     delta = Math.atan2(Math.sin(delta), Math.cos(delta)); // shortest turn
 
     const { factor, climbable } = this.readGrade(heightmap, desiredHeading);
     if (!climbable) {
+      // A swerve nudge can point the aim (and so the grade probe) somewhere
+      // the real target direction never would — e.g. clearing another
+      // vehicle happens to face a rock outcrop for one tick. Re-check
+      // against the unmodified target heading before abandoning a perfectly
+      // good order over a transient nudge: if the real direction is fine,
+      // just hold this tick (the order survives, same as any other yield)
+      // rather than aborting it.
+      if (this.yielding && this.avoidOffset) {
+        const real = this.readGrade(heightmap, Math.atan2(dz, dx));
+        if (real.climbable) {
+          this.forwardSpeed = 0;
+          this.speed = 0;
+          this.accelerating = false;
+          return;
+        }
+      }
       // Abandon the order rather than grind against the slope forever.
       this.blocked = true;
       this._applyBlockedDamage(dt);
