@@ -16,9 +16,8 @@
  */
 
 import { hasVehicleBehind } from './trafficController.js';
+import { CLEARED } from './facilityControl.js';
 
-const MAX_QUEUE_POSITIONS = 4;
-const QUEUE_RING_MARGIN = 10; // world units of clearance past the bay's own pad
 // A wide-turning vehicle (a crystal-harvester's turning circle is tens of
 // units) can overshoot a tight radius repeatedly without ever settling
 // inside it — harvesterAI's own DOCK_DISTANCE (22) exists for the same
@@ -46,18 +45,22 @@ const READY_LINGER = 2; // seconds the ring stays green before the dock frees
 const QUEUE_TIMEOUT = 600;
 
 export class RepairController {
-  constructor({ vehicles, structures, heightmap, game }) {
+  constructor({ vehicles, structures, heightmap, game, facilityControl }) {
     this.vehicles = vehicles;
     this.structures = structures;
     this.heightmap = heightmap;
     this.game = game;
+    // Shared with harvesterAI: one ground controller for every dock, instead
+    // of this file and that one each keeping their own claim + allocator +
+    // sweep and fixing the same bugs out of step.
+    this.facilityControl = facilityControl;
   }
 
   update(dt) {
-    this._sweepBays();
     for (const inst of this.vehicles.instances) {
       // Dead but not yet flushed — see harvesterAI's matching guard. Healing a
-      // corpse would also re-claim the bay its onDestroy hook just released.
+      // corpse would re-create the repair state its onDestroy hook just
+      // cleared, and hand a dock back to something that no longer exists.
       if (inst.dead) continue;
       if (!inst.repair) {
         this._maybeAutoQueue(inst, dt);
@@ -147,33 +150,13 @@ export class RepairController {
   /** Terrain regenerated: every bay reference is meaningless. */
   reset() {
     for (const inst of this.vehicles.instances) inst.repair = null;
-    // Vehicle-side state is gone, but the bays themselves survive unless
-    // structures.clear() also ran — leaving a dock/queue reservation behind
-    // would orphan it exactly like the bugs this sweep exists to catch.
+    // Bays survive unless structures.clear() also ran. Nothing to un-reserve:
+    // the claim lived on the vehicle and has just been dropped. Only the
+    // visuals need resetting.
     for (const s of this.structures?.instances ?? []) {
       if (s.def.id !== 'repair-bay') continue;
-      s.dockedVehicle = null;
-      s._repairQueue = undefined;
       this._setLed(s, 0);
       this._setRingState(s, 'idle');
-    }
-  }
-
-  /**
-   * Validates every bay's dock reservation each tick: if `dockedVehicle`
-   * points at a vehicle whose own repair state no longer agrees it's docked
-   * there — pause, park, a give-up that didn't route through `_leaveBay`,
-   * anything — release it. This is what recovers a game that's already
-   * broken, not just what prevents it breaking again.
-   */
-  _sweepBays() {
-    for (const s of this.structures?.instances ?? []) {
-      if (s.def.id !== 'repair-bay' || !s.dockedVehicle) continue;
-      if (s.dockedVehicle.repair?.bay !== s) {
-        s.dockedVehicle = null;
-        this._setLed(s, 0);
-        this._setRingState(s, 'idle');
-      }
     }
   }
 
@@ -183,49 +166,52 @@ export class RepairController {
       inst.repair = null; // shouldn't happen — every repair-bay def has a dock
       return;
     }
-    if (!this._driveTo(inst, r, bay.dock.x, bay.dock.z, dt)) return;
-
-    if (!bay.dockedVehicle) {
-      this._claimDock(inst, r, bay);
-    } else {
-      r.state = 'queued';
-      r.queuePosition = this._claimQueuePosition(bay);
-      r.claimedOrder = false; // new leg, new destination — re-take the wheel
+    // Permission first, then drive. The old order was the other way round —
+    // every damaged vehicle converged on the identical `bay.dock` point and
+    // only discovered the contention on touchdown, which is exactly the
+    // pile-up harvesterAI's own TO_BASE divert already avoided on its side.
+    if (this.facilityControl.inTerminalArea(inst, bay)) {
+      this.facilityControl.request(inst, bay, 'repair');
+      if (!this.facilityControl.isCleared(inst)) {
+        r.state = 'queued';
+        r.claimedOrder = false; // new leg, new destination — re-take the wheel
+        return;
+      }
     }
+
+    if (!this._driveTo(inst, r, bay.dock.x, bay.dock.z, dt)) return;
+    this._claimDock(inst, r, bay);
   }
 
   _queued(inst, r, dt) {
     const bay = r.bay;
-    if (!bay.dockedVehicle) {
-      this._releaseQueuePosition(bay, r);
+    this.facilityControl.request(inst, bay, 'repair');
+    if (this.facilityControl.statusOf(inst) === CLEARED) {
       r.queuedFor = 0;
-      this._claimDock(inst, r, bay);
+      r.state = 'to-bay';
+      r.claimedOrder = false; // new leg (the dock itself) — re-take the wheel
       return;
     }
 
-    // A backstop against a dock that's stuck for a reason the sweep didn't
-    // catch — see QUEUE_TIMEOUT's own comment. Not the normal way to leave
-    // the queue; `!bay.dockedVehicle` above is.
+    // A backstop for a queue that outlives any plausible repair. The
+    // controller's own lease already reclaims a *dock* nobody reaches; this
+    // only catches a vehicle that has been waiting far longer than a full
+    // repair could take, and gives up rather than waiting out the match.
     r.queuedFor = (r.queuedFor ?? 0) + dt;
     if (r.queuedFor > QUEUE_TIMEOUT) {
-      this._releaseQueuePosition(bay, r);
+      this.facilityControl.release(inst);
       inst.repair = null;
       return;
     }
 
-    // Same angle convention as the harvester's queue/parking rings and the
-    // radial menu: angle = (i / N) * 2π.
-    const angle = (r.queuePosition / MAX_QUEUE_POSITIONS) * Math.PI * 2;
-    const ringRadius = bay.def.dims.padRadius + QUEUE_RING_MARGIN;
-    const qx = bay.x + Math.cos(angle) * ringRadius;
-    const qz = bay.z + Math.sin(angle) * ringRadius;
-    this._driveTo(inst, r, qx, qz, dt);
+    const fix = this.facilityControl.holdingFix(inst, bay);
+    if (fix) this._driveTo(inst, r, fix.x, fix.z, dt);
   }
 
   /** Slot claimed — but parking happens on the pad itself, not the approach
    * point, so there's one more short leg (`'entering'`) before repair starts. */
   _claimDock(inst, r, bay) {
-    bay.dockedVehicle = inst;
+    this.facilityControl.markDocked(inst);
     r.state = 'entering';
     r.waypoint = null;
     r.detours = 0;
@@ -319,7 +305,7 @@ export class RepairController {
   }
 
   _leaveBay(inst, bay) {
-    if (bay.dockedVehicle === inst) bay.dockedVehicle = null;
+    this.facilityControl.release(inst);
     this._setLed(bay, 0);
     this._setRingState(bay, 'idle');
     inst.repair = null;
@@ -334,42 +320,14 @@ export class RepairController {
   }
 
   /**
-   * Real per-waiter allocation rather than the harvester queue's own bug (a
-   * hardcoded position that every waiter aims at) — indices are claimed and
-   * released against a small set stashed on the bay instance.
-   */
-  _claimQueuePosition(bay) {
-    const taken = bay._repairQueue ?? (bay._repairQueue = new Set());
-    // Search well past MAX_QUEUE_POSITIONS rather than returning a fixed
-    // fallback like 0 once the ring's own slots are full — a repeat index
-    // would double-allocate a slot another vehicle still holds, so releasing
-    // one frees the other's too and a third claimer collides with it. Beyond
-    // MAX_QUEUE_POSITIONS the ring angle wraps and visually overlaps an
-    // earlier vehicle, which only matters once 5+ are queued at once — the
-    // bookkeeping staying unique matters far more than the ring staying
-    // evenly spaced in that edge case.
-    for (let i = 0; i < 64; i++) {
-      if (!taken.has(i)) {
-        taken.add(i);
-        return i;
-      }
-    }
-    return -1; // 64 concurrent queuers at one bay — not a realistic fleet size
-  }
-
-  _releaseQueuePosition(bay, r) {
-    bay._repairQueue?.delete(r.queuePosition);
-    r.queuePosition = null;
-  }
-
-  /**
    * Two directions. A vehicle dying releases whatever dock/queue claim it
-   * held on its bay. A repair bay dying releases every vehicle that was
-   * using it — unlike harvesterAI's facility lookup, `_toBay`/`_queued`/
-   * `_repairing` hold a direct `r.bay` reference rather than re-resolving one
-   * each tick, so nothing else would ever notice the bay is gone and a
-   * vehicle could sit forever "repairing" at a structure that no longer
-   * exists.
+   * held on its bay — no longer needed, since `facilityControl` rebuilds its
+   * index from the live fleet and a destroyed vehicle is simply absent from
+   * it. A repair bay dying still needs handling here: unlike harvesterAI's
+   * facility lookup, `_toBay`/`_queued`/`_repairing` hold a direct `r.bay`
+   * reference rather than re-resolving one each tick, so nothing else would
+   * notice the bay is gone and a vehicle could sit forever "repairing" at a
+   * structure that no longer exists.
    */
   onDestroy(inst) {
     if (inst.kind === 'structure') {
@@ -381,7 +339,6 @@ export class RepairController {
     }
     const r = inst.repair;
     if (!r) return;
-    if (r.queuePosition != null) this._releaseQueuePosition(r.bay, r);
     this._leaveBay(inst, r.bay);
   }
 
@@ -471,13 +428,11 @@ export class RepairController {
       // set), and release any queue slot it was holding on to.
       //
       // Routed through _leaveBay rather than clearing `inst.repair` directly:
-      // this can happen during 'entering', after _claimDock already reserved
-      // the dock — clearing repair without also releasing `bay.dockedVehicle`
-      // orphans it forever, since nothing else can ever set it back to null,
-      // and _queued's only exit is that field going falsy. _leaveBay's own
-      // `dockedVehicle === inst` check makes it a safe no-op for the
-      // 'to-bay'/'queued' legs, where the dock was never claimed.
-      if (r.queuePosition != null) this._releaseQueuePosition(r.bay, r);
+      // this can happen during 'entering', after _claimDock already took the
+      // dock, and clearing repair without giving the clearance up would leave
+      // the bay held by a vehicle that has stopped trying to reach it. Safe on
+      // the 'to-bay'/'queued' legs too — releasing a clearance you only held
+      // as a waiter just drops you out of the queue.
       this._leaveBay(inst, r.bay);
       // Hold off re-queuing for a beat. Without this, a vehicle that genuinely
       // can't reach its nearest bay clears repair here, immediately re-qualifies

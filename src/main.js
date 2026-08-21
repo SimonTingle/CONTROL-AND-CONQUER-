@@ -32,6 +32,7 @@ import { VEHICLE_CATALOG } from './vehicles/catalog.js';
 import { commandsFor } from './vehicles/commands.js';
 import { HarvesterAI } from './vehicles/harvesterAI.js';
 import { RepairController } from './vehicles/repairController.js';
+import { FacilityControl, CLEARED, DOCKED, HOLDING } from './vehicles/facilityControl.js';
 import { TrafficController } from './vehicles/trafficController.js';
 import { AiCommander } from './vehicles/aiCommander.js';
 import { CombatController } from './vehicles/combatController.js';
@@ -758,7 +759,7 @@ function openMenuAt(clientX, clientY) {
     marker.visible = false;
   }
 
-  radialMenu.openFor(instance, commandsFor(instance, commandContext));
+  radialMenu.openFor(instance, commandsFor(instance, commandContext), clearanceSubtitle(instance));
 }
 
 // Kept for real mice/trackpads, and as a fallback on any touch browser that
@@ -920,6 +921,7 @@ const view = {
     // Buildings stand on the old heightfield, and harvesters hold references to
     // fields that no longer exist.
     structures.clear();
+    facilityControl.reset();
     harvesterAI.reset();
     repairController.reset();
     radialMenu.close();
@@ -1362,8 +1364,16 @@ function leaveWreckage(inst) {
   world.scene.add(group);
 }
 
-const harvesterAI = new HarvesterAI({ vehicles, world, heightmap, structures, game });
-const repairController = new RepairController({ vehicles, structures, heightmap, game });
+// Ground control for every dock. Constructed before its two consumers because
+// both take it as a dependency — it owns the claim bookkeeping they each used
+// to keep their own copy of.
+const facilityControl = new FacilityControl({ vehicles, structures, heightmap });
+const harvesterAI = new HarvesterAI({
+  vehicles, world, heightmap, structures, game, facilityControl,
+});
+const repairController = new RepairController({
+  vehicles, structures, heightmap, game, facilityControl,
+});
 const trafficController = new TrafficController({ vehicles });
 const combatController = new CombatController({
   vehicles,
@@ -1529,7 +1539,26 @@ const navGrid = new NavGrid(heightmap);
 // `entities` is here for the deployDefense intent, which consumes the vehicle
 // it deploys from and must do so through the destroy pipeline rather than
 // splicing an array another system may still be walking.
-const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit, navGrid, entities };
+const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit, navGrid, entities, facilityControl };
+
+/**
+ * One line of ground-control status for the radial menu: how many vehicles are
+ * holding for a facility, or where this vehicle stands in that queue. Empty
+ * when neither applies, which is most of the time.
+ */
+function clearanceSubtitle(instance) {
+  if (instance.kind === 'structure') {
+    const waiting = facilityControl.queueDepth(instance);
+    if (!waiting) return '';
+    return waiting === 1 ? '1 vehicle holding' : `${waiting} vehicles holding`;
+  }
+  if (facilityControl.isStuck(instance)) return 'cannot reach dock';
+  const status = facilityControl.statusOf(instance);
+  if (status === CLEARED) return 'cleared to approach';
+  if (status === DOCKED) return 'docked';
+  if (status === HOLDING) return 'holding for clearance';
+  return '';
+}
 
 /**
  * Everything core/snapshot.js needs to read or rebuild a world.
@@ -2352,6 +2381,11 @@ function simTick(dt) {
   // Between the input and the fleet: the AI must see this frame's keys before
   // deciding (so it never issues an order the player just cancelled) and set
   // its targets before the fleet consumes them.
+  // Before harvesterAI and repairController both: they must route against an
+  // already-decided assignment, not race each other to claim a dock. Also the
+  // pass that rebuilds the clearance index from the live fleet, which is what
+  // reaps claims whose holder died or whose facility is gone.
+  p.time('facilityControl', () => facilityControl.update());
   p.time('harvesterAI', () => harvesterAI.update(dt));
   // Same reasoning, one level up: each AI team's own deploy/build/scout
   // decisions need this frame's harvester targets already set (so it isn't
