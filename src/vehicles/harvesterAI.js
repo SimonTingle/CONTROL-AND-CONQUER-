@@ -15,6 +15,7 @@
  */
 
 import { hasVehicleBehind } from './trafficController.js';
+import { CLEARED, DOCKED } from './facilityControl.js';
 // Simulated time, never wall clock: field bans and threat memory are
 // simulation state, so they have to advance with the sim (including under
 // __step's fast-forward) and tick identically on every machine.
@@ -77,16 +78,30 @@ const REPAIR_RETRY_COOLDOWN = 8;
 
 /** Widening, alternating. A straight retry cannot work: the heading is unchanged. */
 const DETOUR_ANGLES = [0.9, -0.9, 1.6, -1.6, 2.4];
-const QUEUE_RING = 35; // distance from facility center to queue parking spots
-const MAX_QUEUE_POSITIONS = 4; // max harvesters that can queue at a facility
+/**
+ * Holding-fix arrival tolerance. The fix itself, and the ring it sits on, are
+ * `facilityControl`'s business now — a waiter only needs to get near enough to
+ * be out of the way, not to hit a precise point.
+ */
+const HOLD_ARRIVE_RADIUS = 12;
+/** Parking bays only. The queue ring moved to facilityControl. */
+const MAX_PARKING_BAYS = 4;
+/**
+ * Consecutive fully-exhausted detour sweeps at the same destination before a
+ * harvester stops re-running the identical failing plan. See `_onAbandoned`.
+ */
+const ABANDON_ESCALATION = 2;
 
 export class HarvesterAI {
-  constructor({ vehicles, world, heightmap, structures, game }) {
+  constructor({ vehicles, world, heightmap, structures, game, facilityControl }) {
     this.vehicles = vehicles;
     this.world = world;
     this.heightmap = heightmap;
     this.structures = structures;
     this.game = game;
+    // Who is allowed to approach the dock, and where everyone else holds.
+    // Owns what `dockedHarvester` + `_haulQueue` + `_sweepFacilities` used to.
+    this.facilityControl = facilityControl;
     this.states = new Map();
   }
 
@@ -120,7 +135,6 @@ export class HarvesterAI {
   }
 
   update(dt) {
-    this._sweepFacilities();
     for (const inst of this.vehicles.instances) {
       if (!inst.def.capacity) continue; // not a hauler
       // Dead but not yet flushed: it stays in this array until the tick's
@@ -129,22 +143,6 @@ export class HarvesterAI {
       // cleared.
       if (inst.dead) continue;
       this._drive(inst, this._stateFor(inst), dt);
-    }
-  }
-
-  /**
-   * Validates every facility's dock reservation each tick: if
-   * `dockedHarvester` points at a harvester whose own AI state no longer
-   * agrees it's docked there — destroyed, or any path that didn't route
-   * through `_releaseDock` — release it. Recovers a game that's already
-   * broken, not just prevents it breaking again.
-   */
-  _sweepFacilities() {
-    for (const f of this.structures?.instances ?? []) {
-      if (f.def.id !== 'harvester-facility' || !f.dockedHarvester) continue;
-      if (this.stateOf(f.dockedHarvester)?.state !== UNLOADING) {
-        f.dockedHarvester = null;
-      }
     }
   }
 
@@ -173,6 +171,8 @@ export class HarvesterAI {
         progressLeg: null,
         bestDistance: null,
         noProgressTimer: 0,
+        // Consecutive exhausted detour sweeps at one destination — see _onAbandoned.
+        abandonSweeps: 0,
       };
       this.states.set(inst, s);
     }
@@ -285,22 +285,24 @@ export class HarvesterAI {
       case FILLING:
         return this._fill(inst, s, dt);
       case TO_BASE: {
-        // Checked every tick, not just on arrival: a harvester converging on a
-        // dock another harvester is already unloading at can be physically
-        // blocked well short of DOCK_DISTANCE, in the contested approach
-        // corridor rather than yielding to moving traffic — `holding` in
-        // _travel only covers the latter, so without this the no-progress
-        // timer (correctly) escalates it as stuck instead. Routing straight to
-        // the queue avoids the contested corridor entirely, the same place
-        // _atDock already sends it if arrival finds the dock taken.
+        // Permission before approach, re-checked every tick rather than only on
+        // arrival: a harvester converging on a dock another one is already
+        // using gets physically blocked well short of DOCK_DISTANCE, in the
+        // contested approach corridor rather than yielding to moving traffic —
+        // `holding` in _travel only covers the latter, so without this the
+        // no-progress timer (correctly) escalates it as stuck instead.
         const facility = this._facility(inst);
-        if (facility?.dockedHarvester && facility.dockedHarvester !== inst) {
+        if (
+          facility &&
+          this.facilityControl.inTerminalArea(inst, facility) &&
+          !this.facilityControl.isCleared(inst)
+        ) {
+          this.facilityControl.request(inst, facility);
           s.state = WAITING_FOR_DOCK;
           s.dest = null;
           s.waypoint = null;
           s.detours = 0;
           s.stallTimer = 0;
-          s.queuePosition = this._claimQueueSlot(facility);
           return;
         }
         return this._travel(inst, s, dt, DOCK_DISTANCE, () => {
@@ -308,7 +310,7 @@ export class HarvesterAI {
         });
       }
       case WAITING_FOR_DOCK:
-        return this._waitingForDock(inst, s);
+        return this._waitingForDock(inst, s, dt);
       case UNLOADING:
         return this._unload(inst, s, dt);
       case PARKED:
@@ -497,7 +499,7 @@ export class HarvesterAI {
         s.state = PARKED;
         // Initialize parking position tracking
         if (!facility.parkedHarvesters) facility.parkedHarvesters = [];
-        s.parkingBayIndex = facility.parkedHarvesters.length % MAX_QUEUE_POSITIONS;
+        s.parkingBayIndex = facility.parkedHarvesters.length % MAX_PARKING_BAYS;
         facility.parkedHarvesters.push(inst);
       } else {
         s.state = IDLE;
@@ -514,47 +516,65 @@ export class HarvesterAI {
       return;
     }
 
-    // Check if dock is occupied
-    if (!facility.dockedHarvester) {
-      facility.dockedHarvester = inst;
+    // Arrival converts the approach clearance into a service claim, which is
+    // what stops the lease clock — an unload legitimately outlasts it.
+    if (this.facilityControl.markDocked(inst) || this.facilityControl.statusOf(inst) === DOCKED) {
+      s.abandonSweeps = 0;
       s.state = UNLOADING;
       s.unloadWaitTimer = 0;
-    } else {
-      s.state = WAITING_FOR_DOCK;
-      s.queuePosition = this._claimQueueSlot(facility);
+      return;
     }
+    // Arrived without a live clearance (revoked mid-approach): get back in line.
+    this.facilityControl.request(inst, facility);
+    s.state = WAITING_FOR_DOCK;
   }
 
-  _waitingForDock(inst, s) {
+  /**
+   * Hold at the assigned fix until the controller grants the corridor.
+   *
+   * Driven through `_travel`, not a raw `_order`. That is the whole point: the
+   * old version re-issued the same order every tick with no stall timer, no
+   * no-progress timer and no detours, at a ring point computed from raw
+   * `cos/sin` with no terrain check — so a waiter whose fix sat behind a rock
+   * ordered it forever and never once registered as stuck.
+   */
+  _waitingForDock(inst, s, dt) {
     const facility = this._facility(inst);
     if (!facility) {
       s.state = IDLE;
       return;
     }
 
-    // Check if dock is now free
-    if (!facility.dockedHarvester) {
-      this._releaseQueueSlot(facility, s);
-      facility.dockedHarvester = inst;
-      s.state = UNLOADING;
-      s.unloadWaitTimer = 0;
+    // Outside the terminal area there is nothing to hold for — and holding
+    // anyway is how the first version deadlocked: a claim taken from across
+    // the map put the whole drive on the lease clock. Reachable from
+    // `_onAbandoned`'s escalation, which can send a wedged harvester here from
+    // any distance, so the check belongs on this side rather than only at the
+    // TO_BASE call site.
+    if (!this.facilityControl.inTerminalArea(inst, facility)) {
+      this.facilityControl.release(inst);
+      s.state = TO_BASE;
+      s.dest = null;
       return;
     }
 
-    // Park in queue position around facility. A real per-waiter index, not
-    // the hardcoded 0 this used to assign to everyone — that funnelled every
-    // waiting harvester onto the identical world point, where they piled up
-    // and collided with each other.
-    const angle = (s.queuePosition ?? 0) * (Math.PI * 2 / MAX_QUEUE_POSITIONS);
-    const queueX = facility.x + Math.cos(angle) * QUEUE_RING;
-    const queueZ = facility.z + Math.sin(angle) * QUEUE_RING;
-
-    const pos = inst.group.position;
-    const d = Math.hypot(queueX - pos.x, queueZ - pos.z);
-
-    if (d > 1) {
-      this._order(inst, s, { x: queueX, z: queueZ });
+    this.facilityControl.request(inst, facility);
+    if (this.facilityControl.statusOf(inst) === CLEARED) {
+      // Cleared to approach. Note this does *not* claim the dock from out on
+      // the ring — the old code did, and instantly failed `_unload`'s drift
+      // check from there, releasing the dock it had just taken.
+      s.state = TO_BASE;
+      s.dest = null;
+      s.waypoint = null;
+      s.detours = 0;
+      s.stallTimer = 0;
+      return;
     }
+
+    this._travel(inst, s, dt, HOLD_ARRIVE_RADIUS, () => {
+      inst.arrive('reached');
+      s.dest = null;
+    });
   }
 
   /**
@@ -594,67 +614,42 @@ export class HarvesterAI {
     if (!this._order(inst, s, dest)) s.retryTimer = RETRY_PAUSE;
   }
 
-  /** Release `facility.dockedHarvester` — the single place this ever happens,
-   * so every exit from UNLOADING/WAITING_FOR_DOCK goes through the same door. */
+  /** Give up the dock — the single door every exit from UNLOADING goes through. */
   _releaseDock(facility, inst) {
-    if (facility && facility.dockedHarvester === inst) facility.dockedHarvester = null;
-  }
-
-  /** Real per-waiter allocation — mirrors repairController's own queue Set. */
-  _claimQueueSlot(facility) {
-    const taken = facility._haulQueue ?? (facility._haulQueue = new Set());
-    for (let i = 0; i < 64; i++) {
-      if (!taken.has(i)) {
-        taken.add(i);
-        return i;
-      }
-    }
-    return -1; // 64 concurrent waiters at one facility — not a realistic fleet size
-  }
-
-  _releaseQueueSlot(facility, s) {
-    facility?._haulQueue?.delete(s.queuePosition);
-    s.queuePosition = null;
+    this.facilityControl.release(inst);
   }
 
   /**
-   * A harvester dying releases whatever dock/queue claim it held, then drops
-   * its state entirely. A facility dying needs no equivalent here: every
-   * state that depends on one — `_atDock`, `_waitingForDock`, `_unload`, and
-   * `_destination`'s TO_BASE case — re-resolves `_facility(inst)` fresh each
-   * tick rather than holding a reference, so once the dead facility is gone
-   * from `structures.instances` those calls simply start returning null and
-   * every harvester that was headed there self-heals to IDLE on its own.
+   * Only the routing state needs dropping. The clearance claim does not: it
+   * lives on the vehicle, and `facilityControl` rebuilds its index from the
+   * live fleet each tick, so a destroyed harvester's claim ceases to exist by
+   * being absent rather than by being released.
+   *
+   * That is a deliberate deletion, not an omission. The old release path
+   * resolved the facility with `_facility(inst)` — a `.find()` *search*, not
+   * the facility the claim was taken on — so with two same-team facilities it
+   * freed an index out of the wrong queue while leaking the real one.
+   *
+   * A facility dying needs no equivalent either: every state that depends on
+   * one re-resolves `_facility(inst)` fresh each tick rather than holding a
+   * reference, so once it is gone those calls return null and every harvester
+   * headed there self-heals to IDLE.
    */
   onDestroy(inst) {
     if (inst.kind !== 'vehicle') return;
-    const s = this.states.get(inst);
-    if (s) {
-      const facility = this._facility(inst);
-      if (facility) {
-        this._releaseDock(facility, inst);
-        this._releaseQueueSlot(facility, s);
-      }
-    }
     this.states.delete(inst);
   }
 
   /**
    * What to resume into once manual driving, an open menu, or a repair trip
-   * ends. Docking and queueing hold an exclusive reservation — the dock slot,
-   * a queue ring position — that a forced pause can't honestly keep: the
-   * harvester isn't meaningfully "still there" once something else has the
-   * wheel. Both release their reservation and resume into TO_BASE instead of
-   * their own state, which cleanly re-approaches and re-claims one rather
-   * than resuming an unload/wait that no longer owns what it thinks it does.
+   * ends. Docking and holding both carry a clearance a forced pause can't
+   * honestly keep — the harvester isn't meaningfully "still there" once
+   * something else has the wheel — so both give it up and resume into TO_BASE,
+   * which cleanly re-requests rather than resuming a claim it no longer owns.
    */
   _safeResumeState(inst, s) {
-    if (s.state === UNLOADING) {
-      this._releaseDock(this._facility(inst), inst);
-      return TO_BASE;
-    }
-    if (s.state === WAITING_FOR_DOCK) {
-      this._releaseQueueSlot(this._facility(inst), s);
+    if (s.state === UNLOADING || s.state === WAITING_FOR_DOCK) {
+      this.facilityControl.release(inst);
       return TO_BASE;
     }
     return s.state;
@@ -683,7 +678,7 @@ export class HarvesterAI {
 
     // Calculate parking bay position
     const bayIndex = s.parkingBayIndex ?? 0;
-    const angle = bayIndex * (Math.PI * 2 / MAX_QUEUE_POSITIONS);
+    const angle = bayIndex * (Math.PI * 2 / MAX_PARKING_BAYS);
     const parkX = facility.x + Math.cos(angle) * 28; // parking bay ring at 28 units
     const parkZ = facility.z + Math.sin(angle) * 28;
 
@@ -736,6 +731,13 @@ export class HarvesterAI {
     if (s.state === TO_BASE || s.state === FLEEING) {
       const f = this._facility(inst);
       return f ? { x: f.dock.x, z: f.dock.z } : null;
+    }
+    // Holding: the controller owns where. Resolved fresh each tick like every
+    // other destination here, so a re-slotted waiter re-aims without special
+    // handling.
+    if (s.state === WAITING_FOR_DOCK) {
+      const f = this._facility(inst);
+      return f ? this.facilityControl.holdingFix(inst, f) : null;
     }
     // Repair run: aim for the bay's dock. A destroyed or no-longer-idle bay
     // resolves to null, which _travel turns into a clean fall-back to IDLE.
@@ -790,6 +792,12 @@ export class HarvesterAI {
     const cost = Math.ceil(missing * bay.def.repair.creditsPerHealth);
     if (this.game.teamOf(inst).credits < cost) return false;
 
+    // Give the dock up before heading the other way. TO_REPAIR is reachable
+    // straight out of TO_BASE, and without this the harvester would hold the
+    // depot's approach corridor for the entire drive to the bay — the lease
+    // would eventually reclaim it, but only after blocking the queue for
+    // CLEARANCE_LEASE seconds for no reason.
+    this.facilityControl.release(inst);
     s.repairBay = bay;
     s.state = TO_REPAIR;
     s.dest = null;
@@ -986,9 +994,49 @@ export class HarvesterAI {
     s.detours = 0;
 
     if (s.state === TO_BASE) {
-      // Home is never bannable: the pad is reachable by construction, the base
-      // drove there. A harvester circling near home beats one frozen in a
-      // canyon, so just keep trying.
+      // Home is never bannable — the pad is reachable by construction, the base
+      // drove there — so this used to reset and re-run the identical five-angle
+      // sweep, on the reasoning that "a harvester circling near home beats one
+      // frozen in a canyon."
+      //
+      // `harvester-collision-avoidance-study.md` measured what that actually
+      // does: a harvester knocked into a bad spot by an ordinary collision is
+      // not circling, it is stationary, and it re-ran the same failing plan 256
+      // times over eight minutes without moving. The destination being
+      // reachable in principle says nothing about it being reachable from
+      // *here*, which is the thing that had failed.
+      //
+      // So count the sweeps, and after enough of them stop repeating the plan:
+      // route via the holding fix first. That is a different, known-standable
+      // point the controller has already terrain-probed, and reaching it
+      // re-approaches the dock from somewhere other than wherever this harvester
+      // has got itself wedged.
+      s.abandonSweeps = (s.abandonSweeps ?? 0) + 1;
+      if (s.abandonSweeps >= ABANDON_ESCALATION) {
+        s.abandonSweeps = 0;
+        const facility = this._facility(inst);
+        // Only worth doing near home: the holding fix is a point *at* the
+        // facility, so routing via it from across the map is not an
+        // alternative approach, just a longer version of the failing one.
+        if (facility && this.facilityControl.inTerminalArea(inst, facility)) {
+          this.facilityControl.request(inst, facility);
+          s.state = WAITING_FOR_DOCK;
+          s.dest = null;
+          s.stallTimer = 0;
+          return;
+        }
+      }
+      s.retryTimer = RETRY_PAUSE;
+      s.dest = null;
+      return;
+    }
+
+    if (s.state === WAITING_FOR_DOCK) {
+      // Even the holding fix is unreachable from here. Re-requesting puts this
+      // harvester at the back of the queue and, because slots are allocated in
+      // queue order, hands it a *different* fix rather than the one it just
+      // failed to reach.
+      this.facilityControl.requeue(inst);
       s.retryTimer = RETRY_PAUSE;
       s.dest = null;
       return;

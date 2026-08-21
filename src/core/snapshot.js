@@ -111,6 +111,30 @@ function serializeVehicle(inst) {
       ? null
       : round(inst.turretAim, 5),
     threatUntil: round(inst.threatUntil ?? 0, 3),
+    /**
+     * Facility clearance. Saved on the vehicle because the vehicle *is* the
+     * ledger — facilityControl holds only a derived index and rebuilds it on
+     * the first tick after load, so this is the whole of it.
+     *
+     * `facilityId` is a structure id, per the cross-references-as-ids rule; it
+     * is resolved lazily by the controller rather than in the second pass,
+     * since a claim on a facility that no longer exists is simply dropped.
+     * The tick fields are sim ticks/seconds and stay meaningful because
+     * `resetSimClock(snap.simTick)` restores the clock they were written
+     * against.
+     */
+    clearance: inst.clearance
+      ? {
+          facilityId: inst.clearance.facilityId,
+          kind: inst.clearance.kind,
+          slot: inst.clearance.slot ?? null,
+          status: inst.clearance.status,
+          requestedTick: inst.clearance.requestedTick,
+          grantedAt:
+            inst.clearance.grantedAt == null ? null : round(inst.clearance.grantedAt, 3),
+          revokes: inst.clearance.revokes ?? 0,
+        }
+      : null,
     // Cross-references, as ids. Bloom fields already carry a stable id.
     targetFieldId: inst.targetField?.id ?? null,
     combatTargetId: inst.combatTarget?.id ?? null,
@@ -153,8 +177,9 @@ function serializeStructure(inst) {
     upgradeLevel: inst.upgradeLevel ?? 0,
     padId: inst.pad?.id ?? null,
     buildTimeOverride: inst.buildTimeOverride ?? null,
-    dockedHarvesterId: inst.dockedHarvester?.id ?? null,
-    dockedVehicleId: inst.dockedVehicle?.id ?? null,
+    // Dock reservations are deliberately absent: they live on the vehicle
+    // (`clearance`, below) rather than here, so there is one copy to save
+    // instead of two halves that could restore disagreeing with each other.
     parkedHarvesterIds: (inst.parkedHarvesters ?? []).map((v) => v.id),
   };
 }
@@ -413,6 +438,10 @@ export function deserialize(ctx, snap) {
     inst._fireCooldown = saved.fireCooldown ?? 0;
     inst.turretAim = saved.turretAim ?? null;
     inst.threatUntil = saved.threatUntil ?? 0;
+    // Facility clearance. `?? null` keeps pre-clearance saves loading: a
+    // harvester with no claim simply re-requests one on its next tick, which
+    // is also what happens after any revoke, so there is no special case.
+    inst.clearance = saved.clearance ?? null;
     // Age + lifetime stats. `??` keeps older saves loading: a missing createdAt
     // falls back to the fresh tick spawn() just stamped, stats default to 0.
     if (saved.createdAt != null) inst.createdAt = saved.createdAt;
@@ -481,12 +510,6 @@ export function deserialize(ctx, snap) {
   for (const saved of snap.structures) {
     const inst = structureById.get(saved.id);
     if (!inst) continue;
-    if (saved.dockedHarvesterId != null) {
-      inst.dockedHarvester = vehicleById.get(saved.dockedHarvesterId) ?? null;
-    }
-    if (saved.dockedVehicleId != null) {
-      inst.dockedVehicle = vehicleById.get(saved.dockedVehicleId) ?? null;
-    }
     if (saved.parkedHarvesterIds?.length) {
       inst.parkedHarvesters = saved.parkedHarvesterIds
         .map((id) => vehicleById.get(id))
