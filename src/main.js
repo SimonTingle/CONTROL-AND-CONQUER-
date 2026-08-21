@@ -937,6 +937,21 @@ const view = {
       controls.update();
     }
   },
+  /**
+   * The player explicitly picked a vehicle from the drawer — take the camera
+   * there regardless of what it was doing a moment ago. Without this, a
+   * minimap click (which deliberately drops `chase.enabled` to hand the view
+   * to free MapControls) left every vehicle-picker selection silently doing
+   * nothing to the camera: `setActive` alone never touched it, and the one
+   * call site that did (`chase.reset`) only fired `if (chase.enabled)`, which
+   * is exactly the flag the minimap had just turned off.
+   */
+  focusVehicle(instance) {
+    if (!instance) return null;
+    vehicles.setActive(instance);
+    view.setChase(true); // re-enables chase and recenters — see setChase above
+    return instance;
+  },
 };
 
 /**
@@ -1616,7 +1631,12 @@ const vehiclePicker = new VehiclePicker(VEHICLE_CATALOG, {
           return instance;
         })();
     // Snap in behind the new vehicle rather than flying across the map to it.
-    if (chase.enabled) chase.reset(instance);
+    view.focusVehicle(instance);
+  },
+  // Clicking an already-Active card bypasses onSelect entirely (it calls
+  // vehicles.setActive directly) — this is the camera side of that path.
+  onFocus(instance) {
+    view.focusVehicle(instance);
   },
 });
 
