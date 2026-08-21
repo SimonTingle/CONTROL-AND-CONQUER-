@@ -48,7 +48,7 @@ export class RadialMenu {
    * @param {object} instance the vehicle to attach to
    * @param {Array} commands from commandsFor(); entries carry `enabledResult`
    */
-  openFor(instance, commands) {
+  openFor(instance, commands, subtitle = '') {
     this.instance = instance;
     this.items = commands;
     // Autonomous drivers watch this to hold position while the player decides —
@@ -60,6 +60,15 @@ export class RadialMenu {
     title.textContent = instance.def.name;
 
     const nodes = [ring, title];
+
+    // Live status the player can't otherwise see — a facility's queue depth, a
+    // vehicle's clearance. Only rendered when there is something to say, so the
+    // menu doesn't grow an empty line for everything that has no status.
+    if (subtitle) {
+      const sub = el('div', 'rm-subtitle');
+      sub.textContent = subtitle;
+      nodes.push(sub);
+    }
 
     commands.forEach((cmd, i) => {
       const button = el('button', 'rm-item');

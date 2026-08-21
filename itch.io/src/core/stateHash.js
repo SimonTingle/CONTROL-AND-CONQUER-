@@ -25,23 +25,10 @@
  *    one redundant state transfer, not a broken match.
  */
 
+import { fnv1a } from './fnv1a.js';
+
 /** World units (and hitpoints) per hash step. See the note on quantisation above. */
 const QUANTUM = 100; // i.e. 0.01 resolution
-
-/**
- * FNV-1a, 32-bit. Chosen for being a handful of lines with no dependency and
- * good avalanche on short strings — this is a change detector, not a security
- * primitive.
- */
-function fnv1a(str) {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    // 32-bit FNV prime multiply, written as shifts so it stays in int range
-    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
-  }
-  return h >>> 0;
-}
 
 /** Quantise a float to an integer, with NaN/undefined collapsing to a constant. */
 function q(v) {

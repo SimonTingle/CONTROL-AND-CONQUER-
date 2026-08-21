@@ -186,6 +186,31 @@ export const BUILDER_GROUPS = [
 ];
 
 /**
+ * Every slider's range, as `{ 'dotted.path': { min, max } }`.
+ *
+ * The ranges above were always the real limits of what `vehicleFactory.js` and
+ * the sim cope with — but until now they were *only* HTML attributes on a
+ * widget, so nothing enforced them. `validateDef` had no upper bound on
+ * anything: a def with `speed: 1e6` or `turret.damage: 1e9` validated cleanly
+ * and would have been perfectly playable, which stops being merely odd once a
+ * vehicle can arrive from another player.
+ *
+ * Derived rather than restated so there is exactly one place a range is
+ * written down. Adding a slider makes it binding automatically; changing one
+ * changes both the widget and the check together.
+ */
+export function deriveBounds(groups = BUILDER_GROUPS) {
+  const bounds = {};
+  for (const group of groups) {
+    for (const control of group.controls) {
+      if (control.type !== 'slider') continue;
+      bounds[control.path] = { min: control.min, max: control.max };
+    }
+  }
+  return bounds;
+}
+
+/**
  * Keep the axle arrays consistent with the axle count.
  *
  * `axleFractions` is what axleOffsets() actually reads, so changing the axle

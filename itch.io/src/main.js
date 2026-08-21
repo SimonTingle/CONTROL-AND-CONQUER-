@@ -17,6 +17,7 @@ import { AuthScreen } from './ui/authScreen.js';
 import { BuilderScreen } from './builder/builderScreen.js';
 import { loadCustomDefs } from './builder/customVehicles.js';
 import { catalogFor } from './builder/customCatalog.js';
+import { validateDef } from './builder/vehicleDraft.js';
 import { api } from './net/api.js';
 import { serialize, deserialize } from './core/snapshot.js';
 import { AiDifficultyScreen } from './ui/aiDifficultyScreen.js';
@@ -31,6 +32,7 @@ import { VEHICLE_CATALOG } from './vehicles/catalog.js';
 import { commandsFor } from './vehicles/commands.js';
 import { HarvesterAI } from './vehicles/harvesterAI.js';
 import { RepairController } from './vehicles/repairController.js';
+import { FacilityControl, CLEARED, DOCKED, HOLDING } from './vehicles/facilityControl.js';
 import { TrafficController } from './vehicles/trafficController.js';
 import { AiCommander } from './vehicles/aiCommander.js';
 import { CombatController } from './vehicles/combatController.js';
@@ -757,7 +759,7 @@ function openMenuAt(clientX, clientY) {
     marker.visible = false;
   }
 
-  radialMenu.openFor(instance, commandsFor(instance, commandContext));
+  radialMenu.openFor(instance, commandsFor(instance, commandContext), clearanceSubtitle(instance));
 }
 
 // Kept for real mice/trackpads, and as a fallback on any touch browser that
@@ -919,6 +921,7 @@ const view = {
     // Buildings stand on the old heightfield, and harvesters hold references to
     // fields that no longer exist.
     structures.clear();
+    facilityControl.reset();
     harvesterAI.reset();
     repairController.reset();
     radialMenu.close();
@@ -933,6 +936,21 @@ const view = {
       controls.target.copy(vehicles.active.group.position);
       controls.update();
     }
+  },
+  /**
+   * The player explicitly picked a vehicle from the drawer — take the camera
+   * there regardless of what it was doing a moment ago. Without this, a
+   * minimap click (which deliberately drops `chase.enabled` to hand the view
+   * to free MapControls) left every vehicle-picker selection silently doing
+   * nothing to the camera: `setActive` alone never touched it, and the one
+   * call site that did (`chase.reset`) only fired `if (chase.enabled)`, which
+   * is exactly the flag the minimap had just turned off.
+   */
+  focusVehicle(instance) {
+    if (!instance) return null;
+    vehicles.setActive(instance);
+    view.setChase(true); // re-enables chase and recenters — see setChase above
+    return instance;
   },
 };
 
@@ -1361,8 +1379,16 @@ function leaveWreckage(inst) {
   world.scene.add(group);
 }
 
-const harvesterAI = new HarvesterAI({ vehicles, world, heightmap, structures, game });
-const repairController = new RepairController({ vehicles, structures, heightmap, game });
+// Ground control for every dock. Constructed before its two consumers because
+// both take it as a dependency — it owns the claim bookkeeping they each used
+// to keep their own copy of.
+const facilityControl = new FacilityControl({ vehicles, structures, heightmap });
+const harvesterAI = new HarvesterAI({
+  vehicles, world, heightmap, structures, game, facilityControl,
+});
+const repairController = new RepairController({
+  vehicles, structures, heightmap, game, facilityControl,
+});
 const trafficController = new TrafficController({ vehicles });
 const combatController = new CombatController({
   vehicles,
@@ -1528,7 +1554,26 @@ const navGrid = new NavGrid(heightmap);
 // `entities` is here for the deployDefense intent, which consumes the vehicle
 // it deploys from and must do so through the destroy pipeline rather than
 // splicing an array another system may still be walking.
-const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit, navGrid, entities };
+const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit, navGrid, entities, facilityControl };
+
+/**
+ * One line of ground-control status for the radial menu: how many vehicles are
+ * holding for a facility, or where this vehicle stands in that queue. Empty
+ * when neither applies, which is most of the time.
+ */
+function clearanceSubtitle(instance) {
+  if (instance.kind === 'structure') {
+    const waiting = facilityControl.queueDepth(instance);
+    if (!waiting) return '';
+    return waiting === 1 ? '1 vehicle holding' : `${waiting} vehicles holding`;
+  }
+  if (facilityControl.isStuck(instance)) return 'cannot reach dock';
+  const status = facilityControl.statusOf(instance);
+  if (status === CLEARED) return 'cleared to approach';
+  if (status === DOCKED) return 'docked';
+  if (status === HOLDING) return 'holding for clearance';
+  return '';
+}
 
 /**
  * Everything core/snapshot.js needs to read or rebuild a world.
@@ -1586,7 +1631,12 @@ const vehiclePicker = new VehiclePicker(VEHICLE_CATALOG, {
           return instance;
         })();
     // Snap in behind the new vehicle rather than flying across the map to it.
-    if (chase.enabled) chase.reset(instance);
+    view.focusVehicle(instance);
+  },
+  // Clicking an already-Active card bypasses onSelect entirely (it calls
+  // vehicles.setActive directly) — this is the camera side of that path.
+  onFocus(instance) {
+    view.focusVehicle(instance);
   },
 });
 
@@ -1774,6 +1824,31 @@ async function startOnlineMatch(matchId, difficulty) {
 
   game.mode = 'multiplayer-online';
   game.localTeamId = welcome.teamId;
+
+  // The match's vehicle set, pinned from the host's loadout when the lobby was
+  // created and relayed identically to every peer. Every client validates the
+  // same received bytes with the same deterministic checker, so every client
+  // reaches the same verdict — and a def that fails ends the match here rather
+  // than being skipped, because skipping is precisely how a peer ends up
+  // simulating a different fleet from everyone else. The server has already
+  // bounds-checked these; anything failing now is a build mismatch, and a loud
+  // stop is the honest answer to that.
+  const matchDefs = Array.isArray(welcome.customDefs) ? welcome.customDefs : [];
+  for (const def of matchDefs) {
+    const problems = validateDef(def, { catalog: VEHICLE_CATALOG });
+    if (problems.length) {
+      // Not endOnlineMatch(): `match` is not assigned until further down, and
+      // that helper no-ops without it. Same effect, done directly.
+      client.close();
+      sessionStorage.setItem(
+        'pendingToast',
+        `This match uses a vehicle this build cannot load ("${def?.name ?? 'unnamed'}": ${problems[0]}).`
+      );
+      location.reload();
+      return;
+    }
+  }
+  game.matchDefs = matchDefs;
   // Team count comes from the lobby row rather than from who happens to be
   // connected: a client that joins the socket late must still build the same
   // number of teams as everyone else, or it diverges before it starts.
@@ -2142,17 +2217,27 @@ game.portalScreen = new PortalScreen(
 game.customDefs = [];
 
 /**
+ * The vehicle set an online match supplied, from its `welcome` frame.
+ *
+ * Kept separate from `customDefs` on purpose: these are not this player's
+ * vehicles, they are the match's, pinned from the host's loadout when the
+ * lobby was created and relayed identically to every peer. Online play uses
+ * this and ignores `customDefs` entirely — see catalogFor().
+ */
+game.matchDefs = [];
+
+/**
  * Point the picker and the vehicle controller at the catalog this mode is
  * allowed to see.
  *
- * `catalogFor` is the whole rule — an allowlist of offline modes, so anything
+ * `catalogFor` is the whole rule — allowlists in both directions, so anything
  * it does not recognise gets the built-in catalog only. Both consumers have to
  * be updated together: the picker decides what can be *chosen*, `defOf`
  * decides what an id can still *resolve to*, and a mismatch between them is a
  * vehicle that can be spawned but not restored, or listed but not built.
  */
 function applyCustomCatalog() {
-  const catalog = catalogFor(game.mode, game.customDefs);
+  const catalog = catalogFor(game.mode, game.customDefs, game.matchDefs);
   const extras = catalog.filter((d) => !VEHICLE_CATALOG.includes(d));
   vehicles.setExtraDefs(extras);
   vehiclePicker.setCatalog(catalog);
@@ -2316,6 +2401,11 @@ function simTick(dt) {
   // Between the input and the fleet: the AI must see this frame's keys before
   // deciding (so it never issues an order the player just cancelled) and set
   // its targets before the fleet consumes them.
+  // Before harvesterAI and repairController both: they must route against an
+  // already-decided assignment, not race each other to claim a dock. Also the
+  // pass that rebuilds the clearance index from the live fleet, which is what
+  // reaps claims whose holder died or whose facility is gone.
+  p.time('facilityControl', () => facilityControl.update());
   p.time('harvesterAI', () => harvesterAI.update(dt));
   // Same reasoning, one level up: each AI team's own deploy/build/scout
   // decisions need this frame's harvester targets already set (so it isn't

@@ -703,11 +703,10 @@ class StructureInstance {
         ? { x: x + Math.cos(angle) * def.dockOffset, z: z + Math.sin(angle) * def.dockOffset }
         : null;
 
-    // Track which harvester is currently docking
-    this.dockedHarvester = null;
-    // Same idea, generic name — the repair bay's single-slot queue reads/writes
-    // this instead, so it doesn't fight over a harvester-specific field.
-    this.dockedVehicle = null;
+    // No dock-reservation field here any more. Who holds a dock lives on the
+    // *vehicle* (`inst.clearance`) and is indexed by facilityControl, which
+    // rebuilds from the live fleet each tick — a structure-side field could
+    // outlive its holder, and did.
 
     // Buried until it rises, so nothing casts a shadow from under the pad.
     for (const m of this.group.userData.shadowCasters) m.castShadow = false;

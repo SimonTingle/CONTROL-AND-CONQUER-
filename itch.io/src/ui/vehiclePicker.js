@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { buildVehicleMesh, turningCircleOf } from '../vehicles/vehicleFactory.js';
+import { CLEARED, DOCKED, STUCK_REVOKES } from '../vehicles/facilityControl.js';
 
 const SPIN_SPEED = 0.5; // radians / second
 
@@ -7,6 +8,25 @@ const SPIN_SPEED = 0.5; // radians / second
 function formatDistance(metres) {
   const m = metres ?? 0;
   return m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(1)} km`;
+}
+
+/**
+ * Where this vehicle stands with ground control, or '' if it isn't dealing
+ * with a facility right now.
+ *
+ * Read straight off `inst.clearance` rather than through facilityControl: the
+ * claim lives on the vehicle, so the UI needs no handle on the controller to
+ * report it. A repeatedly-revoked vehicle is called out separately — that is
+ * the whole point of tracking revokes, since a harvester wedged short of the
+ * dock otherwise reports the same thing as one three seconds from unloading.
+ */
+function clearanceText(inst) {
+  const c = inst.clearance;
+  if (!c) return '';
+  if ((c.revokes ?? 0) >= STUCK_REVOKES) return 'stuck';
+  if (c.status === DOCKED) return 'docked';
+  if (c.status === CLEARED) return 'cleared';
+  return 'holding';
 }
 
 /**
@@ -19,13 +39,15 @@ function formatDistance(metres) {
 function instanceStatsText(inst) {
   const healthPct = Math.round((inst.health / inst.def.maxHealth) * 100);
   const dist = formatDistance(inst.odometer);
+  const clearance = clearanceText(inst);
+  const suffix = clearance ? ` · ${clearance}` : '';
   switch (inst.def.id) {
     case 'crystal-harvester':
-      return `${healthPct}% · ${Math.round(inst.creditsDelivered ?? 0)} cr`;
+      return `${healthPct}% · ${Math.round(inst.creditsDelivered ?? 0)} cr${suffix}`;
     case 'gun-platform':
-      return `${healthPct}% · ${dist} · ${inst.kills ?? 0} kills`;
+      return `${healthPct}% · ${dist} · ${inst.kills ?? 0} kills${suffix}`;
     default:
-      return `${healthPct}% · ${dist}`;
+      return `${healthPct}% · ${dist}${suffix}`;
   }
 }
 
@@ -46,9 +68,14 @@ const PREVIEW_WIDTH = 128;
 const PREVIEW_HEIGHT = 128;
 
 export class VehiclePicker {
-  constructor(catalog, { onSelect, vehicles, playerTeamId = 0 } = {}) {
+  constructor(catalog, { onSelect, onFocus, vehicles, playerTeamId = 0 } = {}) {
     this.catalog = catalog;
     this.onSelect = onSelect;
+    // Fired after an Active card sets a vehicle active — the click handler
+    // below has no camera access of its own, so this is how the caller (main.js)
+    // gets to recenter the view. Optional: without it, selection still works,
+    // just without a guaranteed recenter (see focusVehicle's own comment).
+    this.onFocus = onFocus;
     this.vehicles = vehicles;
     // Only the player's own vehicles ever populate "Active Vehicles" — see
     // buildPreviews() and update()'s rebuild check below. Without this, every
@@ -222,6 +249,7 @@ export class VehiclePicker {
 
     card.addEventListener('click', () => {
       this.vehicles?.setActive(instance);
+      this.onFocus?.(instance);
     });
 
     // Carry the instance + its stats node on the preview so update() can keep

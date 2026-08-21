@@ -14,7 +14,7 @@
  * full def is transmitted at match start, custom vehicles are single-player.
  */
 import { api } from '../net/api.js';
-import { DRAFT_SCHEMA_VERSION, validateDef } from './vehicleDraft.js';
+import { DRAFT_SCHEMA_VERSION, validateDef, syncId } from './vehicleDraft.js';
 
 // Re-exported so callers have one import for "custom vehicles", while the rule
 // itself stays in a file `npm test` can load without Vite's injected globals.
@@ -53,6 +53,11 @@ export async function loadCustomDefs() {
       continue;
     }
     const def = payload?.def;
+    // Ids are content-addressed, so one stored by an older build (when they
+    // were name slugs) no longer matches its own contents. Re-derive before
+    // validating rather than rejecting the row: the def itself is still good,
+    // and the id was always derived data that happened to be persisted.
+    if (def && typeof def === 'object') syncId(def);
     const problems = validateDef(def);
     if (problems.length) broken.push({ name: row.name, problems });
     else defs.push({ ...def, draft: payload.draft === true, saveId: row.id, saveName: row.name });

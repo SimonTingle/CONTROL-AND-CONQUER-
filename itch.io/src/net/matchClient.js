@@ -21,7 +21,12 @@ const API_BASE = typeof __API_URL__ === 'string' ? __API_URL__ : '';
  * Bump alongside the server's constant whenever the wire format changes in a
  * way an older or newer peer would misinterpret.
  */
-export const PROTOCOL_VERSION = 1;
+// v2 added `customDefs` to the `welcome` frame — the match's author-built
+// vehicle set. A v1 client joining a v2 match would ignore the array and
+// resolve none of those defIds, which is precisely the silent divergence the
+// version check exists to prevent, so this is exactly the kind of change that
+// must bump it rather than ride along as an additive field.
+export const PROTOCOL_VERSION = 2;
 
 // Exported so the query-string construction can be checked directly without a
 // browser `location` global — see matchClient-protocol.test.mjs, which sets
