@@ -68,9 +68,14 @@ const PREVIEW_WIDTH = 128;
 const PREVIEW_HEIGHT = 128;
 
 export class VehiclePicker {
-  constructor(catalog, { onSelect, vehicles, playerTeamId = 0 } = {}) {
+  constructor(catalog, { onSelect, onFocus, vehicles, playerTeamId = 0 } = {}) {
     this.catalog = catalog;
     this.onSelect = onSelect;
+    // Fired after an Active card sets a vehicle active — the click handler
+    // below has no camera access of its own, so this is how the caller (main.js)
+    // gets to recenter the view. Optional: without it, selection still works,
+    // just without a guaranteed recenter (see focusVehicle's own comment).
+    this.onFocus = onFocus;
     this.vehicles = vehicles;
     // Only the player's own vehicles ever populate "Active Vehicles" — see
     // buildPreviews() and update()'s rebuild check below. Without this, every
@@ -244,6 +249,7 @@ export class VehiclePicker {
 
     card.addEventListener('click', () => {
       this.vehicles?.setActive(instance);
+      this.onFocus?.(instance);
     });
 
     // Carry the instance + its stats node on the preview so update() can keep
