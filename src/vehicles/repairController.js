@@ -111,6 +111,15 @@ export class RepairController {
     // harvesterAI hands off (sets inst.repair itself), the servicing loop below
     // still runs for them — only the *initiation* is suppressed here.
     if (inst.def.capacity) return;
+    // Same carve-out, same reason, for an AI combat unit already withdrawing:
+    // aiCommander pulls one back at 0.4 and drives the long leg itself with
+    // NavGrid routing, precisely because the drive below has no pathfinder and
+    // strands a unit hundreds of units from home. Grabbing it here at 0.3
+    // would hand that leg straight back to the weaker driver mid-withdrawal.
+    // It hands off on its own once inside the bay's terminal area, and the
+    // servicing loop below then runs for it as normal — only the *initiation*
+    // is suppressed.
+    if (inst._aiRetreat) return;
     if (inst.health > inst.def.maxHealth * AUTO_REPAIR_HEALTH_FRACTION) {
       inst._autoRepairCooldown = 0; // healthy again — re-check instantly if it dips later
       return;
