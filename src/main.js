@@ -140,7 +140,10 @@ const { heightmap } = world;
 // userForced: set once the player touches the settings-drawer toggle themselves — after
 // that, auto-quality (below) leaves shadow quality alone rather than fighting an explicit
 // choice. Fog density is left out of that guard since there's no manual fog control to defer to.
-const shadowQuality = { high: !IS_MOBILE, userForced: false };
+// High by default on every platform, mobile included — unlike antialiasing and pixel ratio
+// just above, this one isn't a per-frame cost that scales with resolution, so there's no
+// mobile-specific reason to start it lower than desktop.
+const shadowQuality = { high: true, userForced: false };
 function applyShadowQuality(high) {
   shadowQuality.high = high;
   renderer.shadowMap.type = high ? THREE.PCFSoftShadowMap : THREE.BasicShadowMap;
@@ -895,7 +898,13 @@ function syncDriveIntent() {
 // floodHeadlights is a testing-only switch that gives *every* vehicle real
 // beams — deliberately the expensive shape the headlight pool exists to avoid.
 // Off by default, never persisted; see HeadlightPool.setFlood().
-const lighting = { forceHeadlights: false, floodHeadlights: false };
+//
+// forceHeadlights defaults on for mobile: on a small/dim screen the active
+// vehicle's beam is worth having lit even before headlightsWanted()'s own
+// dusk check would turn it on, and — unlike floodHeadlights — this only ever
+// touches the single light already attached to vehicles.active, not the
+// re-link-triggering light *count* HeadlightPool's header warns about.
+const lighting = { forceHeadlights: IS_MOBILE, floodHeadlights: false };
 function headlightsWanted() {
   if (lighting.forceHeadlights) return true;
   const dusk = vehicles.active?.def.lights?.duskElevation ?? 8;
