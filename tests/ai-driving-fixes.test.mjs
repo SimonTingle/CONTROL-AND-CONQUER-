@@ -12,6 +12,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { AiCommander } from '../src/vehicles/aiCommander.js';
 import { HarvesterAI } from '../src/vehicles/harvesterAI.js';
 import { RepairController } from '../src/vehicles/repairController.js';
@@ -371,4 +372,422 @@ test('economy deliberately keeps its per-id allowance', () => {
 
   assert.equal(ai._tryBuildUnit('economy', 2), true);
   assert.deepEqual(built, ['custom:abc'], 'the second type is still reachable');
+});
+
+// ---------------------------------------------------------------------------
+// Fix 5 — a hold must not be able to suppress the escapes forever
+// ---------------------------------------------------------------------------
+
+test('every escape cooldown outlasts the reverse it gates', () => {
+  // Read out of the source, not restated here. An earlier draft of this test
+  // hardcoded the multipliers and so passed against the broken value too —
+  // which is the whole failure mode a negative control exists to catch.
+  //
+  // The invariant: `escapeCooldown` is measured from the *start* of a reverse,
+  // so it has to exceed that reverse's duration or there is no forward travel
+  // between attempts at all, and the escape re-arms on the tick after each one
+  // ends — pinning `reverseTimer` non-null indefinitely, which in turn
+  // switches off the stall and no-progress escapes downstream.
+  const src = readFileSync(new URL('../src/vehicles/vehicleController.js', import.meta.url), 'utf8');
+  const durationOf = (name) => {
+    const m = src.match(new RegExp(`const ${name} = ([\\d.]+);`));
+    assert.ok(m, `${name} not found — has it been renamed?`);
+    return parseFloat(m[1]);
+  };
+  const multiplierFor = (name) => {
+    const m = src.match(new RegExp(`escapeCooldown = ${name} \\* ([\\d.]+);`));
+    assert.ok(m, `no escapeCooldown assignment found for ${name}`);
+    return parseFloat(m[1]);
+  };
+
+  for (const name of ['SHARP_TURN_REVERSE', 'BLOCKED_REVERSE']) {
+    const duration = durationOf(name);
+    const multiplier = multiplierFor(name);
+    assert.ok(
+      multiplier > 1,
+      `${name}: cooldown is ${multiplier}x its own ${duration}s reverse — it expires mid-manoeuvre, ` +
+        'so the escape re-arms with no forward travel in between'
+    );
+    // And the gap stays short, which is what the manoeuvre was tuned for.
+    assert.ok((multiplier - 1) * duration <= 1.6, `${name}: gap should stay a beat, not a pause`);
+  }
+});
+
+test('a harvester held mid-reverse indefinitely still escalates', () => {
+  // The freeze, reproduced: an order live, zero speed, and `reverseTimer`
+  // re-armed every tick so it is never null. Before the grace period both the
+  // stall and no-progress escapes were switched off by that alone, and the
+  // harvester sat still for fourteen simulated minutes.
+  const facility = makeFacility();
+  const inst = makeHarvester({ x: 200, z: 0 });
+  inst.speed = 0;
+  inst.hasOrder = true;
+  inst.yielding = false;
+  inst.reverseTimer = 0.4; // mid-reverse, and it never expires
+  inst.arrive = () => { inst.hasOrder = false; };
+  inst.setTarget = () => { inst.hasOrder = true; return true; };
+
+  const ai = new HarvesterAI({
+    vehicles: { instances: [inst] },
+    world: { blooms: { nearestTo: () => null } },
+    heightmap: DRY_HEIGHTMAP,
+    structures: { instances: [facility] },
+    game: { teamOf: () => ({ earn: () => {}, stats: {} }) },
+    facilityControl: {
+      inTerminalArea: () => false,
+      isCleared: () => false,
+      request: () => {},
+      markDocked: () => false,
+      statusOf: () => null,
+      release: () => {},
+      holdingFix: () => null,
+    },
+  });
+
+  const s = ai._stateFor(inst);
+  s.state = 'to-base';
+  s.load = 320;
+
+  let abandoned = 0;
+  ai._onAbandoned = () => { abandoned++; };
+
+  // Twenty seconds of being permanently mid-reverse.
+  for (let i = 0; i < 20 / 0.1; i++) ai._travel(inst, s, 0.1, DOCK_DISTANCE, () => {});
+
+  assert.ok(s.holdTimer > 0, 'the hold is being timed at all');
+  assert.ok(abandoned > 0, 'the escape fires once the hold outstays its grace');
+});
+
+test('a brief reverse is still treated as a deliberate manoeuvre', () => {
+  // The behaviour the gate exists for must survive: a real three-point turn
+  // must not be diagnosed as a stall and detoured out of.
+  const facility = makeFacility();
+  const inst = makeHarvester({ x: 200, z: 0 });
+  inst.speed = 0;
+  inst.hasOrder = true;
+  inst.reverseTimer = 0.4;
+  inst.arrive = () => { inst.hasOrder = false; };
+  inst.setTarget = () => { inst.hasOrder = true; return true; };
+
+  const ai = new HarvesterAI({
+    vehicles: { instances: [inst] },
+    world: { blooms: { nearestTo: () => null } },
+    heightmap: DRY_HEIGHTMAP,
+    structures: { instances: [facility] },
+    game: { teamOf: () => ({ earn: () => {}, stats: {} }) },
+    facilityControl: {
+      inTerminalArea: () => false, isCleared: () => false, request: () => {},
+      markDocked: () => false, statusOf: () => null, release: () => {}, holdingFix: () => null,
+    },
+  });
+
+  const s = ai._stateFor(inst);
+  s.state = 'to-base';
+  s.load = 320;
+
+  let abandoned = 0;
+  ai._onAbandoned = () => { abandoned++; };
+
+  for (let i = 0; i < 4 / 0.1; i++) ai._travel(inst, s, 0.1, DOCK_DISTANCE, () => {});
+
+  assert.equal(abandoned, 0, 'four seconds of reversing is a manoeuvre, not a freeze');
+  assert.equal(s.stallTimer, 0, 'and it is not accruing stall either');
+});
+
+test('fleeing is never bounded — it is a decision, not a manoeuvre', () => {
+  // A harvester holding station under its facility's guns should stay there for
+  // as long as the threat lasts; timing it out would send it back into fire.
+  const facility = makeFacility();
+  const inst = makeHarvester({ x: 200, z: 0 });
+  inst.speed = 0;
+  inst.hasOrder = true;
+  // Mid-reverse *and* fleeing: without this the mechanical hold is false, the
+  // grace timer never runs, and the test passes whether or not FLEEING is
+  // exempt — proving nothing.
+  inst.reverseTimer = 0.4;
+  inst.yielding = false;
+  inst.arrive = () => { inst.hasOrder = false; };
+  inst.setTarget = () => { inst.hasOrder = true; return true; };
+
+  const ai = new HarvesterAI({
+    vehicles: { instances: [inst] },
+    world: { blooms: { nearestTo: () => null } },
+    heightmap: DRY_HEIGHTMAP,
+    structures: { instances: [facility] },
+    game: { teamOf: () => ({ earn: () => {}, stats: {} }) },
+    facilityControl: {
+      inTerminalArea: () => false, isCleared: () => false, request: () => {},
+      markDocked: () => false, statusOf: () => null, release: () => {}, holdingFix: () => null,
+    },
+  });
+
+  const s = ai._stateFor(inst);
+  s.state = 'fleeing';
+  s.dest = { x: 0, z: 0 };
+
+  let abandoned = 0;
+  ai._onAbandoned = () => { abandoned++; };
+
+  for (let i = 0; i < 30 / 0.1; i++) ai._travel(inst, s, 0.1, DOCK_DISTANCE, () => {});
+
+  assert.equal(abandoned, 0, 'thirty seconds of holding station is allowed');
+});
+
+// ---------------------------------------------------------------------------
+// Fix 6 — three ways an escalation could never arrive
+//
+// All three were found the same way: the re-run after Fix 5 still left AI
+// harvesters motionless for minutes at a time, and instrumenting them showed
+// the escapes were not being *suppressed* so much as never *reached*.
+// ---------------------------------------------------------------------------
+
+function makeDriveInst({ x = 0, z = 0 } = {}) {
+  const inst = {
+    id: 15,
+    teamId: 1,
+    dead: false,
+    def: { id: 'crystal-harvester', capacity: 320, maxHealth: 220, maxClimbGrade: 1.2 },
+    health: 220,
+    speed: 0,
+    mode: 'mobile',
+    menuOpen: false,
+    throttle: 0,
+    steer: 0,
+    hasOrder: false,
+    repair: null,
+    clearance: null,
+    yielding: false,
+    reverseTimer: null,
+    blocked: false,
+    group: { position: { x, y: 0, z }, userData: {} },
+    targets: [],
+    setTarget(tx, tz) {
+      this.targets.push({ x: tx, z: tz });
+      this.hasOrder = true;
+      return true;
+    },
+    arrive() {
+      this.hasOrder = false;
+    },
+    beginReverse(d) {
+      this.reverseTimer = d;
+    },
+  };
+  return inst;
+}
+
+const STUB_CLEARANCE = {
+  inTerminalArea: () => false,
+  isCleared: () => false,
+  request: () => {},
+  requeue: () => {},
+  markDocked: () => false,
+  statusOf: () => null,
+  release: () => {},
+  holdingFix: () => null,
+};
+
+function makeHarvesterAI(inst, structures = []) {
+  return new HarvesterAI({
+    vehicles: { instances: [inst] },
+    world: { blooms: { nearestTo: () => null } },
+    heightmap: DRY_HEIGHTMAP,
+    structures: { instances: structures },
+    game: { teamOf: () => ({ earn: () => {}, stats: {}, credits: 10000 }) },
+    facilityControl: STUB_CLEARANCE,
+  });
+}
+
+test('repairController re-issues an order it lost on a waypoint leg', () => {
+  // The freeze: `_driveTo`'s waypoint branch returned whether or not the
+  // waypoint had been reached, so everything below it — the re-issue, the
+  // stall check, the no-progress check — was unreachable while one was live.
+  // A vehicle whose order went missing there (driveToTarget drops one on a
+  // terrain block; a leg change cancels one outright) sat with a live
+  // waypoint, no order and every timer at 0.00, holding its place in a bay
+  // queue. Two of Jade's harvesters did that for eight minutes each, one of
+  // them carrying a full load, while the team's income stayed exactly flat.
+  const bay = makeBay();
+  const inst = makeScout();
+  inst.group.position.x = 300;
+  inst.group.position.z = 300;
+  inst.hasOrder = false;
+  inst.repair = {
+    bay,
+    state: 'to-bay',
+    claimedOrder: true, // mid-leg, so the claim block does not run
+    detours: 2,
+    waypoint: { x: 340, z: 340 }, // live, and nowhere near
+  };
+  const { controller } = makeRepairCtx(inst, bay);
+
+  controller._driveTo(inst, inst.repair, bay.dock.x, bay.dock.z, 0.1);
+
+  assert.ok(inst.setTargetCalls > 0, 'the leg must not go inert with no order');
+});
+
+test('repairController drops a stale waypoint when the leg changes', () => {
+  // `claimedOrder = false` is how every caller says "new leg, new
+  // destination". The waypoint belonged to the old one; keeping it aims the
+  // vehicle at a goal this leg no longer has.
+  const bay = makeBay();
+  const inst = makeScout();
+  inst.group.position.x = 300;
+  inst.group.position.z = 300;
+  inst.hasOrder = false;
+  inst.repair = {
+    bay,
+    state: 'queued',
+    claimedOrder: false,
+    detours: 0,
+    waypoint: { x: -900, z: -900 }, // the previous leg's, in the wrong direction
+  };
+  const { controller } = makeRepairCtx(inst, bay);
+  const aimed = [];
+  const setTarget = inst.setTarget.bind(inst);
+  inst.setTarget = (tx, tz, hm) => { aimed.push({ x: tx, z: tz }); return setTarget(tx, tz, hm); };
+
+  controller._driveTo(inst, inst.repair, bay.dock.x, bay.dock.z, 0.1);
+
+  assert.equal(inst.repair.waypoint, null, 'the old waypoint is not carried over');
+  assert.deepEqual(aimed.at(-1), { x: bay.dock.x, z: bay.dock.z }, "aims at this leg's destination");
+});
+
+test('an intermittent hold cannot keep wiping the no-progress evidence', () => {
+  // Fix 5 bounded a hold that never *ends*. This is the other shape: a hold
+  // that ends and immediately starts again. driveToTarget's terrain-blocked
+  // escape reverses, the reverse completes, the vehicle drives back at the
+  // same unclimbable grade and reverses again — roughly a two-second cycle.
+  // Zeroing the counter on every cycle meant it never passed a few tenths of a
+  // second. Amber's harvester rode that loop for the entire match: full speed,
+  // six units of ground covered, `stall` and `noProgress` both 0.00 throughout,
+  // and its team finished on 320 credits.
+  const facility = makeFacility();
+  const inst = makeDriveInst({ x: 200, z: 0 });
+  inst.hasOrder = true;
+  inst.speed = 6; // well above STALL_SPEED, so the stall check never fires
+  const ai = makeHarvesterAI(inst, [facility]);
+
+  const s = ai._stateFor(inst);
+  s.state = 'to-base';
+  s.load = 320;
+
+  let abandoned = 0;
+  ai._onAbandoned = () => { abandoned++; };
+
+  // Twenty seconds of block-reverse-block, never moving, never arriving.
+  for (let i = 0; i < 20 / 0.1; i++) {
+    inst.reverseTimer = i % 20 < 12 ? 0.5 : null; // ~1.2s holding, ~0.8s not
+    ai._travel(inst, s, 0.1, DOCK_DISTANCE, () => {});
+  }
+
+  assert.ok(abandoned > 0, 'the moving-but-getting-nowhere fraction must accumulate');
+});
+
+test('reaching a detour waypoint does not put the ladder back to zero', () => {
+  // Reaching a waypoint means the manoeuvre worked, not that the leg is going
+  // anywhere — a harvester wedged short of its field can reach waypoints all
+  // day. Resetting here held the ladder at zero, so it never reached
+  // DETOUR_ANGLES.length and the give-up past it (ban the field, go elsewhere)
+  // was unreachable.
+  const inst = makeDriveInst({ x: 0, z: 0 });
+  inst.hasOrder = true;
+  inst.speed = 6;
+  const ai = makeHarvesterAI(inst);
+
+  const s = ai._stateFor(inst);
+  s.state = 'to-field';
+  s.field = { id: 7, x: 100, z: 0, radius: 14, stock: 900 };
+
+  ai._onAbandoned(inst, s, { x: 100, z: 0 }, 100);
+  assert.equal(s.detours, 1, 'the ladder advanced');
+  assert.ok(s.waypoint, 'and picked a waypoint');
+
+  // Arrive at it, exactly as a vehicle that drives perfectly well would.
+  inst.group.position.x = s.waypoint.x;
+  inst.group.position.z = s.waypoint.z;
+  ai._travel(inst, s, 0.1, DOCK_DISTANCE, () => {});
+
+  assert.equal(s.waypoint, null, 'the waypoint is consumed');
+  assert.equal(s.detours, 1, 'but the ladder keeps its place');
+});
+
+test('a harvester that reaches every waypoint and never arrives still gives up', () => {
+  // The consequence of the test above, end to end: the ladder has to be able
+  // to run out for the ban to be reachable at all.
+  const inst = makeDriveInst({ x: 0, z: 0 });
+  inst.hasOrder = true;
+  inst.speed = 6;
+  const ai = makeHarvesterAI(inst);
+
+  const s = ai._stateFor(inst);
+  s.state = 'to-field';
+  s.field = { id: 7, x: 100, z: 0, radius: 14, stock: 900 };
+
+  for (let cycle = 0; cycle < 10 && !s.bans.has(7); cycle++) {
+    ai._onAbandoned(inst, s, { x: 100, z: 0 }, 100);
+    if (!s.waypoint) continue;
+    // Teleport onto the waypoint but back to the same distance from the field,
+    // so the vehicle is demonstrably driving and demonstrably getting nowhere.
+    inst.group.position.x = s.waypoint.x;
+    inst.group.position.z = s.waypoint.z;
+    ai._travel(inst, s, 0.1, DOCK_DISTANCE, () => {});
+    inst.group.position.x = 0;
+    inst.group.position.z = 0;
+  }
+
+  assert.ok(s.bans.has(7), 'the field is eventually banned and something else tried');
+});
+
+test('genuine progress does reset the ladder', () => {
+  // The other half of the rule: detours that are working must not count
+  // against the vehicle, or a long approach would ban its own destination.
+  const inst = makeDriveInst({ x: 0, z: 0 });
+  inst.hasOrder = true;
+  inst.speed = 6;
+  const ai = makeHarvesterAI(inst);
+
+  const s = ai._stateFor(inst);
+  s.state = 'to-field';
+  s.field = { id: 7, x: 100, z: 0, radius: 14, stock: 900 };
+  s.detours = 3;
+  s.bestDistance = 100;
+
+  inst.group.position.x = 40; // 60 out — a big improvement on 100
+  ai._travel(inst, s, 0.1, DOCK_DISTANCE, () => {});
+
+  assert.equal(s.detours, 0, 'closer than ever before starts the ladder again');
+});
+
+test('a loaded harvester finishes the delivery before queueing for repair', () => {
+  // Breaking off from TO_BASE throws away a completed round trip and takes the
+  // load out of the economy for as long as the bay queue is — measured at eight
+  // to ten minutes behind a handful of damaged scouts, during which the team
+  // earned nothing and its credits drained paying for *their* repairs.
+  const bay = makeBay();
+  const inst = makeDriveInst({ x: 200, z: 0 });
+  inst.health = 60; // well under REPAIR_RETREAT_FRACTION of 220
+  const ai = makeHarvesterAI(inst, [bay]);
+
+  const s = ai._stateFor(inst);
+  s.state = 'to-base';
+  s.load = 320;
+
+  assert.equal(ai._maybeRetreatForRepair(inst, s, 0.1), false, 'deliver first');
+  assert.equal(s.state, 'to-base', 'and stay on the delivery');
+});
+
+test('the same harvester retreats the moment it is empty', () => {
+  // Deferred, not skipped — IDLE re-checks it as soon as the unload finishes.
+  const bay = makeBay();
+  const inst = makeDriveInst({ x: 200, z: 0 });
+  inst.health = 60;
+  const ai = makeHarvesterAI(inst, [bay]);
+
+  const s = ai._stateFor(inst);
+  s.state = 'idle';
+  s.load = 0;
+
+  assert.equal(ai._maybeRetreatForRepair(inst, s, 0.1), true);
+  assert.equal(s.state, 'to-repair');
 });

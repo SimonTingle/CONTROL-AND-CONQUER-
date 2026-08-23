@@ -32,6 +32,10 @@ const STALL_TIMEOUT = 1.5; // seconds near-stopped before trying the next detour
 // enough to never look stalled. See _driveTo's progress check.
 const NO_PROGRESS_TIMEOUT = 6; // seconds without getting closer
 const PROGRESS_EPSILON = 0.5; // world units that count as "closer"
+// How long a yield or a reverse may keep suppressing the two escapes below.
+// Mirrors harvesterAI's constant of the same name and for the same reason —
+// see the comment beside `mechanicalHold` in _driveTo.
+const HOLD_GRACE = 10; // seconds
 const REVERSE_DURATION = 1.5; // seconds backing off before the next detour attempt
 // Any non-player vehicle at or below this fraction of health queues for
 // repair on its own, without the player having to notice and click Repair.
@@ -411,6 +415,13 @@ export class RepairController {
     // fire on that same tick, so this controller always issues its own.
     if (!r.claimedOrder) {
       r.claimedOrder = true;
+      // A new leg is a new destination, so a detour waypoint left over from the
+      // previous one aims at a goal this leg no longer has — and the branch
+      // below drives the waypoint in preference to the destination, so keeping
+      // it would send the vehicle the wrong way with no way back.
+      r.waypoint = null;
+      r.bestDistance = null;
+      r.noProgressTimer = 0;
       if (inst.hasOrder) inst.arrive('cancelled');
     }
 
@@ -423,14 +434,32 @@ export class RepairController {
     }
 
     // Reached a detour waypoint: drop it and aim at the real destination again.
-    if (r.waypoint) {
-      if (Math.hypot(r.waypoint.x - pos.x, r.waypoint.z - pos.z) <= WAYPOINT_RADIUS) {
-        r.waypoint = null;
-        r.detours = 0;
-        inst.setTarget(x, z, this.heightmap);
-      }
+    // Reaching a waypoint deliberately does not reset `r.detours` — see the
+    // matching comment in harvesterAI's `_travel`. A vehicle that can reach
+    // detour waypoints but not its destination would otherwise hold the ladder
+    // at zero forever and never reach the give-up at the end of it.
+    if (r.waypoint && Math.hypot(r.waypoint.x - pos.x, r.waypoint.z - pos.z) <= WAYPOINT_RADIUS) {
+      r.waypoint = null;
+      r.bestDistance = null;
+      r.noProgressTimer = 0;
+      inst.setTarget(x, z, this.heightmap);
       return false;
     }
+
+    // Everything from here down used to be unreachable while a waypoint was
+    // live: the branch above returned whether or not the waypoint had been
+    // reached. So a waypoint leg that lost its order — `driveToTarget` drops one
+    // on a terrain block, and the leg-change cancel above drops one outright —
+    // reached neither the re-issue below nor the stall detection after it, and
+    // the vehicle sat with a live waypoint, no order and every timer reading
+    // zero, holding its place in the bay queue until QUEUE_TIMEOUT. Falling
+    // through is what harvesterAI's `_travel` has always done here.
+    //
+    // While a waypoint *is* live it, not the destination, is what this leg is
+    // driving at, so progress is measured against it — a detour deliberately
+    // moves away from the destination and would otherwise read as failure.
+    const aimX = r.waypoint ? r.waypoint.x : x;
+    const aimZ = r.waypoint ? r.waypoint.z : z;
 
     if (!inst.hasOrder) {
       // The direct line just failed (or this is the first tick for this leg).
@@ -449,6 +478,11 @@ export class RepairController {
         const wz = pos.z + Math.sin(bearing) * range;
         if (this.heightmap.heightAt(wx, wz) > this.heightmap.seaLevelY + 1) {
           r.waypoint = { x: wx, z: wz };
+          // The point progress is measured against has just changed, so the
+          // record of the closest this leg has come is about a different
+          // question now.
+          r.bestDistance = null;
+          r.noProgressTimer = 0;
           inst.setTarget(wx, wz, this.heightmap);
         }
         return false;
@@ -482,7 +516,16 @@ export class RepairController {
     //
     // Yielding on purpose or already reversing isn't a stall — counting it as
     // one misreads a polite wait as a blockage.
-    const holding = inst.yielding || inst.reverseTimer != null;
+    //
+    // Bounded for the same reason harvesterAI's `_travel` bounds its own copy:
+    // both of these can re-arm indefinitely, and while either holds, this
+    // vehicle's stall *and* no-progress escapes are switched off together —
+    // turning an unresolvable manoeuvre into a permanent one. Neither of these
+    // is an open-ended decision (there is no FLEEING equivalent here), so the
+    // whole expression gets the grace period.
+    const mechanicalHold = inst.yielding || inst.reverseTimer != null;
+    r.holdTimer = mechanicalHold ? (r.holdTimer ?? 0) + dt : 0;
+    const holding = mechanicalHold && r.holdTimer < HOLD_GRACE;
     r.stallTimer = !holding && inst.speed < STALL_SPEED ? (r.stallTimer ?? 0) + dt : 0;
     if (r.stallTimer > STALL_TIMEOUT) {
       r.stallTimer = 0;
@@ -505,12 +548,19 @@ export class RepairController {
     // _travel covers: a vehicle circling its destination at the alignment floor
     // is well above STALL_SPEED and so never registers as stalled, even though
     // it will orbit forever. Measure progress instead of speed.
-    const d = Math.hypot(x - pos.x, z - pos.z);
+    const d = Math.hypot(aimX - pos.x, aimZ - pos.z);
     if (holding) {
-      r.noProgressTimer = 0;
+      // Paused, not reset — see the matching comment in harvesterAI's `_travel`.
+      // A hold that keeps re-arming (block, reverse, block again) would
+      // otherwise wipe this counter on every cycle and never escalate.
     } else if (r.bestDistance == null || d < r.bestDistance - PROGRESS_EPSILON) {
       r.bestDistance = d;
       r.noProgressTimer = 0;
+      // Progress, not a completed manoeuvre, is what resets the ladder — but
+      // only progress toward the destination itself. `d` is measured against
+      // the waypoint while one is live, and closing on a detour waypoint is
+      // just the detour working as intended, not the leg succeeding.
+      if (!r.waypoint) r.detours = 0;
     } else {
       r.noProgressTimer = (r.noProgressTimer ?? 0) + dt;
       if (r.noProgressTimer > NO_PROGRESS_TIMEOUT) {

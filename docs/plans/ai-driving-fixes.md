@@ -1,8 +1,14 @@
-# Four defects that stop AI units dead
+# Ten defects that stop AI units dead
 
 Follow-up to [ai-commander-overhaul.md](ai-commander-overhaul.md) and
 [harvester-field-selection.md](harvester-field-selection.md). Those made the AI
-capable of playing a game; this fixes four ways its units stop playing it.
+capable of playing a game; this fixes ten ways its units stop playing it.
+
+It was scoped as four. The four were fixed, the diagnostic was re-run, and the
+re-run failed — so the next defect was root-caused against the re-run, fixed,
+and the whole thing repeated until the run came back clean. Six of the ten
+were found that way, and none of them was visible in the original save; the
+first four were masking them.
 
 ## Where the evidence came from
 
@@ -141,10 +147,178 @@ also means a team keeps only the scouts it starts with; if the AI should
 deliberately maintain recon, that wants an explicit `reconCap`, not an accident
 of the combat budget.
 
+## What the first re-run showed
+
+Headless Chromium, same configuration as the save (Multiplayer AI, expert, four
+AI teams, 44 simulated minutes). Five of the six failure signatures cleared:
+repair detours dropped from 74 to 2, nothing held a dock from far away, and
+combat-tagged units per team went from 14 to 7. The dead-band signature became
+visibly transient rather than terminal — a harvester appears in the frozen-full
+list at 11 and 22 minutes and has cleared by 33, which is what recovery looks
+like.
+
+**One team was still economically dead, and that was a fifth defect.** The full
+verification and the final numbers are at the end of this document; the four
+sections between here and there are what the re-runs turned up.
+
+## 5. The terrain-blocked escape switched off the escalation
+
+One AI team still finished on 0 credits. Its harvester sat at `to-base` with a
+full load, order live, destination set, **odometer frozen at 1755 for fourteen
+straight minutes**, both escape timers reading exactly `0.00`. In `_travel` both
+are gated on one expression:
+
+```js
+const holding = inst.yielding || inst.reverseTimer != null || s.state === FLEEING;
+```
+
+Instrumenting it settled which term was live, and it was not the one the shape
+suggests: `yielding` was **false** every sample, with no other vehicle within 40
+units. `reverseTimer` was non-null on five samples of six, cycling 0.67 / 0.12 /
+0.78 / 0.23 / 0.90 against a `REVERSE_DURATION` of 1.5 — re-armed before it
+could ever expire.
+
+That is `vehicleController.driveToTarget`'s terrain-blocked escape: facing an
+unclimbable grade it drops the order and calls `beginReverse`, which sets
+`reverseTimer`, which makes `holding` true, **which switches off the stall and
+no-progress detection that would otherwise route the harvester around the
+obstacle** — so it re-blocked and re-reversed forever, at zero speed, without
+even accruing the grind damage that would eventually kill it and free the slot.
+The escape hatch disabled the escalation.
+
+Two things were wrong, and they are separate:
+
+**5a. A cooldown shorter than the manoeuvre it gates.**
+`escapeCooldown = SHARP_TURN_REVERSE * 0.5` — 0.6s against a 1.2s reverse. It
+expired *during* the reverse, so the escape re-armed on the tick the reverse
+ended, with no forward travel in between. The blocked path was already correct
+at `BLOCKED_REVERSE * 2`. Now both are, and there is a test that reads the
+multipliers out of the source rather than restating them.
+
+**5b. A hold that never ends.** `holding` is right for a manoeuvre in progress
+and wrong for one that cannot finish, so the mechanical terms get a
+`HOLD_GRACE` of 10 seconds — generous against a real three-point turn, far
+short of a freeze. `FLEEING` is deliberately left unbounded: that one is not a
+manoeuvre but a standing decision, and timing it out would send a harvester
+back into fire. The same bound is mirrored in `repairController._driveTo`,
+which carries its own copy of the expression.
+
+Re-running after 5a and 5b, the team that had earned **0** finished on
+**11,840**. Two checks still failed, which is how the last four were found.
+
+## 6. Three ways an escalation could never arrive
+
+All three came out of the same observation: the escapes were not being
+*suppressed* any more, they were never being *reached*.
+
+### 6a. A waypoint leg with no order was completely inert
+
+`repairController._driveTo`'s waypoint branch:
+
+```js
+if (r.waypoint) {
+  if (reached) { r.waypoint = null; r.detours = 0; inst.setTarget(x, z, …); }
+  return false;          // ← whether or not it was reached
+}
+```
+
+Everything below that — the order re-issue, the stall check, the no-progress
+check — was unreachable while a waypoint was live. So a vehicle whose order
+went missing there had no way to get another one. Two ways it goes missing:
+`driveToTarget` drops it on a terrain block, and the leg-change cancel at the
+top of the same function drops it outright (`claimedOrder` is reset by every
+caller on a new leg, and it does not clear the previous leg's waypoint).
+
+The trace is unambiguous — one of Jade's harvesters, sampled every two seconds:
+
+```
+rst=queued det=2 wp=y order=false stall=0.0 noProg=0.0  odo=4803.6
+rst=queued det=2 wp=y order=false stall=0.0 noProg=0.0  odo=4803.6
+… identical for eight minutes …
+```
+
+Full load, in a repair queue, holding its slot, every timer at zero. Its team's
+income was flat at 12,160 for eleven minutes.
+
+**Fix:** return only when the waypoint has actually been reached, and clear a
+stale waypoint on a leg change. `harvesterAI._travel` has always fallen through
+here, which is why only the repair path had this.
+
+The progress measure moves with it: while a waypoint is live it, not the
+destination, is what the leg is driving at, so `bestDistance` is measured
+against it. A detour deliberately moves away from the destination and would
+otherwise read as failure.
+
+### 6b. A hold that ends and immediately starts again
+
+Fix 5b bounded a hold that never ends. This is the other shape, and 5b cannot
+see it: `holdTimer` resets to zero whenever the hold lifts, so a hold that
+*completes* every two seconds never reaches `HOLD_GRACE`.
+
+Amber's harvester, sampled every second:
+
+```
+pos=(-137,307) d=26.6 spd=2.1 rev=1.5  noProg=0.9
+pos=(-142,307) d=31.7 spd=6.6 rev=-    noProg=0.0
+pos=(-137,307) d=26.6 spd=0.3 rev=1.5  noProg=0.0
+pos=(-142,307) d=32.1 spd=6.6 rev=0.2  noProg=0.0
+```
+
+Drive at an unclimbable grade, block, reverse, drive at it again — a two-second
+cycle, six units of ground, at full speed, for forty minutes. `stall` never
+fired (the reverse is fast, so speed is high); `noProgress` never fired because
+`if (holding) s.noProgressTimer = 0` wiped it on every cycle. The team finished
+on 320 credits with one structure.
+
+**Fix:** a hold *pauses* the no-progress timer rather than resetting it. A
+deliberate hold is not a failure to progress, but it is not evidence of
+progress either. The moving-but-getting-nowhere fraction of each cycle then
+accumulates, and the escalation arrives in about a minute instead of never.
+Mirrored in `repairController`.
+
+### 6c. The detour ladder reset itself on success
+
+With 6b in place the harvester escalated — and got stuck one level up:
+
+```
+det=2 → det=3 → det=1 → det=2 → det=3 → det=0 → det=1 …
+sweeps=0 throughout
+```
+
+`_travel` set `s.detours = 0` on reaching a detour waypoint. But reaching a
+waypoint means the *manoeuvre* worked, not that the leg is going anywhere — and
+a harvester wedged short of its field can reach waypoints all day. The ladder
+never reached `DETOUR_ANGLES.length`, so everything past it was unreachable:
+the field ban for `TO_FIELD`, `abandonSweeps` and the holding-fix reroute for
+`TO_BASE`, `_leaveBay` for the repair path. `abandonSweeps` read 0 for the whole
+match, which is what that counter looks like when it is dead code.
+
+**Fix:** progress resets the ladder, not a completed manoeuvre — one line moved
+from the waypoint-reached branch to the `bestDistance` improvement branch. It
+is then monotonic exactly when nothing is working, which is when the give-up
+needs to be reachable. Mirrored in `repairController`, where progress toward a
+*waypoint* explicitly does not count (see 6a — that is what `d` measures there).
+
+### 6d. A loaded harvester queued for repair instead of delivering
+
+Not a freeze, and the last thing standing between Violet and a normal economy.
+`_maybeRetreatForRepair` fires from `TO_BASE`, so a damaged harvester one leg
+from home broke off and joined the repair queue *carrying a full load*.
+Measured: two harvesters, 640cr between them, queued behind five damaged
+scouts for eight to ten minutes, while the team earned nothing and its credits
+drained paying for those scouts' repairs.
+
+**Fix:** finish the delivery already under way. The unload is seconds off and
+`IDLE` re-checks the retreat the moment it is done, so the repair is deferred
+rather than skipped. Danger is a separate question and `FLEEING` still owns it.
+
+Violet finished on 13,440 instead of 11,840.
+
 ## Verification
 
-`tests/ai-driving-fixes.test.mjs` — 12 dependency-free tests. Five negative
-controls, each failing behaviourally:
+`tests/ai-driving-fixes.test.mjs` — 24 dependency-free tests. Twelve negative
+controls, each reverted in turn and confirmed to fail behaviourally (a wrong
+assertion, not a missing import) on the test that names it:
 
 | Reverted | Result |
 |---|---|
@@ -153,65 +327,81 @@ controls, each failing behaviourally:
 | `markDocked` back in `_claimDock` | vehicle reads DOCKED during `entering` |
 | lost-clearance re-queue guard | services a bay it does not hold |
 | per-unit-id combat cap | buys a scout to top up the per-type allowance |
+| `SHARP_TURN_REVERSE * 0.5` cooldown | cooldown expires mid-reverse |
+| unbounded mechanical hold | permanently-reversing harvester never escalates |
+| unconditional waypoint return | a leg with no order issues none and goes inert |
+| stale waypoint kept across a leg change | aims at the previous leg's goal |
+| `noProgressTimer = 0` under a hold | intermittent hold never accumulates |
+| ladder reset on reaching a waypoint | ban is unreachable; harvester never gives up |
+| no deliver-first guard | full harvester joins the repair queue |
 
-Full suite 225 passing; `npx vite build` clean.
+Full suite 237 passing; `npx vite build` clean.
+
+Two of the earlier controls did **not** bite on their first run, and both were
+defects in the tests rather than in the fixes: the cooldown test restated the
+multipliers instead of reading them from the source, and the FLEEING test set
+`reverseTimer = null`, so the mechanical hold was false and the grace timer it
+was meant to exercise never ran. Recorded because "the control passed" is
+exactly the result that looks like success and isn't.
 
 ### Re-run results
 
 Headless Chromium, same configuration as the save (Multiplayer AI, expert, four
 AI teams, 44 simulated minutes), checking the save's own failure signatures:
 
-| Check | Save | After |
+| Check | Save | After 1–4 | After 5 | Final |
+|---|---|---|---|---|
+| AI teams economically dead (<2,000cr) | 2 | 1 | 1 | **0** |
+| max repair-detour count | 74 | 2 | 0 | **2** |
+| vehicle holding a dock from far away | 372s at 228u | none | none | **none** |
+| frozen full-load harvesters at the end | 2 | 1 | 2 | **none** |
+| combat-tagged units per team | 14 (7+7) | 7 | 7 | **7** |
+| page errors | — | none | none | **none** |
+
+Per-team credits earned in 44 minutes, save against final run:
+
+| Team | Save | Final |
 |---|---|---|
-| AI teams economically dead (<2,000cr) | 2 | **0** |
-| max repair-detour count | 74 | **2** |
-| vehicle holding a dock from far away | 372s at 228u | **none** |
-| frozen full-load harvesters at the end | 2 | **none** |
-| combat-tagged units per team | 14 (7+7) | **7** |
-| page errors | — | none |
+| Crimson | 19,200 | 16,640 |
+| Amber | **320** | **2,240** |
+| Violet | **0** | **13,440** |
+| Jade | 20,800 | 25,600 |
 
-The dead-band signature is visibly transient now rather than terminal: a
-harvester shows up in the frozen-full list at 11 and 22 minutes and has cleared
-by 33, which is what recovery looks like.
+Crimson is down and that is not noise: `combatCap` is now an army budget rather
+than a per-type allowance, so a team fields six tanks instead of seven plus
+seven scouts, and Crimson is the one team that was building tanks. The trade is
+deliberate and stated in section 4.
 
-**One check still fails, and it is a fifth defect this work did not fix.** One
-AI team finishes on 0 credits. Root-caused rather than left as a symptom:
+Amber is alive but still poor, and the reason is terrain rather than logic: its
+start position has one crystal field within 132 units and that field sits at
+zero stock for the whole match; everything else is 278 units away, a round trip
+its single harvester cannot run often enough. Recorded as a map/start-position
+question, not fixed here.
 
-Its harvester sits at `to-base` carrying a full load, order live, destination
-set, **odometer frozen at 1755 for fourteen straight minutes**. Both escape
-timers read exactly `0.00` the whole time — and in `_travel` both are gated on
-the same expression:
+**The frozen-harvester check needed fixing too.** Its predicate — full load,
+speed 0, no order — also describes a harvester that has *just* arrived at its
+dock, because `arrive('reached')` zeroes both. The final harness confirms every
+vehicle it flags by stepping another minute and reading the odometer: the last
+run flagged one and it had moved 235 units, so the check now reports what it
+was always meant to report.
 
-```js
-const holding = inst.yielding || inst.reverseTimer != null || s.state === FLEEING;
-```
-
-Instrumenting it settled which term is live, and it is not the one the shape
-suggests: `yielding` is **false** every sample, with no other vehicle within 40
-units. `reverseTimer` is non-null on five samples of six, cycling 0.67 / 0.12 /
-0.78 / 0.23 / 0.90 against a `REVERSE_DURATION` of 1.5 — it is being re-armed
-before it can ever expire.
-
-That is `vehicleController.driveToTarget`'s terrain-blocked escape: facing an
-unclimbable grade it drops the order and calls `beginReverse`, which sets
-`reverseTimer`, which makes `holding` true, **which switches off the stall and
-no-progress detection that would otherwise route the harvester around the
-obstacle** — so it re-blocks and re-reverses forever, at zero speed, without
-even accruing the grind damage that would eventually kill it and free the slot.
-
-So the escape hatch disables the escalation. That is why terrain-blocking is
-fatal here rather than merely wasteful, and it is a different statement from
-"the AI grinds itself down" — this harvester is not being ground down at all
-(health held steady at 201), it is simply switched off.
-
-**Not attempted, by agreement:** this is the terrain-grind area the user
-deliberately scoped out in favour of measuring first. The measurement is above.
-The fix is small in shape — a hold cannot be indefinite, so `holding` should
-stop suppressing the escapes once a reverse has been re-armed rather than
-completed — but it lives in shared driving code that player vehicles use too,
-and it is that user's call to make, not a drive-by inside a change that was
-scoped to four other things.
-
-**Not verified: online multiplayer.** All four changes read already-synced state
+**Not verified: online multiplayer.** All ten changes read already-synced state
 and add no `Math.random`/`Date.now`/`performance.now`, but that is reasoning,
 not a two-client `tests/e2e/` run.
+
+## Deliberately not done
+
+- **Amber's start position.** See above — one dead field in range and a
+  278-unit round trip to anything else. That is a map generation or
+  start-placement question and wants its own measured pass.
+- **Repair-bay queue priority.** The queue is FIFO by `requestedTick` with an
+  id tie-break, which is fair and deterministic; five damaged scouts ahead of a
+  harvester is that rule working as designed. 6d sidesteps it by not joining
+  the queue mid-delivery rather than by re-ordering it. A priority scheme would
+  need to be deterministic across clients and is a larger change than it looks.
+- **`economy`'s per-id cap**, unchanged and asserted, for the reasons in
+  section 4.
+- **The terrain-grind mechanism itself.** A vehicle can still spend a minute
+  bouncing off a slope before the escalation fires; what changed is that the
+  escalation now fires at all. Making the first attempt smarter — a real
+  pathfinder, or a grade-aware approach bearing — is a different piece of work.
