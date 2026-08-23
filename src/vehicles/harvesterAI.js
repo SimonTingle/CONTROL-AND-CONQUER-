@@ -489,8 +489,22 @@ export class HarvesterAI {
     // Drifted off the dock (bumped, slid down a grade) — holding the lock
     // from out here isn't doing anyone any good. Give it up and re-approach
     // properly instead of "unloading" from wherever it ended up.
+    //
+    // Measured against the *dock*, which is the same point `_destination`
+    // defines arrival against — not the building centre. Those are 12 units
+    // apart (`dockOffset`), and measuring arrival from one while releasing
+    // from the other opened a dead band: at 22 from the dock a harvester can
+    // be up to 34 from the centre, so anything landing in (33, 34] was both
+    // "arrived" and "drifted" on the same tick. It then cycled
+    // arrive → _atDock → UNLOADING → release → TO_BASE → arrive, forever,
+    // never issuing an order (so no stall or no-progress timer ever ran) and
+    // never unloading. A real 44-minute match had one team on 0 credits with
+    // its only harvester frozen there, full, 92 units of odometer to its name.
+    // Same reference point on both sides makes the overlap arithmetically
+    // impossible rather than merely narrow.
+    const dock = facility.dock ?? facility;
     const pos = inst.group.position;
-    if (Math.hypot(pos.x - facility.x, pos.z - facility.z) > DOCK_DISTANCE * 1.5) {
+    if (Math.hypot(pos.x - dock.x, pos.z - dock.z) > DOCK_DISTANCE * 1.5) {
       this._releaseDock(facility, inst);
       s.state = TO_BASE;
       s.dest = null;

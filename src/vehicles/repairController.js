@@ -16,7 +16,7 @@
  */
 
 import { hasVehicleBehind } from './trafficController.js';
-import { CLEARED } from './facilityControl.js';
+import { CLEARED, DOCKED } from './facilityControl.js';
 
 // A wide-turning vehicle (a crystal-harvester's turning circle is tens of
 // units) can overshoot a tight radius repeatedly without ever settling
@@ -218,9 +218,11 @@ export class RepairController {
   }
 
   /** Slot claimed — but parking happens on the pad itself, not the approach
-   * point, so there's one more short leg (`'entering'`) before repair starts. */
+   * point, so there's one more short leg (`'entering'`) before repair starts.
+   *
+   * Deliberately does *not* call `markDocked`: that stops the clearance lease,
+   * and the leg below is still an approach. See `_startRepairing`. */
   _claimDock(inst, r, bay) {
-    this.facilityControl.markDocked(inst);
     r.state = 'entering';
     r.waypoint = null;
     r.detours = 0;
@@ -232,6 +234,26 @@ export class RepairController {
   _entering(inst, r, dt) {
     const bay = r.bay;
     if (!this._driveTo(inst, r, bay.x, bay.z, dt)) return;
+
+    // Stopped moving — *now* the approach is over, so convert the clearance
+    // into a service claim. This used to happen a leg earlier, in
+    // `_claimDock`, and that was the bug: `markDocked` stops the lease clock,
+    // but the drive above is still an approach and can still fail, while
+    // `_expireLeases` only ever inspects the *cleared* holder. A vehicle that
+    // stalled in `entering` therefore held the bay with nothing able to
+    // reclaim it — a real match had a scout holding one for 372 seconds from
+    // 228 units away, seven vehicles queued behind it. `harvesterAI._atDock`
+    // already claims at true service start; both callers now mean the same.
+    //
+    // Refused means the lease expired mid-leg and the slot went to whoever was
+    // next. Re-queue rather than servicing a bay we no longer hold, which
+    // would put two vehicles on one pad.
+    if (!this.facilityControl.markDocked(inst) && this.facilityControl.statusOf(inst) !== DOCKED) {
+      r.state = 'queued';
+      r.claimedOrder = false; // new leg — take the wheel back from the old one
+      return;
+    }
+
     // _driveTo's arrival radius is deliberately generous (a wide-turning
     // vehicle can't reliably converge on a tight one — see ARRIVE_RADIUS's
     // own comment), so "arrived" alone can still be several units off centre.
