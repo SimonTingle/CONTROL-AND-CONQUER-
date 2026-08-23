@@ -1582,3 +1582,134 @@ body.drawer-open #minimap { transform: translateX(calc(-1 * var(--panel-width) +
 @media (max-width: 480px) {
   #minimap { width: 104px; height: 104px; }
 }
+
+/* ---- drawer chooser (Statistics / World Settings) ---- */
+
+.panel-chooser-item {
+  display: block;
+  width: calc(100% - 28px);
+  margin: 10px 14px;
+  padding: 13px 14px;
+  text-align: left;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.panel-chooser-item:hover { border-color: var(--accent); }
+
+.panel-chooser-name {
+  display: block;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.panel-chooser-hint {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* button.panel-back, not .panel-back: it also carries .action, whose
+   `button.action { width: 100% }` is the more specific selector and otherwise
+   wins — leaving a full-width button inside 14px margins, overflowing the
+   drawer by exactly the margins. */
+button.panel-back {
+  width: calc(100% - 28px);
+  margin: 10px 14px 2px;
+}
+
+/* ---- statistics ---- */
+
+.stats-screen { padding-bottom: 14px; }
+
+.stats-section { margin: 0 14px; }
+
+.stats-section h2 {
+  margin: 16px 0 0;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+/* Tighter than .match-summary's full-screen sizing — the same table has to
+   fit a 320px drawer here rather than a 620px overlay. */
+.stats-table {
+  margin: 6px 0 4px;
+  font-size: 11px;
+}
+
+.stats-table th { padding: 5px 4px; font-size: 9px; }
+.stats-table td { padding: 6px 4px; }
+
+.stats-team-cell {
+  max-width: 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Per-harvester lists and kill records: text, wrapping, never a bar — these
+   are several values in one cell, so there is nothing single to scale. */
+.stats-list-cell {
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: normal;
+  word-break: break-word;
+}
+
+.stats-total-cell { font-variant-numeric: tabular-nums; }
+
+.stats-note {
+  margin: 14px 14px 0;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+/* Stats down the side, teams across the top (see statisticsScreen.js): the
+   axis that keeps growing is the number of stats, not the number of teams, and
+   a column per stat overflows a 320px drawer. */
+.stats-table-transposed th { text-align: right; }
+.stats-table-transposed th:first-child { width: 42%; }
+
+.stats-row-label {
+  text-align: left !important;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+/* An eliminated player's column header, matching .defeated on a row. */
+.stats-out { opacity: 0.45; }
+
+/* The "graph": one div behind the number, width scaled against the best value
+   in that column. No canvas, no SVG, no library — and because it is purely
+   decoration behind live text, hiding it below is a complete mobile fallback
+   rather than a degraded one. */
+.stat-cell { position: relative; }
+
+.stat-cell-bar {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 0;
+  background: rgba(79, 209, 197, 0.16); /* --accent, low alpha */
+  border-radius: 3px;
+  pointer-events: none;
+}
+
+.stat-cell-value { position: relative; }
+
+/* Same breakpoint the drawer itself narrows at (see --panel-width above): once
+   columns are this tight the bars read as noise behind the digits, so the
+   table becomes plain text. */
+@media (max-width: 720px) {
+  .stat-cell-bar { display: none; }
+  .stats-table { font-size: 10px; }
+  .stats-team-cell { max-width: 72px; }
+}

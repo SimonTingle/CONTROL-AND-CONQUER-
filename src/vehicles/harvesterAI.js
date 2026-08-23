@@ -504,10 +504,17 @@ export class HarvesterAI {
     s.load -= moved;
     // Credited to the harvester's own team. `_facility()` only ever returns a
     // same-team facility, so the two can never disagree.
-    this.game.teamOf(inst).earn(moved);
+    const team = this.game.teamOf(inst);
+    team.earn(moved);
     // Lifetime tally on the instance (not the states Map) so the vehicle picker
     // and snapshot both read it without reaching into harvesterAI internals.
     inst.creditsDelivered += moved;
+    // And the team-wide harvest total, which earn() above deliberately does not
+    // give us: stats.creditsEarned also counts sell refunds and AI build
+    // refunds, so it is not an answer to "how much did this economy produce".
+    // Tallied here rather than summed from live harvesters later, so a
+    // harvester's contribution outlives the harvester.
+    team.stats.harvesterEarningsTotal += moved;
 
     if (s.load <= 1e-6) {
       s.load = 0;

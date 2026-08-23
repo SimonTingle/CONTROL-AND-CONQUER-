@@ -245,6 +245,21 @@ export class CombatController {
       // Counted at the kill site (not the destroy pipeline) precisely because
       // only here is the responsible vehicle known.
       inst.kills = (inst.kills ?? 0) + 1;
+      // Team-level tallies for the Statistics screen, kept here for the same
+      // reason the line above is: this is where the responsible shooter is
+      // known. They are not derivable later — once this shooter itself dies,
+      // vehicles.remove() splices it out and its `kills` goes with it, so a
+      // total assembled by walking live instances would quietly under-count
+      // every match. Only ever "is this run better than the best so far",
+      // which is answerable now without any destroy-time bookkeeping.
+      const shooterTeam = this.game.teamOf(inst);
+      if (shooterTeam) {
+        const stats = shooterTeam.stats;
+        stats.killsByDefId[inst.def.id] = (stats.killsByDefId[inst.def.id] ?? 0) + 1;
+        if (inst.kills > (stats.topKillsVehicle?.kills ?? 0)) {
+          stats.topKillsVehicle = { defId: inst.def.id, kills: inst.kills };
+        }
+      }
       // Queued, not removed: the destroy pipeline's single flush point is what
       // guarantees nothing is spliced out of an array another system is still
       // walking this tick.

@@ -53,14 +53,23 @@ export class Menu {
    *   the Account row's text, which refreshValues() cannot do because it only
    *   re-reads getters into existing widgets.
    */
-  constructor(schema) {
+  constructor(schema, statsScreen = null) {
     this.buildSchema = typeof schema === 'function' ? schema : () => schema;
+    // The Statistics page. Owned elsewhere because its content is a live table,
+    // not a list of tunables — the schema/createControl pipeline below has no
+    // vocabulary for that, and bending it into one would serve neither.
+    this.statsScreen = statsScreen;
     this.toggleButton = document.getElementById('menu-toggle');
     this.panel = document.getElementById('panel');
     this.body = document.getElementById('panel-body');
+    this.title = this.panel.querySelector('header h1');
     this.stats = document.getElementById('hud-stats');
     this.open = false;
     this.pendingRebuild = null;
+    // Which page of the drawer is showing. The drawer used to be nothing but
+    // World Settings; it is now a two-item chooser that swaps this body in
+    // place, so every render path has to say which page it is drawing.
+    this.view = 'chooser'; // 'chooser' | 'settings' | 'stats'
 
     this.toggleButton.addEventListener('click', () => this.setOpen(!this.open));
     document.addEventListener('keydown', (e) => {
@@ -68,11 +77,20 @@ export class Menu {
       if (e.key.toLowerCase() === 'm' && e.target === document.body) this.setOpen(!this.open);
     });
 
-    this.render(this.buildSchema());
+    this.renderChooser();
   }
 
-  /** Re-render from scratch. For value-only updates prefer refreshValues(). */
+  /**
+   * Re-render World Settings from scratch. For value-only updates prefer
+   * refreshValues().
+   *
+   * A no-op on any other page, which matters more than it looks: this fires on
+   * sign-in, sign-out and every snapshot load (see the call sites in main.js),
+   * none of which are a reason to yank someone off Statistics mid-read. Going
+   * back to Settings rebuilds from buildSchema() anyway, so nothing goes stale.
+   */
   rebuild() {
+    if (this.view !== 'settings') return;
     this.render(this.buildSchema());
   }
 
@@ -85,11 +103,81 @@ export class Menu {
     // Set by main.js once the vehicle picker also exists, so opening this
     // drawer can close that one on a narrow screen — see the wiring site for
     // why: the two are otherwise unaware of each other.
-    if (open) this.onOpen?.();
+    if (open) {
+      // Always land on the chooser rather than wherever it was left: the
+      // drawer is opened far more often to check something than to resume
+      // whichever page was last read.
+      this.renderChooser();
+      this.onOpen?.();
+    } else {
+      // Stop the stats refresh while nothing is on screen.
+      this.statsScreen?.unmount();
+    }
+  }
+
+  /** The drawer's landing page: pick a section, nothing else. */
+  renderChooser() {
+    this.view = 'chooser';
+    this.statsScreen?.unmount();
+    this.title.textContent = 'Menu';
+    this.body.replaceChildren();
+    this.controls = [];
+
+    const item = (label, hint, onSelect) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'panel-chooser-item';
+      const name = document.createElement('span');
+      name.className = 'panel-chooser-name';
+      name.textContent = label;
+      const sub = document.createElement('span');
+      sub.className = 'panel-chooser-hint';
+      sub.textContent = hint;
+      button.append(name, sub);
+      button.addEventListener('click', onSelect);
+      return button;
+    };
+
+    this.body.append(
+      item('Statistics', 'How this match is going', () => this.showStatistics()),
+      item('World Settings', 'Terrain, atmosphere, camera', () => this.showSettings())
+    );
+  }
+
+  showSettings() {
+    this.view = 'settings';
+    this.statsScreen?.unmount();
+    this.title.textContent = 'World Settings';
+    this.render(this.buildSchema());
+  }
+
+  showStatistics() {
+    this.view = 'stats';
+    this.title.textContent = 'Statistics';
+    this.body.replaceChildren(this._backRow());
+    this.controls = [];
+    this.statsScreen?.mount(this.body);
+  }
+
+  _backRow() {
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'action panel-back';
+    back.textContent = '← Menu';
+    back.addEventListener('click', () => this.renderChooser());
+    return back;
+  }
+
+  /**
+   * Per-frame tick, forwarded only to the page that wants one — today just
+   * Statistics, and only while it is actually showing.
+   */
+  update(dt) {
+    if (this.view === 'stats') this.statsScreen?.update(dt);
   }
 
   render(schema) {
-    this.body.replaceChildren();
+    this.body.replaceChildren(this._backRow());
     // Reset alongside the DOM, not just append to it: rebuild() fires on
     // sign-in, sign-out and every snapshot load, and without this the previous
     // render's controls stay in the list forever — so refreshValues() ends up
