@@ -195,7 +195,18 @@ function serializeTeam(team) {
     weaponTier: team.weaponTier,
     defeated: team.defeated,
     reachedRelocateThreshold: team.reachedRelocateThreshold,
-    stats: { ...team.stats },
+    // Nested values copied explicitly, not left to the spread. Every field
+    // here was a flat number until the Statistics screen added a map and a
+    // list, and a shallow spread would hand the caller a live reference into
+    // the running team — a snapshot that keeps changing after it was taken.
+    // Today's callers all stringify immediately so nothing is broken, but
+    // `view.snapshot()` hands this object out raw, and that is not a property
+    // worth depending on.
+    stats: {
+      ...team.stats,
+      killsByDefId: { ...team.stats.killsByDefId },
+      deadHarvesterEarnings: [...team.stats.deadHarvesterEarnings],
+    },
     // The per-team explored mask: the one genuinely irreproducible bulk value
     // in a save, since it records where this team has actually driven.
     fog: team.fog ? bytesToBase64(team.fog.data) : null,

@@ -75,6 +75,28 @@ export class Team {
       unitsLost: 0,
       structuresBuilt: 0,
       structuresLost: 0,
+      // ---- Statistics screen ----
+      // Purely harvest income, and deliberately *not* the same number as
+      // creditsEarned above: earn() is also credited for selling a structure
+      // back (commands.js) and for an AI build-on-pad refund (aiCommander.js),
+      // so creditsEarned counts credits that were never produced. Building and
+      // selling the same structure in a loop inflates it without harvesting a
+      // thing — which is why the Statistics screen scores on this instead.
+      // Incremented beside inst.creditsDelivered so it survives the harvester.
+      harvesterEarningsTotal: 0,
+      // Best single killer this match, by comparison at the kill site — a dead
+      // unit's own `kills` goes with it when vehicles.remove() splices the
+      // instance out, so a running record is the only thing that survives.
+      // Includes turret structures, which are shooters too; "unit" here means
+      // any entity that can fire, not just a vehicle.
+      topKillsVehicle: null, // { defId, kills } | null
+      // Kills per def id — "which *type* pulls its weight", a different
+      // question from which individual unit had the best run.
+      killsByDefId: {},
+      // Final creditsDelivered of each destroyed harvester. A list rather than
+      // a running total because the screen shows the per-harvester breakdown;
+      // live harvesters are read straight off vehicles.instances instead.
+      deadHarvesterEarnings: [],
     };
   }
 
