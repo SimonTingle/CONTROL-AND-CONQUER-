@@ -295,10 +295,13 @@ function buildCommandFor(unitId, { atBase = false } = {}) {
  * catalog defs. Custom vehicles make it load-bearing, since a player cannot
  * edit `structures.js`.
  *
- * Custom ids come *after* the built-ins deliberately. `aiCommander` takes the
- * first produced unit matching its wanted tag that is under its cap, so
- * appending means a custom vehicle supplements the AI's normal build order
- * rather than silently displacing it.
+ * Custom ids come *after* the built-ins deliberately. For non-combat tags
+ * `aiCommander` still takes the first produced unit matching its wanted tag
+ * that is under its cap, so appending means a custom vehicle supplements the
+ * AI's normal build order rather than silently displacing it. Combat units
+ * are the exception: those it ranks by value per credit across every
+ * candidate, so a custom one wins on its stats or not at all — order there is
+ * only the tie-break.
  *
  * Custom defs are read from `ctx.vehicles.extraDefs`, which is already
  * mode-gated: `applyCustomCatalog()` leaves it empty in an online match (see

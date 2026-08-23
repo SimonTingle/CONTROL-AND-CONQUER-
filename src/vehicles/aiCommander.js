@@ -33,6 +33,8 @@
 import { commandsFor, basePad, producedUnitIds } from './commands.js';
 import { findSpawnPointNear } from '../core/pick.js';
 import { STRUCTURE_CATALOG } from '../structures/structures.js';
+import { simClock } from '../core/simClock.js';
+import { TERMINAL_RADIUS } from './facilityControl.js';
 
 const RETRY_PAUSE = 2; // seconds of backing off after any failed attempt this tick
 // Generous relative to what a relocate order should ever need — at 9u/s the
@@ -109,6 +111,83 @@ const SCOUT_ANGLE_STEP = 2.399; // radians (~137.5°, the golden angle)
 const DEFENSE_MIN_RADIUS = 55;
 const DEFENSE_MAX_RADIUS = 140;
 
+// ---- how strong is that, really -------------------------------------------
+//
+// The whole strategic layer below rests on being able to compare two forces
+// without knowing what is in them. Every one of these reads only fields that
+// exist on every def in the game — and, critically, on structures too:
+// gun-turret carries the identical `turret` block a vehicle does, by design
+// (structures.js: "the same block a vehicle's turret reads"). So a turret
+// counts toward a base's defences with no special case, and a vehicle nobody
+// has designed yet counts the moment it exists. Nothing here is keyed by id.
+
+/**
+ * A def's combat worth: sustained damage output multiplied by how long it can
+ * keep putting it out. Zero for anything unarmed, which is what makes a
+ * harvester or an engineer contribute nothing to an army-strength comparison
+ * without needing to be filtered out by name first.
+ *
+ * The product is the point. DPS alone rates a glass cannon and a durable gun
+ * identically; health alone rates a harvester as a threat.
+ */
+export function unitPower(def) {
+  const t = def?.turret;
+  if (!t?.damage || !t?.fireInterval) return 0;
+  return (t.damage / t.fireInterval) * (def.maxHealth ?? 0);
+}
+
+/** Power per credit — the only ranking used when choosing what to build. */
+export function valuePerCost(def) {
+  const cost = def?.cost ?? 0;
+  if (cost <= 0) return 0;
+  return unitPower(def) / cost;
+}
+
+/**
+ * What a live force is worth right now, not what it was worth at full health.
+ *
+ * The health weighting is what makes pulling a damaged unit off the line
+ * actually change the arithmetic rather than just the roster — a half-dead
+ * army reads as half an army, which is the honest answer to "can we win this."
+ */
+export function armyPower(units) {
+  let total = 0;
+  for (const u of units) {
+    const max = u.def?.maxHealth ?? 0;
+    if (max <= 0) continue;
+    total += unitPower(u.def) * Math.max(0, Math.min(1, (u.health ?? max) / max));
+  }
+  return total;
+}
+
+// Commit only with a real margin; withdraw only when genuinely outmatched.
+// The gap between them is hysteresis, and it is not optional: with a single
+// threshold an army sitting near parity advances, takes one casualty, drops
+// under, withdraws, heals, advances — forever, without ever fighting.
+const ATTACK_STRENGTH_RATIO = 1.25;
+const RETREAT_STRENGTH_RATIO = 0.6;
+// Pull a damaged unit back earlier than repairController's generic 0.3
+// backstop, but not as eagerly as harvesterAI's own 0.5 — a combat unit is
+// supposed to be shot at, a harvester is not.
+const RETREAT_HEALTH_FRACTION = 0.4;
+// Below this much defensive power near a freshly-scouted enemy base, it is
+// worth a try regardless of what the wider strength comparison says. Roughly
+// one gun turret's worth (420 health, 20 damage / 1.5s ≈ 5600) — so an
+// undefended or barely-defended base qualifies and a fortified one does not.
+const WEAK_BASE_DEFENSE_THRESHOLD = 5000;
+// A withdrawal that stops closing on its bay is abandoned, so a unit wedged on
+// the way home is not subtracted from the army for the rest of the match. Same
+// bounded-retry idea as SCOUT_STUCK_TIMEOUT, and long enough that a genuinely
+// distant bay (a retreat can start hundreds of units out) is not given up on
+// mid-journey. PROGRESS_EPSILON matches repairController's own.
+const WITHDRAW_STUCK_TIMEOUT = 30; // seconds without getting closer
+const WITHDRAW_PROGRESS_EPSILON = 0.5; // world units that count as "closer"
+// And having given up, stay given up for a beat. Without this the health
+// trigger simply re-fires on the very next tick and the unit is right back off
+// the roster, having gained nothing — the same claim/bail loop
+// repairController's own AUTO_REPAIR_RETRY_COOLDOWN exists to stop.
+const WITHDRAW_RETRY_COOLDOWN = 20; // seconds of fighting on before trying again
+
 export class AiCommander {
   /**
    * @param {object} opts
@@ -159,6 +238,21 @@ export class AiCommander {
     // site at once, and one going stuck must not stall another's order or
     // rotate its search sweep.
     this.engineerState = new Map();
+
+    // What the commander currently thinks it is doing. Recomputed every tick
+    // by _updatePosture — this field is the *result* of that decision, not
+    // state that persists a choice, which is why it is not snapshotted.
+    this.posture = 'economy';
+    // Last computed strengths, kept only so the tests and any future HUD can
+    // read what the decision was made on. Same reasoning as posture: derived.
+    this.myStrength = 0;
+    this.enemyStrength = 0;
+    this.enemyStrengthKnown = false;
+    // Enemy teams whose base this commander has already scouted. Latched —
+    // it only ever grows — and that is exactly what makes the opportunistic
+    // strike a one-time opportunity rather than a permanently different
+    // attack rule. Snapshotted for the same reason exploreRadius is.
+    this._foundEnemyBase = new Set();
 
     const diffId = ctx.game.difficulty?.id;
     this.economy = DIFFICULTY_ECONOMY[diffId] ?? DEFAULT_ECONOMY;
@@ -343,9 +437,25 @@ export class AiCommander {
    * offer, so a new unit added to any structure's `produces` list is picked
    * up here with no change: the AI asks "what do I have that is tagged
    * combat", never "build a gun-platform".
+   *
+   * Among several buildable candidates carrying the tag, combat units are
+   * ranked by value per credit rather than taken in whatever order the
+   * catalog happens to list them. That ordering was arbitrary all along — it
+   * simply never showed, because exactly one combat-tagged vehicle exists
+   * today. The vehicle builder makes a second one routine.
+   *
+   * Strictly higher wins, so a tie keeps the first found and today's single
+   * candidate produces byte-for-byte the old behaviour. Economy and support
+   * builds are not scored at all: value-per-cost is a combat metric, a
+   * harvester's power is zero, and ranking engineers by their guns is
+   * meaningless.
    */
   _tryBuildUnit(tag, cap) {
     if (cap <= 0) return false;
+    let bestStructure = null;
+    let bestCmd = null;
+    let bestScore = -Infinity;
+
     for (const s of this.ctx.structures.instances) {
       if (s.teamId !== this.team.id || s.mode !== 'idle') continue;
       // Not `s.def.produces` directly: an author-built vehicle names its
@@ -358,11 +468,23 @@ export class AiCommander {
 
         const cmd = commandsFor(s, this.ctx).find((c) => c.id === `build-${unitId}`);
         if (cmd?.enabledResult !== true) continue;
-        cmd.execute(s, this.ctx);
-        return true;
+
+        const score = tag === 'combat' ? valuePerCost(def) : 0;
+        if (score > bestScore) {
+          bestScore = score;
+          bestCmd = cmd;
+          bestStructure = s;
+        }
+        // Non-combat tags never beat the first candidate found (every score is
+        // 0), so stop looking the moment one is viable — the old behaviour.
+        if (tag !== 'combat') break;
       }
+      if (bestCmd && tag !== 'combat') break;
     }
-    return false;
+
+    if (!bestCmd) return false;
+    bestCmd.execute(bestStructure, this.ctx);
+    return true;
   }
 
   // ---- army: arm what it builds, and send it at something it can see ----
@@ -382,7 +504,10 @@ export class AiCommander {
     const army = this.ctx.vehicles.instances.filter(
       (v) => v.teamId === this.team.id && !v.dead && v.def.tags?.includes('combat') && v.def.id !== 'scout-buggy'
     );
-    if (army.length === 0) return;
+    if (army.length === 0) {
+      this.posture = 'economy';
+      return;
+    }
 
     // Armed is the capability gate combatController reads, and arming costs
     // mobility — so it happens once, on production, not per tick.
@@ -390,37 +515,391 @@ export class AiCommander {
       if (unit.mode === 'mobile') unit.mode = 'armed';
     }
 
-    // Attack only once there is enough of a group to be worth committing.
-    // Below that they hold near home, which doubles as base defence since
-    // combatController engages anything that wanders into range regardless.
-    if (army.length < this.economy.attackAt) return;
+    // Self-preservation runs unconditionally, for every unit, whatever the
+    // commander happens to be doing. A retreat that only happens while the
+    // commander is in a particular mood is not self-preservation — and the
+    // one moment a unit most needs pulling out is mid-attack, which is
+    // precisely when a posture-gated check would be switched off.
+    for (const unit of army) this._maybeRetreat(unit, dt);
+
+    // The roster every decision below is actually made over. A unit already
+    // limping to a repair bay is not available to commit, and counting it is
+    // how an AI talks itself into an attack with an army that is leaving.
+    const committable = army.filter((u) => !this._isRetreating(u));
+
+    this._updatePosture(committable);
+    if (this.posture === 'economy' || this.posture === 'mass') return;
 
     this.armyTargetTimer -= dt;
-    if (this.armyTargetTimer <= 0) {
+    if (this.armyTargetTimer <= 0 || this._forceRetarget) {
       this.armyTargetTimer = AiCommander.ARMY_TARGET_INTERVAL;
-      // Somewhere scouted and worth hitting, or — failing that — forward.
-      //
-      // An army that only ever moves toward *known* enemies never moves at all
-      // on a large map: the lone scout rarely ranges far enough to reveal
-      // another team's base before the army is built, so every unit sits at home
-      // guarding nothing. Advancing on the island's middle instead keeps the
-      // fair-vision rule completely intact — it is not homing on anything it
-      // cannot see — while guaranteeing that four teams pushing outward
-      // eventually meet. The units carry their own sight radius, so the advance
-      // *is* the reconnaissance, and the moment it reveals something real
-      // `_attackTarget` starts returning it instead.
-      this.armyTarget = this._attackTarget() ?? this._advancePoint();
+      this._forceRetarget = false;
+      this.armyTarget = this._pickArmyTarget();
     }
     const target = this.armyTarget;
     if (!target) return;
 
-    for (const unit of army) {
+    for (const unit of committable) {
       // Never re-order a unit already engaging something — combatController
       // owns the shooting, and re-targeting mid-fight just makes it drive in
       // circles under fire.
       if (unit.combatTarget || unit.hasOrder) continue;
       this._advanceUnit(unit, target);
     }
+  }
+
+  /**
+   * Where the army should be heading, given what it has decided to do.
+   *
+   * `retreat` goes home — the one posture with a destination of its own.
+   * `defense` heads for wherever the shooting came from, which
+   * combatController already recorded on whatever it hit. Everything else
+   * falls through to the original behaviour: somewhere scouted and worth
+   * hitting, or — failing that — forward.
+   *
+   * That fallback is load-bearing and predates this change. An army that only
+   * ever moves toward *known* enemies never moves at all on a large map: the
+   * lone scout rarely ranges far enough to reveal another team's base before
+   * the army is built, so every unit sits at home guarding nothing. Advancing
+   * on the island's middle keeps the fair-vision rule completely intact — it
+   * is not homing on anything it cannot see — while guaranteeing that four
+   * teams pushing outward eventually meet. The units carry their own sight
+   * radius, so the advance *is* the reconnaissance.
+   */
+  _pickArmyTarget() {
+    const home = this.team.homePoint;
+    if (this.posture === 'retreat') return home ? { x: home.x, z: home.z } : null;
+    if (this.posture === 'defense') {
+      const from = this._homeThreatOrigin();
+      if (from) return from;
+    }
+    if (this._opportunisticTarget) return this._opportunisticTarget;
+    return this._attackTarget() ?? this._advancePoint();
+  }
+
+  /**
+   * Decide what this commander is doing, in strict priority order.
+   *
+   * The order is the design. Defence first because an army marching on the far
+   * side of the map while its own base is shelled is the one outcome that is
+   * unambiguously wrong, whatever the strength arithmetic says about it.
+   */
+  _updatePosture(committable) {
+    this._opportunisticTarget = null;
+
+    if (this._homeUnderThreat()) {
+      this.posture = 'defense';
+      this._forceRetarget = true;
+      return;
+    }
+
+    if (this._checkOpportunisticStrike(committable)) {
+      this.posture = 'attack';
+      this._forceRetarget = true;
+      return;
+    }
+
+    if (committable.length === 0) {
+      this.posture = 'economy';
+      return;
+    }
+
+    const mine = armyPower(committable);
+    const { power: theirs, known } = this._scoutedEnemyStrength();
+    this.myStrength = mine;
+    this.enemyStrength = theirs;
+    this.enemyStrengthKnown = known;
+
+    // Nothing scouted means nothing to compare against — and a naive ratio
+    // would read the resulting zero as "the enemy is defenceless, go now,"
+    // which is the fair-vision rule broken from the opposite direction. Fall
+    // back to the flat headcount gate that has always governed this case.
+    if (!known) {
+      this.posture = committable.length >= this.economy.attackAt ? 'attack' : 'mass';
+      return;
+    }
+
+    const ratio = theirs > 0 ? mine / theirs : Infinity;
+
+    if (ratio <= RETREAT_STRENGTH_RATIO) {
+      this.posture = 'retreat';
+      this._forceRetarget = true;
+      return;
+    }
+
+    // Everything between the two thresholds is `mass`, and that band *is* the
+    // hysteresis — an army that withdrew at 0.6 has to reach 1.25 to turn
+    // around, not merely claw back over 0.6. No separate "was retreating"
+    // clause is needed for that; one was written here first and the negative
+    // control proved it could never change an outcome.
+    //
+    // No headcount term here on purpose. `attackAt` is the *unscouted*
+    // fallback, above — re-applying it once the enemy has actually been
+    // measured makes the measurement unable to change any decision the
+    // headcount would not have made anyway, which is the second thing the
+    // negative controls caught. A force with a 1.25x power margin over
+    // everything it has seen has earned the commitment whether that is three
+    // units or one.
+    this.posture = ratio >= ATTACK_STRENGTH_RATIO ? 'attack' : 'mass';
+  }
+
+  /**
+   * How much force this team has actually *seen* the enemy field.
+   *
+   * Same fog test `_attackTarget` applies, for the same reason: an AI that
+   * weighs an army it has never scouted is cheating however good the result
+   * looks. Reveal is monotonic (fogOfWar: "a mask is monotonically
+   * non-decreasing, so revealing is permanent"), so this is memory of what
+   * was scouted rather than live vision — no new intel-staleness concept.
+   *
+   * `known` is the load-bearing half of the return. Zero power means "nothing
+   * seen," which is not the same claim as "nothing there," and the caller has
+   * to be able to tell them apart.
+   */
+  _scoutedEnemyStrength() {
+    const fog = this.team.fog;
+    const threshold = fog?.revealThreshold ?? 0;
+    const seen = [];
+
+    for (const v of this.ctx.vehicles.instances) {
+      if (v.dead || v.teamId === this.team.id) continue;
+      const p = v.group.position;
+      if (fog && fog.seenAt(p.x, p.z) < threshold) continue;
+      seen.push(v);
+    }
+    for (const s of this.ctx.structures.instances) {
+      if (s.dead || s.teamId === this.team.id) continue;
+      if (fog && fog.seenAt(s.x, s.z) < threshold) continue;
+      seen.push(s);
+    }
+
+    return { power: armyPower(seen), known: seen.length > 0 };
+  }
+
+  /**
+   * A hostile base scouted for the first time and not meaningfully defended.
+   *
+   * Fires at most once per enemy team, ever — that latch is the entire safety
+   * property. Without it a base that simply stays weak re-triggers the
+   * override every tick, which is not seizing an opportunity, it is just a
+   * permanently different attack rule bypassing the strength comparison. With
+   * it, an AI that catches an undefended base early punishes it, and one that
+   * finds a fortified base goes back to the ordinary arithmetic and never
+   * gets another free pass at that team.
+   */
+  _checkOpportunisticStrike(committable) {
+    if (committable.length === 0) return false;
+    const fog = this.team.fog;
+    const threshold = fog?.revealThreshold ?? 0;
+
+    for (const v of this.ctx.vehicles.instances) {
+      if (v.dead || v.teamId === this.team.id) continue;
+      if (v.def.id !== 'base-station') continue;
+      if (this._foundEnemyBase.has(v.teamId)) continue;
+      const p = v.group.position;
+      if (fog && fog.seenAt(p.x, p.z) < threshold) continue;
+
+      // Latch on discovery, not on the decision to strike: this base has now
+      // been found, and whether it happened to be weak at this instant is not
+      // something to keep re-asking.
+      this._foundEnemyBase.add(v.teamId);
+      if (this._nearbyDefensePower(v.teamId, p) >= WEAK_BASE_DEFENSE_THRESHOLD) continue;
+      this._opportunisticTarget = { x: p.x, z: p.z };
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Armed strength a team has standing near a point — turrets and units alike,
+   * since unitPower reads the same turret block off both.
+   *
+   * Uses the same radius this commander's own engineers deploy within, so
+   * "near the base" means the same thing on both sides of the map.
+   */
+  _nearbyDefensePower(teamId, pos) {
+    const near = [];
+    for (const s of this.ctx.structures.instances) {
+      if (s.dead || s.teamId !== teamId) continue;
+      if (Math.hypot(s.x - pos.x, s.z - pos.z) > DEFENSE_MAX_RADIUS) continue;
+      near.push(s);
+    }
+    for (const v of this.ctx.vehicles.instances) {
+      if (v.dead || v.teamId !== teamId) continue;
+      const p = v.group.position;
+      if (Math.hypot(p.x - pos.x, p.z - pos.z) > DEFENSE_MAX_RADIUS) continue;
+      near.push(v);
+    }
+    return armyPower(near);
+  }
+
+  /**
+   * Anything of this team's near home has been shot recently.
+   *
+   * Reads the threat stamp combatController already writes on every damaged
+   * entity — the same field, and the same simClock.time comparison,
+   * harvesterAI has been using all along. Never a wall clock.
+   */
+  _homeUnderThreat() {
+    return this._homeThreatOrigin() !== null;
+  }
+
+  _homeThreatOrigin() {
+    const home = this.team.homePoint;
+    if (!home) return null;
+    for (const list of [this.ctx.vehicles.instances, this.ctx.structures.instances]) {
+      for (const e of list) {
+        if (e.dead || e.teamId !== this.team.id) continue;
+        if (e.threatUntil == null || simClock.time >= e.threatUntil) continue;
+        const p = e.group?.position ?? e;
+        if (Math.hypot(p.x - home.x, p.z - home.z) > DEFENSE_MAX_RADIUS) continue;
+        const from = e.threatFrom;
+        if (from) return { x: from.x, z: from.z };
+      }
+    }
+    return null;
+  }
+
+  // ---- retreat and heal ----
+
+  /**
+   * Pulled off the line — either still driving itself home, or already handed
+   * to repairController. Either way it is not available to commit.
+   */
+  _isRetreating(unit) {
+    return !!unit._aiRetreat || !!unit.repair;
+  }
+
+  /**
+   * Pull a badly damaged unit off the line, and get it home.
+   *
+   * The heal itself is entirely repairController's: setting
+   * `inst.repair = { bay, state: 'to-bay' }` — the same field the
+   * player-facing Repair command sets — hands over the whole
+   * queue-dock-repair-leave cycle, including FacilityControl clearance. Its
+   * own generic auto-queue would catch these units eventually anyway, at 0.3
+   * health; the AI trigger is simply earlier, so a unit leaves while it still
+   * has enough health to survive the trip.
+   *
+   * What is *not* delegated is the long drive, and that distinction was found
+   * by watching a real match rather than reasoned out. Handing over
+   * immediately looked correct and was not: repairController's driver is
+   * deliberately a trimmed local one (its own header says so) with no
+   * pathfinder, only six fixed detour angles. That is the right tool for a
+   * unit hurt near home, and useless for one 386 units deep in enemy ground —
+   * observed sitting at exactly that distance, state `to-bay`, for seventeen
+   * straight simulated minutes without ever getting closer, while
+   * `_isRetreating` kept it out of the army that would have driven it with
+   * `_advanceUnit`'s NavGrid routing. So the long leg stays here, on the
+   * better driver, and only the terminal approach is handed over —
+   * `TERMINAL_RADIUS` being the boundary FacilityControl itself already draws
+   * around a facility.
+   */
+  _maybeRetreat(unit, dt = 0) {
+    if (unit.repair) return; // already handed over; repairController owns it now
+    if (unit === this.ctx.vehicles.active) return; // never yank the player's own vehicle
+    if (unit._aiRetreatCooldown > 0) {
+      unit._aiRetreatCooldown -= dt;
+      return;
+    }
+
+    const healed = unit.health > unit.def.maxHealth * RETREAT_HEALTH_FRACTION;
+    if (!unit._aiRetreat && healed) return;
+    if (unit._aiRetreat && unit.health >= unit.def.maxHealth) {
+      unit._aiRetreat = null; // repaired and released — back on the roster
+      return;
+    }
+
+    const bay = this._nearestOwnRepairBay(unit);
+    if (!bay) {
+      unit._aiRetreat = null; // nowhere to go: fighting on beats wandering
+      return;
+    }
+    if (unit._aiRetreat && this._withdrawalIsStuck(unit, bay, dt)) return;
+    // Affordability up front, for the same reason _maybeAutoQueue checks it: a
+    // claim the team cannot pay for is dropped by the repair loop on arrival
+    // and re-taken the next tick, a flap that never resolves.
+    const cost = Math.ceil((unit.def.maxHealth - unit.health) * bay.def.repair.creditsPerHealth);
+    if (this.team.credits < cost) {
+      unit._aiRetreat = null;
+      return;
+    }
+
+    const starting = !unit._aiRetreat;
+    if (starting) {
+      // A fresh attempt is judged on its own progress. Carrying the previous
+      // attempt's best distance over would make the new one look stalled from
+      // its first tick and give up almost immediately.
+      unit._aiRetreatBest = null;
+      unit._aiRetreatStuck = 0;
+    }
+    unit._aiRetreat = true;
+    const pos = unit.group.position;
+    if (Math.hypot(bay.x - pos.x, bay.z - pos.z) <= TERMINAL_RADIUS) {
+      unit.repair = { bay, state: 'to-bay' };
+      unit._aiRetreat = null;
+      return;
+    }
+    // Still the long leg. Drive it the way the army drives anywhere else —
+    // NavGrid first, widening detour fan as the fallback.
+    //
+    // The order in flight when a retreat starts is an attack order pointing
+    // the wrong way, so it is dropped once here rather than waited out;
+    // after that a new leg is only issued when the last one ends, or every
+    // tick would overwrite the order mid-drive.
+    if (starting && unit.hasOrder) unit.arrive('cancelled');
+    if (!unit.hasOrder) this._advanceUnit(unit, { x: bay.x, z: bay.z });
+  }
+
+  /**
+   * Give up on a withdrawal that is not actually withdrawing.
+   *
+   * The bounded-retry discipline the rest of this file already applies to
+   * scouts (`SCOUT_STUCK_TIMEOUT`) and engineers, applied to the one case that
+   * needs it most. A withdrawing unit is subtracted from `committable`, so a
+   * unit wedged against terrain on the way home is not merely wasted — it is
+   * an army the commander permanently believes it does not have. Observed
+   * directly: one gun platform frozen at the same coordinates, order live and
+   * never ending, for seventeen simulated minutes.
+   *
+   * Giving up puts it back on the roster, where `_manageArmy` re-targets it
+   * every `ARMY_TARGET_INTERVAL` — a moving destination being the thing most
+   * likely to break a wedge, and shooting from where it stands being strictly
+   * better than not shooting from where it stands. The health trigger will
+   * try again on the next tick, so this backs off rather than disabling.
+   */
+  _withdrawalIsStuck(unit, bay, dt) {
+    const pos = unit.group.position;
+    const d = Math.hypot(bay.x - pos.x, bay.z - pos.z);
+    if (unit._aiRetreatBest == null || d < unit._aiRetreatBest - WITHDRAW_PROGRESS_EPSILON) {
+      unit._aiRetreatBest = d;
+      unit._aiRetreatStuck = 0;
+      return false;
+    }
+    unit._aiRetreatStuck = (unit._aiRetreatStuck ?? 0) + dt;
+    if (unit._aiRetreatStuck < WITHDRAW_STUCK_TIMEOUT) return false;
+
+    unit._aiRetreat = null;
+    unit._aiRetreatBest = null;
+    unit._aiRetreatStuck = 0;
+    unit._aiRetreatCooldown = WITHDRAW_RETRY_COOLDOWN;
+    return true;
+  }
+
+  /** Nearest finished repair bay this team owns, or null. */
+  _nearestOwnRepairBay(unit) {
+    const pos = unit.group.position;
+    let best = null;
+    let bestD = Infinity;
+    for (const s of this.ctx.structures.instances) {
+      if (s.def.id !== 'repair-bay' || s.mode !== 'idle' || s.teamId !== this.team.id) continue;
+      const d = Math.hypot(s.x - pos.x, s.z - pos.z);
+      if (d < bestD) {
+        bestD = d;
+        best = s;
+      }
+    }
+    return best;
   }
 
   /**

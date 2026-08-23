@@ -326,6 +326,10 @@ function serializeAiCommanders(ctx) {
       // a commander back to searching a ring it has already proven is no good.
       exploreRadius: round(c.exploreRadius, 2),
       baseRelocateAttempts: c.baseRelocateAttempts,
+      // Also latched: the enemy bases this commander has already discovered.
+      // Its opportunistic strike fires at most once per team, ever, so losing
+      // this on load hands every already-found base a second free run at it.
+      foundEnemyBaseTeamIds: [...c._foundEnemyBase],
     });
     // `armyTarget` is deliberately not saved: it is a live entity reference
     // that _manageArmy re-picks on its own interval anyway.
@@ -567,6 +571,7 @@ export function deserialize(ctx, snap) {
       c.baseOrderElapsed = saved.baseOrderElapsed ?? 0;
       if (saved.exploreRadius != null) c.exploreRadius = saved.exploreRadius;
       if (saved.baseRelocateAttempts != null) c.baseRelocateAttempts = saved.baseRelocateAttempts;
+      c._foundEnemyBase = new Set(saved.foundEnemyBaseTeamIds ?? []);
     }
   }
 
