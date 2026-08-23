@@ -334,12 +334,30 @@ export class HarvesterAI {
     // A field the player picked wins over the driver's own judgement, once.
     let field = this._consumeTargetField(inst);
     if (!field) {
-      // Prefer a healthy, uncrowded field, but fall back to plain nearest if
-      // nothing satisfies both constraints — never let the harvester idle.
+      // Prefer an untouched field over one already being worked, even a
+      // lightly worked one under the crowd cap. Two harvesters filling the
+      // same field at once draw far faster than any field regenerates
+      // (fillRate 48/s each against a regen ceiling of 6/s), and the
+      // low-stock check below only gates *new* assignments — a field already
+      // being drained keeps getting drained past it. Left to plain nearest,
+      // an AI's fixed two-harvester economy routinely converges both onto
+      // the same field and stalls its own income for tens of seconds while
+      // that field claws back from empty. See docs/plans/ai-commander-overhaul.md.
       field = this.world.blooms.nearestTo(inst.group.position.x, inst.group.position.z, {
         minStock: 1,
-        reject: (f) => (s.bans.get(f.id) ?? 0) > now || this._isFieldCrowdedOrLow(f, inst),
+        reject: (f) =>
+          (s.bans.get(f.id) ?? 0) > now ||
+          this._isFieldCrowdedOrLow(f, inst) ||
+          this._countHarvestersOnField(f, inst) > 0,
       });
+      if (!field) {
+        // No untouched field reachable — sharing one that isn't yet crowded
+        // or low is still better than idling.
+        field = this.world.blooms.nearestTo(inst.group.position.x, inst.group.position.z, {
+          minStock: 1,
+          reject: (f) => (s.bans.get(f.id) ?? 0) > now || this._isFieldCrowdedOrLow(f, inst),
+        });
+      }
       if (!field) {
         field = this.world.blooms.nearestTo(inst.group.position.x, inst.group.position.z, {
           minStock: 1,
