@@ -13,6 +13,16 @@
  * never produced. That distinction is the first test here, because it is the
  * one a reader is most likely to assume away.
  *
+ * The kill tallies below are now driven through `Projectiles`, not
+ * `CombatController`. That is where the bookkeeping moved when shots stopped
+ * being hitscan: a kill happens when a shell *arrives*, which is a different
+ * tick from the one it was fired on, so counting it at the trigger would
+ * credit kills for shots that had not landed yet — and for shots that never
+ * land at all, since a shell can miss now. The tests drive `projectiles.spawn`
+ * with an explicit `willHit` rather than firing and hoping, so they exercise
+ * the tally rather than the accuracy roll (which has its own tests in
+ * missile-accuracy.test.mjs).
+ *
  * Dependency-free, same convention as ai-posture.test.mjs: real classes driven
  * against plain mock objects, no renderer, no heightmap, no network.
  *
@@ -21,7 +31,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Team, createTeams } from '../src/core/team.js';
-import { CombatController } from '../src/vehicles/combatController.js';
+import { Projectiles, resetProjectileIds } from '../src/vehicles/projectiles.js';
 import { serialize } from '../src/core/snapshot.js';
 
 const GUN = { id: 'gun-platform', maxHealth: 400, turret: { damage: 20, fireInterval: 1.4, range: 90 } };
@@ -32,9 +42,13 @@ function makeTeam(id = 0) {
   return new Team(id, { name: `Team ${id}`, color: 0x4fd1c5, isHuman: id === 0 });
 }
 
-/** A shooter, shaped the way _fire reads one. */
+let nextMockId = 1;
+
+/** A shooter, shaped the way a shell's kill-credit lookup reads one. */
 function makeShooter(def, team, { kills = 0 } = {}) {
   return {
+    id: nextMockId++,
+    kind: 'vehicle',
     def,
     teamId: team.id,
     kills,
@@ -47,6 +61,8 @@ function makeShooter(def, team, { kills = 0 } = {}) {
 /** A victim that dies on the first hit, so every _fire call is a kill. */
 function makeVictim({ survives = false } = {}) {
   return {
+    id: nextMockId++,
+    kind: 'vehicle',
     def: GUN,
     teamId: 99,
     dead: false,
@@ -60,14 +76,49 @@ function makeVictim({ survives = false } = {}) {
   };
 }
 
-function makeCombat(team, { destroyed = [] } = {}) {
-  return new CombatController({
-    vehicles: { instances: [] },
-    structures: { instances: [] },
+/**
+ * A Projectiles controller over a live instance list, plus a `land` helper
+ * that fires one shell and immediately advances it to its impact.
+ *
+ * The shooter is pushed into `vehicles.instances` because that is genuinely
+ * how the credit lookup works now — a shell resolves its shooter by id at
+ * arrival, precisely so that a shooter which has since died can be detected
+ * rather than dereferenced. A mock that skipped this would pass while testing
+ * the wrong branch.
+ */
+function makeRange(team, { destroyed = [] } = {}) {
+  resetProjectileIds();
+  const vehicles = { instances: [] };
+  const structures = { instances: [] };
+  const projectiles = new Projectiles({
+    vehicles,
+    structures,
     heightmap: { heightAt: () => 0, seaLevelY: 0 },
     entities: { queueDestroy: (inst) => destroyed.push(inst) },
-    game: { teamOf: () => team, teams: [team] },
+    game: { teamOf: (inst) => team, teams: [team] },
   });
+
+  const land = (shooter, victim, { willHit = true, present = true } = {}) => {
+    if (present && !vehicles.instances.includes(shooter)) vehicles.instances.push(shooter);
+    if (!vehicles.instances.includes(victim)) vehicles.instances.push(victim);
+    projectiles.spawn({
+      shooter,
+      target: victim,
+      willHit,
+      damage: shooter.def.turret.damage,
+      turretDef: shooter.def.turret,
+      muzzleHeight: 1.5,
+      targetHeight: 1.5,
+      aimX: victim.group.position.x,
+      aimZ: victim.group.position.z,
+      aimY: 1.5,
+    });
+    // One step longer than the whole flight, so the shell is guaranteed to
+    // have arrived rather than being one tick short of it.
+    projectiles.update(projectiles.instances[projectiles.instances.length - 1].flight + 0.01);
+  };
+
+  return { projectiles, vehicles, structures, land };
 }
 
 // ---- the field that is not creditsEarned ----
@@ -111,10 +162,10 @@ test('teams do not share the nested stat containers', () => {
 
 test('a kill lands in killsByDefId for the shooter type', () => {
   const team = makeTeam();
-  const combat = makeCombat(team);
+  const { land } = makeRange(team);
   const shooter = makeShooter(GUN, team);
 
-  combat._fire(shooter, makeVictim());
+  land(shooter, makeVictim());
 
   assert.equal(team.stats.killsByDefId['gun-platform'], 1);
   assert.equal(shooter.kills, 1);
@@ -122,11 +173,11 @@ test('a kill lands in killsByDefId for the shooter type', () => {
 
 test('killsByDefId sums across separate units of the same type', () => {
   const team = makeTeam();
-  const combat = makeCombat(team);
+  const { land } = makeRange(team);
 
-  combat._fire(makeShooter(GUN, team), makeVictim());
-  combat._fire(makeShooter(GUN, team), makeVictim());
-  combat._fire(makeShooter(TANK, team), makeVictim());
+  land(makeShooter(GUN, team), makeVictim());
+  land(makeShooter(GUN, team), makeVictim());
+  land(makeShooter(TANK, team), makeVictim());
 
   assert.equal(team.stats.killsByDefId['gun-platform'], 2, 'two different platforms, one type');
   assert.equal(team.stats.killsByDefId['heavy-tank'], 1);
@@ -134,15 +185,15 @@ test('killsByDefId sums across separate units of the same type', () => {
 
 test('topKillsVehicle only yields to a strictly better run', () => {
   const team = makeTeam();
-  const combat = makeCombat(team);
+  const { land } = makeRange(team);
 
   // A reaches one kill and takes the record.
-  combat._fire(makeShooter(GUN, team), makeVictim());
+  land(makeShooter(GUN, team), makeVictim());
   assert.deepEqual(team.stats.topKillsVehicle, { defId: 'gun-platform', kills: 1 });
 
   // B also reaches one. A tie must not displace the incumbent, or the record
   // would just track whoever fired most recently.
-  combat._fire(makeShooter(TANK, team), makeVictim());
+  land(makeShooter(TANK, team), makeVictim());
   assert.deepEqual(
     team.stats.topKillsVehicle,
     { defId: 'gun-platform', kills: 1 },
@@ -150,17 +201,17 @@ test('topKillsVehicle only yields to a strictly better run', () => {
   );
 
   // B reaching two is a genuinely better run and does take it.
-  combat._fire(makeShooter(TANK, team, { kills: 1 }), makeVictim());
+  land(makeShooter(TANK, team, { kills: 1 }), makeVictim());
   assert.deepEqual(team.stats.topKillsVehicle, { defId: 'heavy-tank', kills: 2 });
 });
 
 test('the record survives the unit that set it', () => {
   // The whole reason this is a team-level tally: the instance is gone.
   const team = makeTeam();
-  const combat = makeCombat(team);
+  const { land } = makeRange(team);
   let ace = makeShooter(GUN, team, { kills: 4 });
 
-  combat._fire(ace, makeVictim());
+  land(ace, makeVictim());
   ace = null; // destroyed, spliced out of vehicles.instances
 
   assert.deepEqual(team.stats.topKillsVehicle, { defId: 'gun-platform', kills: 5 });
@@ -170,9 +221,9 @@ test('a turret structure can hold the record too', () => {
   // _shooters() includes emplacements, and they carry def.id/kills under the
   // same names — so they fold into the same tallies rather than being skipped.
   const team = makeTeam();
-  const combat = makeCombat(team);
+  const { land } = makeRange(team);
 
-  combat._fire(makeShooter(TURRET, team), makeVictim());
+  land(makeShooter(TURRET, team), makeVictim());
 
   assert.equal(team.stats.killsByDefId['gun-turret'], 1);
   assert.deepEqual(team.stats.topKillsVehicle, { defId: 'gun-turret', kills: 1 });
@@ -180,9 +231,9 @@ test('a turret structure can hold the record too', () => {
 
 test('a shot that does not kill records nothing', () => {
   const team = makeTeam();
-  const combat = makeCombat(team);
+  const { land } = makeRange(team);
 
-  combat._fire(makeShooter(GUN, team), makeVictim({ survives: true }));
+  land(makeShooter(GUN, team), makeVictim({ survives: true }));
 
   assert.deepEqual(team.stats.killsByDefId, {});
   assert.equal(team.stats.topKillsVehicle, null);
@@ -193,10 +244,10 @@ test('a kill is queued for destruction, not spliced at the kill site', () => {
   // destroy pipeline runs later, with the instance still readable.
   const team = makeTeam();
   const destroyed = [];
-  const combat = makeCombat(team, { destroyed });
+  const { land } = makeRange(team, { destroyed });
   const victim = makeVictim();
 
-  combat._fire(makeShooter(GUN, team), victim);
+  land(makeShooter(GUN, team), victim);
 
   assert.deepEqual(destroyed, [victim]);
 });
