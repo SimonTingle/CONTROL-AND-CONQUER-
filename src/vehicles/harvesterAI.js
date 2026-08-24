@@ -52,6 +52,12 @@ const STALL_TIMEOUT = 3; // seconds barely moving in a driving state
 // for a few seconds without being stuck.
 const NO_PROGRESS_TIMEOUT = 6; // seconds without getting closer
 const PROGRESS_EPSILON = 0.5; // world units that count as "closer"
+// How long a mechanical hold (yielding to traffic, or mid-reverse) may go on
+// suppressing the stall and no-progress escapes before it stops counting as
+// deliberate. Comfortably longer than a real three-point turn — several
+// reverse-and-forward cycles — so an honest manoeuvre is never cut short, and
+// far shorter than the freezes this exists to end. See _travel.
+const HOLD_GRACE = 10; // seconds
 const RETRY_PAUSE = 1.5;
 const REVERSE_DURATION = 1.5; // seconds backing off before trying the next detour angle
 const BAN_SECONDS = 45;
@@ -489,8 +495,22 @@ export class HarvesterAI {
     // Drifted off the dock (bumped, slid down a grade) — holding the lock
     // from out here isn't doing anyone any good. Give it up and re-approach
     // properly instead of "unloading" from wherever it ended up.
+    //
+    // Measured against the *dock*, which is the same point `_destination`
+    // defines arrival against — not the building centre. Those are 12 units
+    // apart (`dockOffset`), and measuring arrival from one while releasing
+    // from the other opened a dead band: at 22 from the dock a harvester can
+    // be up to 34 from the centre, so anything landing in (33, 34] was both
+    // "arrived" and "drifted" on the same tick. It then cycled
+    // arrive → _atDock → UNLOADING → release → TO_BASE → arrive, forever,
+    // never issuing an order (so no stall or no-progress timer ever ran) and
+    // never unloading. A real 44-minute match had one team on 0 credits with
+    // its only harvester frozen there, full, 92 units of odometer to its name.
+    // Same reference point on both sides makes the overlap arithmetically
+    // impossible rather than merely narrow.
+    const dock = facility.dock ?? facility;
     const pos = inst.group.position;
-    if (Math.hypot(pos.x - facility.x, pos.z - facility.z) > DOCK_DISTANCE * 1.5) {
+    if (Math.hypot(pos.x - dock.x, pos.z - dock.z) > DOCK_DISTANCE * 1.5) {
       this._releaseDock(facility, inst);
       s.state = TO_BASE;
       s.dest = null;
@@ -807,6 +827,15 @@ export class HarvesterAI {
       return false;
     }
     if (inst.health > inst.def.maxHealth * REPAIR_RETREAT_FRACTION) return false;
+    // Finish the delivery already under way. Breaking off from TO_BASE throws
+    // away a completed round trip and takes the load out of the economy for as
+    // long as the bay queue is — measured at eight to ten minutes with a
+    // handful of damaged scouts ahead of it, during which the team earned
+    // nothing and its credits drained paying for *their* repairs. The
+    // unloading itself is a few seconds away, and IDLE re-checks this the
+    // moment it is done, so the repair is deferred rather than skipped.
+    // Danger is a separate question and FLEEING still owns it.
+    if (s.state === TO_BASE && s.load > 0) return false;
     // The vehicle the player is driving stays under their hand, same carve-out
     // repairController's auto-queue makes.
     if (inst === this.vehicles.active) return false;
@@ -899,11 +928,19 @@ export class HarvesterAI {
     }
 
     // Reached a detour waypoint: drop it and aim at the real goal again.
+    //
+    // Deliberately does *not* reset `s.detours`. Reaching a waypoint means the
+    // manoeuvre worked, not that the leg is going anywhere — and a harvester
+    // wedged short of its field can reach detour waypoints all day. Resetting
+    // here put the ladder back to zero on every cycle, so it never reached
+    // DETOUR_ANGLES.length and the give-up below it (ban the field, go
+    // somewhere else) was unreachable. Amber's harvester rode that loop for the
+    // whole match. The ladder is reset by *progress* instead — see the
+    // bestDistance branch at the end of this function.
     if (s.waypoint) {
       const wd = Math.hypot(s.waypoint.x - pos.x, s.waypoint.z - pos.z);
       if (wd <= WAYPOINT_RADIUS) {
         s.waypoint = null;
-        s.detours = 0;
         this._order(inst, s, dest);
         return;
       }
@@ -927,7 +964,25 @@ export class HarvesterAI {
     // Fleeing joins them for the same reason: a harvester that has run home and
     // is deliberately holding station under its facility's protection is doing
     // precisely what it should, and a detour would send it back out into fire.
-    const holding = inst.yielding || inst.reverseTimer != null || s.state === FLEEING;
+    // ...but a manoeuvre is only a manoeuvre for so long. Both of the
+    // mechanical holds can re-arm themselves indefinitely — `yielding` while
+    // the obstacle stays put, `reverseTimer` from driveToTarget's sharp-turn
+    // escape — and while either is true *both* escapes below are switched off,
+    // which makes an unresolvable one permanent rather than slow. A harvester
+    // was found frozen exactly this way for fourteen simulated minutes: order
+    // live, speed 0, odometer unmoved, and both timers reading 0.00 because
+    // `reverseTimer` was re-armed before it could ever expire. So they get a
+    // grace period, generous against a real three-point turn (~1.2s of reverse
+    // plus a beat of forward travel, a few times over) and far short of a
+    // freeze.
+    //
+    // FLEEING is deliberately *not* bounded. That one is not a manoeuvre in
+    // progress but a standing decision — a harvester holding station under its
+    // facility's guns is doing precisely what it should, for as long as the
+    // threat lasts, and timing it out would send it back into fire.
+    const mechanicalHold = inst.yielding || inst.reverseTimer != null;
+    s.holdTimer = mechanicalHold ? (s.holdTimer ?? 0) + dt : 0;
+    const holding = s.state === FLEEING || (mechanicalHold && s.holdTimer < HOLD_GRACE);
     s.stallTimer = !holding && inst.speed < STALL_SPEED ? s.stallTimer + dt : 0;
     if (s.stallTimer > STALL_TIMEOUT) {
       s.stallTimer = 0;
@@ -958,10 +1013,30 @@ export class HarvesterAI {
     }
 
     if (holding) {
-      s.noProgressTimer = 0; // a deliberate hold is not a failure to progress
+      // A deliberate hold is not a failure to progress — but it is not evidence
+      // of progress either, so the timer *pauses* here rather than resetting.
+      //
+      // That distinction is the whole fix. `holding` re-arms: driveToTarget's
+      // terrain-blocked escape reverses for REVERSE_DURATION, the reverse ends,
+      // the vehicle drives back at the same unclimbable grade, and it reverses
+      // again — a two-second cycle. Zeroing the counter on every cycle meant it
+      // never got past a few tenths of a second, so a vehicle bouncing off one
+      // slope forever read as perfectly healthy. Amber's harvester did exactly
+      // that: forty minutes, full speed, six units of ground covered, `stall`
+      // and `noProgress` both sat at 0.00 the entire time. Pausing instead
+      // accumulates the moving-but-getting-nowhere fraction of each cycle, so
+      // the escalation arrives in a minute or so instead of never.
+      //
+      // The bound in `holding` above and this are complementary, not
+      // duplicates: that one catches a hold that never *ends*, this one catches
+      // a hold that ends and immediately starts again.
     } else if (s.bestDistance == null || d < s.bestDistance - PROGRESS_EPSILON) {
       s.bestDistance = d;
       s.noProgressTimer = 0;
+      // Closer than this leg has ever been: the detours are working, so the
+      // ladder starts again from the direct line. This is the only thing that
+      // resets it, which is what keeps it monotonic when nothing is working.
+      s.detours = 0;
     } else {
       s.noProgressTimer = (s.noProgressTimer ?? 0) + dt;
       if (s.noProgressTimer > NO_PROGRESS_TIMEOUT) {

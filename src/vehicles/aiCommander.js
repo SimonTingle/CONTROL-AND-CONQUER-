@@ -291,6 +291,15 @@ export class AiCommander {
     return this._ownUnits('scout-buggy');
   }
 
+  /** Live units of this team carrying `tag` — the roster a tag-level cap is
+   * a budget for. Id-agnostic, so a future or author-built vehicle counts
+   * against the same allowance the moment it carries the tag. */
+  _ownUnitsWithTag(tag) {
+    return this.ctx.vehicles.instances.filter(
+      (v) => v.teamId === this.team.id && !v.dead && v.def.tags?.includes(tag)
+    );
+  }
+
   /** This team's already-deployed defenses — gun-turret and sensor-tower
    * together, the same grouping defenseCap counts them under. */
   _ownDefenses() {
@@ -452,6 +461,30 @@ export class AiCommander {
    */
   _tryBuildUnit(tag, cap) {
     if (cap <= 0) return false;
+    // `combatCap` is a budget for the *army*, so it counts every combat-tagged
+    // unit rather than each id separately. Per-id was silently a per-type
+    // allowance: once gun-platform hit 7, the scout-buggy — which also carries
+    // the 'combat' tag, and which `_manageArmy` then explicitly refuses to
+    // field — became the only candidate left and got bought up to 7 as well.
+    // A 44-minute match ended with every working AI team holding exactly 7 of
+    // each, ~2,450cr apiece spent on units it had already decided were not
+    // army. Checked once, before the scan: it is a question about the team,
+    // not about any one candidate.
+    //
+    // Only `combat`. `economy` keeps the per-id cap deliberately — with two
+    // harvester types that yields 4 harvesters against a cap of 2, and that
+    // surplus is a large part of why the AI economies that *do* work, work
+    // (the strongest team's 20,800cr came from four harvesters). Making it
+    // tag-level here would halve their income inside the very change meant to
+    // repair income. It wants its own measured balance pass, not a drive-by.
+    //
+    // Knock-on, stated rather than discovered later: a surviving scout now
+    // spends one point of the budget, so the fielded army is `combatCap` minus
+    // however many scouts are alive — 6 tanks at expert, not 7. That is the
+    // honest reading of a shared budget, and 6 committed tanks beats 7 tanks
+    // plus 7 units the commander refuses to send anywhere.
+    if (tag === 'combat' && this._ownUnitsWithTag(tag).length >= cap) return false;
+
     let bestStructure = null;
     let bestCmd = null;
     let bestScore = -Infinity;
@@ -464,7 +497,7 @@ export class AiCommander {
       for (const unitId of producedUnitIds(s.def, this.ctx)) {
         const def = this.ctx.vehicles.defOf(unitId);
         if (!def?.tags?.includes(tag)) continue;
-        if (this._ownUnits(unitId).length >= cap) continue;
+        if (tag !== 'combat' && this._ownUnits(unitId).length >= cap) continue;
 
         const cmd = commandsFor(s, this.ctx).find((c) => c.id === `build-${unitId}`);
         if (cmd?.enabledResult !== true) continue;
@@ -1109,6 +1142,25 @@ export class AiCommander {
       st = { stuckTimer: 0, angleOffset: 0, lastPoint: null, retryTimer: 0 };
       this.scoutState.set(scout, st);
     }
+
+    // repairController owns a vehicle carrying `repair`, and two controllers
+    // steering one vehicle is not a near-miss — it deadlocks both.
+    //
+    // aiCommander runs before repairController in the tick, so without this
+    // an explore order was re-issued every frame the scout had none.
+    // repairController's `_driveTo` then saw `hasOrder` and fell through to
+    // its stall/no-progress tail, never reaching the `!inst.hasOrder` branch
+    // where *both* its detour ladder and its `_leaveBay` give-up live. Its
+    // detour counter climbed through the tail's blind increments while the
+    // give-up stayed unreachable, so `inst.repair` never cleared: a 44-minute
+    // match ended with scouts holding detour counts of 74, 56 and 50 against
+    // a six-angle ladder, pinned at the terrain-damage floor, occupying every
+    // slot of both AI repair bays.
+    //
+    // Every other unit type already keeps this invariant — harvesters by
+    // mutual exclusion on `def.capacity`, army units via `_maybeRetreat`'s
+    // own `if (unit.repair) return;`. Scouts were the only ones without it.
+    if (scout.repair) return;
 
     if (st.retryTimer > 0) {
       st.retryTimer -= dt;
