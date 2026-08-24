@@ -84,6 +84,12 @@ const REPAIR_RETRY_COOLDOWN = 8;
 
 /** Widening, alternating. A straight retry cannot work: the heading is unchanged. */
 const DETOUR_ANGLES = [0.9, -0.9, 1.6, -1.6, 2.4];
+// Angles at or past this offset from the direct bearing point behind the
+// vehicle rather than around the obstacle. A wheeled vehicle has no way to
+// reach one except by reversing into it; a tracked vehicle can pivot to face
+// any bearing without moving at all (see vehicleController.js's tracked
+// sharp-turn branch), so there is no reason to ever send it toward one.
+const TRACKED_DETOUR_LIMIT = Math.PI / 2;
 /**
  * Holding-fix arrival tolerance. The fix itself, and the ring it sits on, are
  * `facilityControl`'s business now — a waiter only needs to get near enough to
@@ -1065,12 +1071,25 @@ export class HarvesterAI {
     // it, so grind gets the reverse immediately instead of waiting for the
     // second abandon.
     const alreadyTrying = s.detours > 0 || !!s.waypoint;
+    // Tracked vehicles never take this reverse: they can pivot to face any
+    // heading without moving, so backing off first buys nothing they can't
+    // already do by turning toward the next detour angle in place.
     if (
       (alreadyTrying || inst.blocked) &&
       inst.reverseTimer == null &&
+      !inst.tracked &&
       !hasVehicleBehind(inst, this.vehicles.instances)
     ) {
       inst.beginReverse(REVERSE_DURATION);
+    }
+
+    if (inst.tracked && s.detours < DETOUR_ANGLES.length && Math.abs(DETOUR_ANGLES[s.detours]) >= TRACKED_DETOUR_LIMIT) {
+      // Skip the backward-hemisphere angle(s) entirely for tracked vehicles —
+      // retry immediately with the next one rather than waypointing them
+      // somewhere they'd have to reverse to reach.
+      s.detours++;
+      s.retryTimer = 0.2;
+      return;
     }
 
     if (s.detours < DETOUR_ANGLES.length) {

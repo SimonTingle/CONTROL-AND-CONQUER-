@@ -14,6 +14,7 @@
 import { STRUCTURE_CATALOG } from '../structures/structures.js';
 import { VEHICLE_CATALOG } from './catalog.js';
 import { WEAPON_TIERS } from '../core/team.js';
+import { simClock } from '../core/simClock.js';
 
 /**
  * @param {object} instance the VehicleInstance the menu was opened on
@@ -192,6 +193,81 @@ const SELL_COMMAND = {
     // engineer-consuming execute() — not spliced here directly, so nothing
     // is removed from an array another system is still walking this tick.
     ctx.entities.queueDestroy(instance);
+  },
+};
+
+/**
+ * Universal vehicle sell — every vehicle gets this, not just deployed
+ * defenses. Scored by age as well as condition: a vehicle that's been
+ * driving for the whole match shouldn't refund the same as one built a
+ * moment ago at identical health, so the condition-scaled value decays
+ * toward a floor as the vehicle ages, on a sim-tick clock (deterministic,
+ * matches `instance.createdAt`'s own convention — see vehicleController.js).
+ * Combat-tagged vehicles get a flat bonus per confirmed kill on top: a
+ * veteran unit has already paid back some of its cost in value the age/
+ * condition formula alone can't see.
+ */
+const VEHICLE_SELL_BASE_FRACTION = 0.5; // matches SELL_COMMAND's fraction above
+const VEHICLE_SELL_AGE_FLOOR = 0.6; // oldest vehicles still keep this much of the condition-scaled value
+const VEHICLE_SELL_AGE_HALFLIFE = 3000; // sim ticks to decay from 1.0 toward the floor
+const KILL_BONUS_PER_KILL = 15; // flat credits per confirmed kill, combat-tagged vehicles only
+export function vehicleSellRefund(instance) {
+  const { cost = 0, maxHealth = 1, tags = [] } = instance.def;
+  const conditionFraction = instance.health / maxHealth;
+  const age = simClock.tick - instance.createdAt;
+  const ageFraction =
+    VEHICLE_SELL_AGE_FLOOR + (1 - VEHICLE_SELL_AGE_FLOOR) * Math.exp(-age / VEHICLE_SELL_AGE_HALFLIFE);
+  let refund = cost * VEHICLE_SELL_BASE_FRACTION * conditionFraction * ageFraction;
+  if (tags.includes('combat')) refund += (instance.kills ?? 0) * KILL_BONUS_PER_KILL;
+  return Math.round(refund);
+}
+const VEHICLE_SELL_COMMAND = {
+  id: 'sell-vehicle',
+  label: 'Sell',
+  hint(instance) {
+    return `+${vehicleSellRefund(instance)} cr`;
+  },
+  execute(instance, ctx) {
+    ctx.game.teamOf(instance).earn(vehicleSellRefund(instance));
+    ctx.entities.queueDestroy(instance);
+  },
+};
+
+/**
+ * Heavy-tracked-tank only. Fires a flare above the tank's current combat
+ * target, permanently revealing the fog around it — reuses `SELECT_TARGET_
+ * COMMAND`'s existing `instance.combatTarget` rather than adding a second
+ * targeting mechanism. Gated to dusk/night/dawn using the exact elevation
+ * check `headlightsWanted()` already uses in main.js
+ * (`world.atmosphere.params.elevation`), just against a wider threshold that
+ * also covers dawn/dusk, not only "past the headlight cutoff".
+ *
+ * The reveal is permanent, not a timed/decaying one: `FogMask.reveal()`'s own
+ * doc comment says as much ("reveal a disc of ground permanently" — see
+ * core/fogOfWar.js) and nothing else in the engine has a temporary-reveal
+ * primitive to reuse, so this is the flare acting as what it already can be —
+ * a way to scout a locked target's surroundings — rather than a new kind of
+ * fog state invented just for it.
+ */
+const FLARE_DUSK_ELEVATION = 12; // matches atmosphere.js's own dusk-blend zone
+const FLARE_REVEAL_RADIUS = 60;
+const FLARE_COMMAND = {
+  id: 'fire-flare',
+  label: 'Fire Flare',
+  hint: 'Reveals ground around the locked target',
+  enabled(instance, ctx) {
+    if (ctx.world.atmosphere.params.elevation > FLARE_DUSK_ELEVATION) {
+      return 'Only usable at dusk, night, or dawn';
+    }
+    if (!instance.combatTarget) return 'Needs a locked target (Select target)';
+    return true;
+  },
+  execute(instance, ctx) {
+    const target = instance.combatTarget;
+    if (!target) return;
+    const pos = target.group.position;
+    ctx.game.teamOf(instance).fog?.reveal(pos.x, pos.z, FLARE_REVEAL_RADIUS);
+    ctx.onFlare?.(instance, pos);
   },
 };
 
@@ -419,6 +495,7 @@ const COMMANDS = {
       },
       SELECT_TARGET_COMMAND,
       REPAIR_COMMAND,
+      VEHICLE_SELL_COMMAND,
     ],
     armed: [
       SELECT_TARGET_COMMAND,
@@ -430,13 +507,14 @@ const COMMANDS = {
           instance.mode = 'mobile';
         },
       },
+      VEHICLE_SELL_COMMAND,
     ],
   },
 
   'gun-platform': {
     // No separate arm step — select-target itself arms (see the command's own
     // comment). This mode list only needs a way back out.
-    mobile: [SELECT_TARGET_COMMAND],
+    mobile: [SELECT_TARGET_COMMAND, VEHICLE_SELL_COMMAND],
     armed: [
       SELECT_TARGET_COMMAND,
       {
@@ -447,6 +525,40 @@ const COMMANDS = {
           instance.mode = 'mobile';
         },
       },
+      VEHICLE_SELL_COMMAND,
+    ],
+  },
+
+  'tracked-tank': {
+    mobile: [SELECT_TARGET_COMMAND, VEHICLE_SELL_COMMAND],
+    armed: [
+      SELECT_TARGET_COMMAND,
+      {
+        id: 'disarm',
+        label: 'Disarm',
+        hint: 'Full speed restored',
+        execute(instance) {
+          instance.mode = 'mobile';
+        },
+      },
+      VEHICLE_SELL_COMMAND,
+    ],
+  },
+
+  'heavy-tracked-tank': {
+    mobile: [SELECT_TARGET_COMMAND, VEHICLE_SELL_COMMAND],
+    armed: [
+      SELECT_TARGET_COMMAND,
+      FLARE_COMMAND,
+      {
+        id: 'disarm',
+        label: 'Disarm',
+        hint: 'Full speed restored',
+        execute(instance) {
+          instance.mode = 'mobile';
+        },
+      },
+      VEHICLE_SELL_COMMAND,
     ],
   },
 
@@ -581,7 +693,7 @@ const COMMANDS = {
   },
 
   'field-engineer': {
-    mobile: deployDefenseCommands(),
+    mobile: [...deployDefenseCommands(), VEHICLE_SELL_COMMAND],
   },
 
   // Sell is the only command either defense has: a gun-turret comes up
@@ -631,6 +743,32 @@ const COMMANDS = {
         },
       },
       REPAIR_COMMAND,
+      VEHICLE_SELL_COMMAND,
+    ],
+  },
+
+  // Same command list as crystal-harvester — a tracked hauler is otherwise
+  // identical in behaviour, just built for steeper ground at double the cost.
+  'tracked-harvester': {
+    mobile: [
+      {
+        id: 'target-harvest',
+        label: 'Target Harvest',
+        hint: 'Click a specific bloom',
+        execute(instance, ctx) {
+          ctx.harvestSelectMode = { harvester: instance };
+        },
+      },
+      {
+        id: 'return-to-base',
+        label: 'Return to Base',
+        hint: 'Park at facility',
+        execute(instance) {
+          instance.shouldPark = true;
+        },
+      },
+      REPAIR_COMMAND,
+      VEHICLE_SELL_COMMAND,
     ],
   },
 };

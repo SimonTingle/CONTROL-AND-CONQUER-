@@ -1299,6 +1299,21 @@ for (let i = 0; i < TRACER_POOL_SIZE; i++) {
 let nextTracer = 0;
 
 /**
+ * The heavy-tracked-tank's flare, drawn by reusing the tracer pool rather
+ * than building a second pooled-mesh system: a flare is the same "small glow
+ * flies somewhere, then flashes and dissipates" shape as a shot, just aimed
+ * high above the target instead of at it, and slower so it reads as rising
+ * rather than snapping across.
+ */
+function showFlare(instance, target) {
+  const pos = instance.group.position;
+  showTracer(pos, target, instance.teamId, 3, 140, {
+    projectileColor: 0xfff2a8,
+    projectileSpeed: 60,
+  });
+}
+
+/**
  * Draw a shot that has *already* been resolved — purely cosmetic. Unlike the
  * damage it represents, the visual has a real (short) travel time: a small
  * glowing sphere flies from muzzle to the already-decided impact point, then
@@ -1582,7 +1597,7 @@ const navGrid = new NavGrid(heightmap);
 // `entities` is here for the deployDefense intent, which consumes the vehicle
 // it deploys from and must do so through the destroy pipeline rather than
 // splicing an array another system may still be walking.
-const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit, navGrid, entities, facilityControl };
+const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit, navGrid, entities, facilityControl, onFlare: showFlare };
 
 /**
  * One line of ground-control status for the radial menu: how many vehicles are
