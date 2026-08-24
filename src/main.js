@@ -9,6 +9,7 @@ import {
   findTeamSpawnPoints,
 } from './core/pick.js';
 import { Menu } from './ui/menu.js';
+import { StatisticsScreen } from './ui/statisticsScreen.js';
 import { buildSchema } from './ui/controlSchema.js';
 import { VehiclePicker } from './ui/vehiclePicker.js';
 import { DifficultyScreen, DIFFICULTIES } from './ui/difficultyScreen.js';
@@ -140,7 +141,10 @@ const { heightmap } = world;
 // userForced: set once the player touches the settings-drawer toggle themselves — after
 // that, auto-quality (below) leaves shadow quality alone rather than fighting an explicit
 // choice. Fog density is left out of that guard since there's no manual fog control to defer to.
-const shadowQuality = { high: !IS_MOBILE, userForced: false };
+// High by default on every platform, mobile included — unlike antialiasing and pixel ratio
+// just above, this one isn't a per-frame cost that scales with resolution, so there's no
+// mobile-specific reason to start it lower than desktop.
+const shadowQuality = { high: true, userForced: false };
 function applyShadowQuality(high) {
   shadowQuality.high = high;
   renderer.shadowMap.type = high ? THREE.PCFSoftShadowMap : THREE.BasicShadowMap;
@@ -895,7 +899,13 @@ function syncDriveIntent() {
 // floodHeadlights is a testing-only switch that gives *every* vehicle real
 // beams — deliberately the expensive shape the headlight pool exists to avoid.
 // Off by default, never persisted; see HeadlightPool.setFlood().
-const lighting = { forceHeadlights: false, floodHeadlights: false };
+//
+// forceHeadlights defaults on for mobile: on a small/dim screen the active
+// vehicle's beam is worth having lit even before headlightsWanted()'s own
+// dusk check would turn it on, and — unlike floodHeadlights — this only ever
+// touches the single light already attached to vehicles.active, not the
+// re-link-triggering light *count* HeadlightPool's header warns about.
+const lighting = { forceHeadlights: IS_MOBILE, floodHeadlights: false };
 function headlightsWanted() {
   if (lighting.forceHeadlights) return true;
   const dusk = vehicles.active?.def.lights?.duskElevation ?? 8;
@@ -971,6 +981,11 @@ const game = {
   // iterates this every frame regardless of mode, so it must never be null.
   aiCommanders: [],
   matchEndScreen: null,
+  // teamId -> the display name of the player holding that seat. Online only,
+  // and read by exactly one thing: the Statistics screen. Team.name itself is
+  // deliberately left alone, so the minimap, HUD and radial menu keep showing
+  // what they always showed rather than a player-controlled string.
+  playerNames: {},
   // Latched once a result is decided, so the end screen is shown exactly once
   // and the world stops being driven behind it.
   matchOver: false,
@@ -1085,7 +1100,11 @@ const game = {
   buildTime: __BUILD_TIME__,
 };
 
-const menu = new Menu(() => buildSchema(world, view, game));
+// The drawer's second page. Passed in rather than built inside Menu because it
+// reads live simulation collections, which the schema-driven control list has
+// no business knowing about.
+const statisticsScreen = new StatisticsScreen({ game, vehicles, structures });
+const menu = new Menu(() => buildSchema(world, view, game), statisticsScreen);
 
 const hud = new Hud();
 
@@ -1280,6 +1299,21 @@ for (let i = 0; i < TRACER_POOL_SIZE; i++) {
 let nextTracer = 0;
 
 /**
+ * The heavy-tracked-tank's flare, drawn by reusing the tracer pool rather
+ * than building a second pooled-mesh system: a flare is the same "small glow
+ * flies somewhere, then flashes and dissipates" shape as a shot, just aimed
+ * high above the target instead of at it, and slower so it reads as rising
+ * rather than snapping across.
+ */
+function showFlare(instance, target) {
+  const pos = instance.group.position;
+  showTracer(pos, target, instance.teamId, 3, 140, {
+    projectileColor: 0xfff2a8,
+    projectileSpeed: 60,
+  });
+}
+
+/**
  * Draw a shot that has *already* been resolved — purely cosmetic. Unlike the
  * damage it represents, the visual has a real (short) travel time: a small
  * glowing sphere flies from muzzle to the already-decided impact point, then
@@ -1425,6 +1459,15 @@ entities.onDestroy((inst) => {
   if (!stats) return;
   if (inst.kind === 'structure') stats.structuresLost++;
   else stats.unitsLost++;
+  // The one stat that genuinely needs capturing at destroy time rather than at
+  // its increment site: the Statistics screen lists earnings *per harvester*,
+  // and a per-unit list can only be appended to when a unit leaves. Live
+  // harvesters are read straight off vehicles.instances instead, so this holds
+  // exactly the ones that would otherwise vanish. Safe here because the
+  // removal hook below runs last, so creditsDelivered is still readable.
+  if (inst.kind === 'vehicle' && inst.def?.id === 'crystal-harvester') {
+    stats.deadHarvesterEarnings.push(inst.creditsDelivered ?? 0);
+  }
 });
 // The radial menu holds a direct reference, not a lookup — nothing else
 // would ever notice it's pointed at a dead instance.
@@ -1554,7 +1597,7 @@ const navGrid = new NavGrid(heightmap);
 // `entities` is here for the deployDefense intent, which consumes the vehicle
 // it deploys from and must do so through the destroy pipeline rather than
 // splicing an array another system may still be walking.
-const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit, navGrid, entities, facilityControl };
+const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit, navGrid, entities, facilityControl, onFlare: showFlare };
 
 /**
  * One line of ground-control status for the radial menu: how many vehicles are
@@ -1727,6 +1770,24 @@ function endOnlineMatch(reason) {
 }
 
 /**
+ * Record who is holding which seat, for the Statistics screen.
+ *
+ * Fed from all three places the server describes the roster — `welcome` on
+ * connect, `begin` when the match starts, and `playerJoined` for anyone who
+ * arrives after. Purely additive: a name is never cleared when a player drops,
+ * because their team's stats stay on the board and an anonymous row would be
+ * worse than a name that has stepped away.
+ *
+ * @param {Array<{teamId: number, displayName: string}>|undefined} players
+ */
+function rememberPlayerNames(players) {
+  for (const p of players ?? []) {
+    if (p?.teamId == null || !p.displayName) continue;
+    game.playerNames[p.teamId] = p.displayName;
+  }
+}
+
+/**
  * Join a match and hand the simulation's clock to the lockstep session.
  *
  * Everything about the world is derived, not received: the seed comes from the
@@ -1745,11 +1806,20 @@ async function startOnlineMatch(matchId, difficulty) {
     console.error('startOnlineMatch called while a match is already live — ignoring.');
     return;
   }
+  // Cleared per match rather than in beginMatch: the roster arrives with
+  // `welcome`, which lands *before* beginMatch runs, so clearing there would
+  // wipe the names this match just learned. Seats are reassigned every match,
+  // so a stale entry would put the previous opponent's name on a new player.
+  game.playerNames = {};
   const { match: info } = await api.getMatch(matchId);
   const client = new MatchClient(matchId, {
     // The server holds every client at the gate until the roster is complete;
     // reporting input before that is what used to deadlock the match.
     onBegin: (msg) => {
+      // Reconciled here as well as at connect: `begin` carries the final
+      // roster, which is the first point a client that joined early knows who
+      // else ended up in the match.
+      rememberPlayerNames(msg.players);
       if (!match || match.begun) return;
       match.begun = true;
       if (msg.resuming) {
@@ -1792,6 +1862,13 @@ async function startOnlineMatch(matchId, difficulty) {
       // boundary, which is the one moment both machines agree on.
       if (match) match.pendingSnapshot = msg;
     },
+    // The server has always sent this; nothing read it until the Statistics
+    // screen needed a name for each seat. Deliberately no toast — the arrival
+    // is already visible in the lobby, and onPlayerLeft below toasts because a
+    // *departure* pauses the match, which is a different kind of news.
+    onPlayerJoined: (msg) => {
+      rememberPlayerNames([msg]);
+    },
     onPlayerLeft: (msg) => {
       // Their team is not handed to an AI commander — that would be a sensible
       // follow-up but is not implemented. The match pauses on them instead (see
@@ -1824,6 +1901,7 @@ async function startOnlineMatch(matchId, difficulty) {
 
   game.mode = 'multiplayer-online';
   game.localTeamId = welcome.teamId;
+  rememberPlayerNames(welcome.players);
 
   // The match's vehicle set, pinned from the host's loadout when the lobby was
   // created and relayed identically to every peer. Every client validates the
@@ -2655,6 +2733,9 @@ function renderTick(dt) {
     );
   });
   p.time('vehiclePicker', () => vehiclePicker.update(dt));
+  // Only does anything while the Statistics page is the one showing — see
+  // Menu.update. Render-side, like everything else in this loop.
+  p.time('menu', () => menu.update(dt));
   p.time('render', () => renderer.render(world.scene, camera));
   perfHud.record(dt);
   perfHud.render(renderer, tickProfiler);

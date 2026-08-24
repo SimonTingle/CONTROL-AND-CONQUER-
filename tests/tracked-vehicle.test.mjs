@@ -29,9 +29,10 @@ function tank(overrides = {}) {
   return syncId(def);
 }
 
-test('no shipped vehicle is tracked — this is additive, nothing changes underfoot', () => {
+test('exactly the tracked-* vehicles are tracked, and nothing else changed underfoot', () => {
   for (const def of VEHICLE_CATALOG) {
-    assert.equal(isTracked(def), false, `${def.id} stays wheeled`);
+    const expectTracked = def.id === 'tracked-harvester' || def.id === 'tracked-tank' || def.id === 'heavy-tracked-tank';
+    assert.equal(isTracked(def), expectTracked, `${def.id} tracked flag`);
   }
 });
 
@@ -53,8 +54,16 @@ test('a track with no steered axle has an infinite wheelbase — and must not us
 test('a wheeled vehicle keeps the bicycle-model turning circle exactly', () => {
   // The tracked branch must not have changed the wheeled answer.
   for (const def of VEHICLE_CATALOG) {
+    if (isTracked(def)) continue;
     const expected = (rigOf(def).wheelbase / Math.tan(def.maxSteerAngle)) * 2;
     assert.equal(turningCircleOf(def), expected, `${def.id} unchanged`);
+  }
+});
+
+test('every shipped tracked vehicle uses the pivot turning circle, not the bicycle one', () => {
+  for (const def of VEHICLE_CATALOG) {
+    if (!isTracked(def)) continue;
+    assert.equal(turningCircleOf(def), rigOf(def).track, `${def.id} pivots on its own width`);
   }
 });
 

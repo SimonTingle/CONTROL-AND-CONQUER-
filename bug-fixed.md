@@ -153,6 +153,95 @@ tuning/balance changes are not included unless they were fixing broken behavior.
   caught and fixed during testing so the verification harnesses themselves
   were trustworthy.
 
+## AI units that stop permanently
+
+Ten defects from one player-supplied diagnostic (expert, four AI teams, 44
+simulated minutes). Verified by re-running that configuration headless and
+checking the save's own failure signatures, plus 24 dependency-free tests with
+twelve negative controls. Full investigation in
+`docs/plans/ai-driving-fixes.md`.
+
+- **A harvester could be "arrived" and "drifted" on the same tick.** Arrival was
+  measured to `facility.dock` (22 units), the drift release to the building
+  centre (33). With `dockOffset` 12, anything landing in (33, 34] from the
+  centre satisfied both, and cycled arrive → `_atDock` → UNLOADING → release →
+  TO_BASE → arrive forever. No order is issued anywhere in that loop, so the
+  stall and no-progress timers — which sit behind `!inst.hasOrder` — never
+  advanced and every transition re-zeroed them. Two AI teams finished the match
+  on 320cr and 0cr; one of their harvesters carried a full 320 load for 44
+  minutes on 92 units of odometer. Both sides now measure from the dock, so the
+  overlap is arithmetically impossible rather than merely narrow.
+
+- **Two controllers drove the same scout.** `aiCommander._driveOneScout` had no
+  `inst.repair` guard, so every frame a repairing scout had no order it was
+  handed a fresh explore target; `repairController._driveTo` then saw
+  `hasOrder` and fell through to its stall tail, never reaching the
+  `!inst.hasOrder` branch where both its detour ladder and its `_leaveBay`
+  give-up live. Detour counts of 74, 56 and 50 against a six-angle ladder.
+  `inst.repair` never cleared and the scout ground into terrain until it floored
+  at 15hp holding a bay slot.
+
+- **The clearance lease stopped one leg before service started.**
+  `repairController._claimDock` called `markDocked` at the dock point and then
+  still had to drive the `entering` leg to the pad. `_expireLeases` only
+  inspects `entry.cleared`, so a vehicle stalled in `entering` held its bay with
+  nothing able to reclaim it — observed at 372 seconds from 228 units away with
+  seven vehicles queued behind it. Claimed on arrival at the pad instead, with a
+  re-queue for a vehicle whose clearance was revoked mid-leg.
+
+- **`combatCap` was a per-unit-id allowance, not an army budget.**
+  `scout-buggy` carries `tags: ['recon','combat']`, so once gun-platform hit its
+  own cap the scout became the only combat-tagged candidate and was bought up to
+  the cap as well: exactly 7 tanks and 7 scouts per team, ~2,450cr each on units
+  `_manageArmy` explicitly refuses to field.
+
+- **An escape cooldown shorter than the reverse it gates.**
+  `escapeCooldown = SHARP_TURN_REVERSE * 0.5` — 0.6s against a 1.2s reverse — so
+  it expired mid-manoeuvre and the escape re-armed on the tick the reverse
+  ended, with no forward travel in between.
+
+- **A mechanical hold with no bound.** `holding` (yielding, or mid-reverse)
+  switches off both the stall and no-progress escapes. Both terms can re-arm
+  indefinitely, so an unresolvable manoeuvre became permanent: a harvester was
+  found with a live order, zero speed, odometer unmoved for fourteen simulated
+  minutes and both timers reading 0.00, because `reverseTimer` was re-armed
+  before it could expire. Bounded with a 10-second grace; `FLEEING` deliberately
+  stays unbounded.
+
+- **A waypoint leg with no order was completely inert.**
+  `repairController._driveTo`'s waypoint branch returned whether or not the
+  waypoint had been reached, so the order re-issue, the stall check and the
+  no-progress check below it were all unreachable while one was live — and a
+  leg change cancels the order without clearing the previous leg's waypoint.
+  Two harvesters sat in a repair queue for eight minutes each, one with a full
+  load, every timer at zero, while their team's income stayed exactly flat.
+
+- **A hold that re-armed wiped the evidence against it.** `if (holding)
+  noProgressTimer = 0` reset the counter, and the terrain-blocked escape cycles
+  roughly every two seconds (drive at the grade, block, reverse, drive at it
+  again). One harvester rode that loop for forty minutes at full speed, six
+  units from where it started, with `stall` and `noProgress` both 0.00
+  throughout, and its team finished on 320cr. A hold now *pauses* the timer
+  instead of resetting it.
+
+- **The detour ladder reset itself on success.** Reaching a detour waypoint set
+  `detours = 0`, but reaching a waypoint means the manoeuvre worked, not that
+  the leg is going anywhere — so a vehicle wedged short of its destination held
+  the ladder at zero and never reached the give-up past it (the field ban,
+  `abandonSweeps`, `_leaveBay`). `abandonSweeps` read 0 for the whole match,
+  which is what that counter looks like when it is dead code. Progress, not a
+  completed manoeuvre, now resets it.
+
+- **A loaded harvester joined the repair queue instead of delivering.**
+  `_maybeRetreatForRepair` fires from `TO_BASE`, so a damaged harvester one leg
+  from home broke off carrying a full load and queued behind five damaged
+  scouts for eight to ten minutes, during which its team earned nothing and its
+  credits drained paying for those scouts' repairs. The delivery is now
+  finished first; `IDLE` re-checks the retreat the moment the unload is done, so
+  it is deferred rather than skipped, and `FLEEING` still owns actual danger.
+
+---
+
 ## Snapshot / save-load correctness (surfaced while building lockstep)
 
 - **Harvester cargo silently vanished on every save/load.** The snapshot
