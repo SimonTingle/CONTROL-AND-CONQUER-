@@ -26,6 +26,11 @@ import { CLEARED, DOCKED } from './facilityControl.js';
 const ARRIVE_RADIUS = 10;
 const WAYPOINT_RADIUS = 8;
 const DETOUR_ANGLES = [0.6, -0.6, 1.2, -1.2, 1.9, -1.9]; // radians off the direct bearing
+// Same forward-hemisphere cutoff as harvesterAI's copy of this ladder: a
+// tracked vehicle pivots to face any bearing without reversing, so an angle
+// past this offset — which a wheeled vehicle can only reach by backing up —
+// is never worth sending it toward.
+const TRACKED_DETOUR_LIMIT = Math.PI / 2;
 const STALL_SPEED = 0.4;
 const STALL_TIMEOUT = 1.5; // seconds near-stopped before trying the next detour
 // Speed-blind failure: circling the destination at the alignment floor is fast
@@ -470,6 +475,17 @@ export class RepairController {
         if (inst.setTarget(x, z, this.heightmap)) return false;
         r.detours = 1;
       }
+      if (
+        inst.tracked &&
+        r.detours <= DETOUR_ANGLES.length &&
+        Math.abs(DETOUR_ANGLES[r.detours - 1]) >= TRACKED_DETOUR_LIMIT
+      ) {
+        // Skip the backward-hemisphere angle for tracked vehicles — retry
+        // immediately with the next one instead of waypointing them
+        // somewhere they'd have to reverse to reach.
+        r.detours++;
+        return false;
+      }
       if (r.detours <= DETOUR_ANGLES.length) {
         const bearing = Math.atan2(z - pos.z, x - pos.x) + DETOUR_ANGLES[r.detours - 1];
         r.detours++;
@@ -530,7 +546,7 @@ export class RepairController {
     if (r.stallTimer > STALL_TIMEOUT) {
       r.stallTimer = 0;
       inst.arrive('cancelled');
-      if (inst.reverseTimer == null && !hasVehicleBehind(inst, this.vehicles.instances)) {
+      if (!inst.tracked && inst.reverseTimer == null && !hasVehicleBehind(inst, this.vehicles.instances)) {
         inst.beginReverse(REVERSE_DURATION);
       }
       // Without this, the very next tick's `!inst.hasOrder` branch re-targets
@@ -567,7 +583,7 @@ export class RepairController {
         r.noProgressTimer = 0;
         r.bestDistance = null;
         inst.arrive('cancelled');
-        if (inst.reverseTimer == null && !hasVehicleBehind(inst, this.vehicles.instances)) {
+        if (!inst.tracked && inst.reverseTimer == null && !hasVehicleBehind(inst, this.vehicles.instances)) {
           inst.beginReverse(REVERSE_DURATION);
         }
         r.detours = (r.detours ?? 0) + 1;

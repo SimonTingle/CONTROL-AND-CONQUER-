@@ -581,6 +581,18 @@ export class VehicleInstance {
       this.reverseTimer == null &&
       !(this._nearby && hasVehicleBehind(this, this._nearby))
     ) {
+      // Tracks pivot on the spot instead of backing up: applySteering's
+      // pivot-rate path (see its own tracked branch above) turns the hull
+      // without any forward or backward travel at all, so the three-point
+      // turn a wheeled vehicle needs is simply unnecessary here — and
+      // skipping it is the fix for tracked vehicles spending time in
+      // reverse that a wheeled vehicle in the identical spot still needs.
+      if (this.tracked) {
+        this.forwardSpeed = 0;
+        this.applySteering(dt, delta * STEER_GAIN);
+        this.advance(dt);
+        return;
+      }
       // Measured from the *start* of the reverse, so it has to outlast the
       // reverse itself or there is no forward travel between attempts at all —
       // at 0.5x it expired 0.6s into a 1.2s manoeuvre and the escape re-armed
