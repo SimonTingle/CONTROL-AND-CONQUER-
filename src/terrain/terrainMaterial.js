@@ -103,6 +103,9 @@ export function createTerrainUniforms(heightmap) {
     // it owns one, same as the fog mask.
     uTrackMask: { value: null },
     uTrackTint: { value: new THREE.Color('#241f1a') },
+    // Scorch marks, sampled alongside the tracks above and for the same
+    // reason placed before the fog block — see render/scorchMask.js.
+    uScorchMask: { value: null },
 
     // Fog of war. The mask texture is assigned by World once it owns one.
     uFogMask: { value: null },
@@ -232,6 +235,7 @@ export function createTerrainMaterial(heightmap, uniforms = createTerrainUniform
         uniform vec3 uPadColor;
         uniform sampler2D uTrackMask;
         uniform vec3 uTrackTint;
+        uniform sampler2D uScorchMask;
         uniform sampler2D uFogMask;
         uniform float uFogEnabled;
         uniform float uFogDarken;
@@ -314,6 +318,18 @@ export function createTerrainMaterial(heightmap, uniforms = createTerrainUniform
             // keeps the mark legible without fully overriding the terrain's
             // own detail/noise at low intensity.
             col = mix(col, uTrackTint, trackMark * 0.85);
+          }
+
+          // Scorch. Darkened and desaturated rather than tinted toward a
+          // colour: burnt ground is the ground it was, with the colour cooked
+          // out of it, and mixing toward a fixed brown would erase the
+          // difference between scorched sand and scorched rock — exactly the
+          // terrain variation the impact is supposed to be sitting on.
+          float scorchMark = texture2D(uScorchMask, vWorldPos.xz / uMapSize + 0.5).r;
+          if (scorchMark > 0.0) {
+            float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+            vec3 burnt = mix(col, vec3(lum), 0.7) * 0.22;
+            col = mix(col, burnt, scorchMark * 0.9);
           }
 
           // Fog of war. Applied to the albedo rather than to the final lit
