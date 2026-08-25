@@ -662,14 +662,19 @@ canvas.addEventListener('pointerup', (e) => {
   if (commandContext.harvestSelectMode) {
     const point = pickTerrain(e.clientX, e.clientY, canvas, camera, heightmap, hit);
     if (point) {
+      const { harvester } = commandContext.harvestSelectMode;
       // requireOnField so a click on bare ground finds nothing, rather than
       // quietly sending the harvester to whichever field is nearest the miss.
+      // A field blocked for the harvester's own team is excluded the same
+      // way: applyIntent's 'harvest' case would refuse the order anyway, and
+      // catching it here means the player sees the click miss instead of
+      // watching the marker appear and then nothing happen.
       const field = world.blooms.nearestTo(point.x, point.z, {
         minStock: 0,
         requireOnField: true,
+        reject: (f) => f.blockedByTeam?.has(harvester.teamId),
       });
       if (field) {
-        const { harvester } = commandContext.harvestSelectMode;
         // The harvester this mode was opened for can have been destroyed
         // while the player was still aiming the click.
         if (!harvester.dead) {
@@ -760,20 +765,73 @@ function pickSelectable(clientX, clientY) {
  * double-tap detector in `pointerdown` above.
  */
 function openMenuAt(clientX, clientY) {
-  const instance = pickSelectable(clientX, clientY);
-  if (!instance) return;
+  let instance = pickSelectable(clientX, clientY);
 
-  // On touch, the first tap of a double-tap can already have issued a move
-  // order through pointerup before this ever runs (the native dblclick path
-  // only, since the manual detector suppresses it up front). Double-tapping a
-  // vehicle means "command this one", not "drive it to the ground behind it"
-  // — so take that order back. A building has no order to cancel.
-  if (input.tapToMove) {
-    instance.arrive?.('cancelled');
-    marker.visible = false;
+  if (instance) {
+    // On touch, the first tap of a double-tap can already have issued a move
+    // order through pointerup before this ever runs (the native dblclick path
+    // only, since the manual detector suppresses it up front). Double-tapping
+    // a vehicle means "command this one", not "drive it to the ground behind
+    // it" — so take that order back. A building has no order to cancel.
+    if (input.tapToMove) {
+      instance.arrive?.('cancelled');
+      marker.visible = false;
+    }
+    radialMenu.openFor(instance, commandsFor(instance, commandContext), clearanceSubtitle(instance));
+    return;
   }
 
-  radialMenu.openFor(instance, commandsFor(instance, commandContext), clearanceSubtitle(instance));
+  // No vehicle or structure under the click — try a crystal field, using the
+  // same ground-pick-then-nearestTo path harvestSelectMode already uses to
+  // aim a manual harvest order, so a click on bare ground finds nothing here
+  // either rather than snapping to whatever field is nearest the miss.
+  const point = pickTerrain(clientX, clientY, canvas, camera, heightmap, hit);
+  if (!point) return;
+  const field = world.blooms.nearestTo(point.x, point.z, { minStock: 0, requireOnField: true });
+  if (!field) return;
+
+  instance = fieldMenuTarget(field);
+  radialMenu.openFor(instance, fieldCommands(field, game.localTeamId), '');
+}
+
+/**
+ * A crystal field wrapped just enough to satisfy RadialMenu.openFor's
+ * contract (`def.name`, `group.position`, `menuAnchorHeight`, `speed`,
+ * `menuOpen`). Fields are InstancedMesh slices with none of those on the
+ * field record itself, and building a real per-field object for something
+ * that never moves and is opened rarely is not worth a second entity system.
+ */
+function fieldMenuTarget(field) {
+  return {
+    kind: 'field',
+    id: field.id,
+    def: { name: 'Crystal Field' },
+    group: { position: new THREE.Vector3(field.x, heightmap.heightAt(field.x, field.z) + 2, field.z) },
+    menuAnchorHeight: 0,
+    speed: 0, // stationary — never trips radialMenu's drove-away auto-close
+    menuOpen: false,
+    // Live, not captured at open time: a base pad poured over this field
+    // while the menu is open must still close it, the same as any other
+    // instance the menu was opened on being destroyed out from under it.
+    get dead() {
+      return field.dead;
+    },
+  };
+}
+
+/** The field's radial menu: a single toggle, scoped to the acting team. */
+function fieldCommands(field, teamId) {
+  const blocked = field.blockedByTeam?.has(teamId);
+  return [
+    {
+      id: blocked ? 'unblock' : 'block',
+      label: blocked ? 'Allow harvesters' : 'Block harvesters',
+      hint: blocked
+        ? 'Your harvesters may work this field again'
+        : 'Your harvesters will avoid this field',
+      blocked: !blocked,
+    },
+  ];
 }
 
 // Kept for real mice/trackpads, and as a fallback on any touch browser that
@@ -1183,6 +1241,10 @@ function cameraGroundQuad() {
  */
 const radialMenu = new RadialMenu(camera, {
   onCommand(cmd, instance) {
+    if (instance.kind === 'field') {
+      submitIntent(Intent.blockField(instance.id, game.localTeamId, cmd.blocked));
+      return;
+    }
     submitIntent(Intent.command(instance.id, instance.kind, cmd.id));
   },
 });
@@ -2089,7 +2151,7 @@ function onMatchTurn(inputs, turn) {
   }
 
   if (turn % HASH_EVERY_TURNS === 0) {
-    const hash = hashState({ vehicles, structures, game, projectiles, bounties }, simClock.tick);
+    const hash = hashState({ vehicles, structures, game, projectiles, bounties, blooms: world.blooms }, simClock.tick);
     // Kept as well as sent: the on-screen readout shows this turn-aligned
     // value so two devices are always comparing the same simulated moment.
     match.checkpoint = { turn, hash: hash.split(':')[1] ?? hash };
@@ -2672,7 +2734,16 @@ function simTick(dt) {
     checkMatchEnd();
     updateRespawns(dt);
   });
-  p.time('radialMenu', () => radialMenu.update());
+  p.time('radialMenu', () => {
+    // A field has no entities.onDestroy hook to close the menu for it (that
+    // pipeline is vehicles/structures only), so the one case radialMenu.update
+    // can't already catch — a base pad poured over the field while its menu
+    // is open — is handled here instead.
+    if (radialMenu.isOpen && radialMenu.instance.kind === 'field' && radialMenu.instance.dead) {
+      radialMenu.close();
+    }
+    radialMenu.update();
+  });
 
   // Before the render-only early return, same reasoning as updateRespawns
   // above: this has to fire correctly under window.__step's headless
@@ -3008,7 +3079,7 @@ window.__step = (seconds, dt = SIM_DT) => {
  * disagree, the first question is always "disagree about what" — and being able
  * to read and diff the hash from a console on each side is the cheapest way in.
  */
-window.__hashState = () => hashState({ vehicles, structures, game, projectiles, bounties }, simClock.tick);
+window.__hashState = () => hashState({ vehicles, structures, game, projectiles, bounties, blooms: world.blooms }, simClock.tick);
 
 /**
  * Issue player intent from the console, exactly as a click would.
@@ -3059,7 +3130,7 @@ window.__determinismCheck = ({ ticks = 900, sampleEvery = 60 } = {}) => {
   if (!game.teams?.length) return { ok: false, error: 'Start a match first.' };
 
   const baseline = JSON.stringify(serialize(snapshotContext()));
-  const hashCtx = { vehicles, structures, game, projectiles, bounties };
+  const hashCtx = { vehicles, structures, game, projectiles, bounties, blooms: world.blooms };
 
   const run = () => {
     deserialize(snapshotContext(), JSON.parse(baseline));

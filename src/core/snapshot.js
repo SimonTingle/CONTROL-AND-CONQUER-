@@ -298,6 +298,15 @@ export function serialize(ctx) {
       depth: round(c.depth, 5),
     })),
 
+    // Per-team crystal field blocks (net/intents.js's 'blockField'). Flattened
+    // to (fieldId, teamId) pairs rather than saved on the field itself — there
+    // is no other field-state serialization to attach to, and this is the
+    // same shape harvesterAI's bans would take if bans were worth persisting
+    // (they aren't: they're a few-seconds retry, not a player decision).
+    blockedFields: (world.blooms?.fields ?? []).flatMap((f) =>
+      [...(f.blockedByTeam ?? [])].map((teamId) => ({ fieldId: f.id, teamId }))
+    ),
+
     // Shells in flight. Saved rather than dropped because a shell is damage
     // already committed to: a save taken mid-volley that discarded them would
     // hand the loading player a free reprieve, and in a lockstep resync it
@@ -586,6 +595,15 @@ export function deserialize(ctx, snap) {
   const fieldById = new Map((world.blooms?.fields ?? []).map((f) => [f.id, f]));
   const lookup = (kind, id) =>
     kind === 'structure' ? structureById.get(id) : vehicleById.get(id);
+
+  // world.regenerate() above rebuilt fresh field records with no blocks on
+  // them, same as it did for trackMask; restore them from the save.
+  for (const saved of snap.blockedFields ?? []) {
+    const field = fieldById.get(saved.fieldId);
+    if (!field) continue; // a map regenerated with fewer fields than the save
+    field.blockedByTeam ??= new Set();
+    field.blockedByTeam.add(saved.teamId);
+  }
 
   for (const saved of snap.vehicles) {
     const inst = vehicleById.get(saved.id);

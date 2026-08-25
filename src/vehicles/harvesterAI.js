@@ -359,6 +359,7 @@ export class HarvesterAI {
         minStock: 1,
         reject: (f) =>
           (s.bans.get(f.id) ?? 0) > now ||
+          f.blockedByTeam?.has(inst.teamId) ||
           this._isFieldCrowdedOrLow(f, inst) ||
           this._countHarvestersOnField(f, inst) > 0,
       });
@@ -367,13 +368,19 @@ export class HarvesterAI {
         // or low is still better than idling.
         field = this.world.blooms.nearestTo(inst.group.position.x, inst.group.position.z, {
           minStock: 1,
-          reject: (f) => (s.bans.get(f.id) ?? 0) > now || this._isFieldCrowdedOrLow(f, inst),
+          reject: (f) =>
+            (s.bans.get(f.id) ?? 0) > now ||
+            f.blockedByTeam?.has(inst.teamId) ||
+            this._isFieldCrowdedOrLow(f, inst),
         });
       }
       if (!field) {
         field = this.world.blooms.nearestTo(inst.group.position.x, inst.group.position.z, {
           minStock: 1,
-          reject: (f) => (s.bans.get(f.id) ?? 0) > now,
+          // Note this last, most permissive tier still respects a block — a
+          // player-blocked field is never "share anything reachable" either;
+          // only the temporary per-harvester `bans` are given up on here.
+          reject: (f) => (s.bans.get(f.id) ?? 0) > now || f.blockedByTeam?.has(inst.teamId),
         });
       }
     }
