@@ -49,7 +49,7 @@ function byId(a, b) {
  *   never be compared against one from a different point in time.
  * @returns {string} `"<tick>:<hex>"`
  */
-export function hashState({ vehicles, structures, game, projectiles, bounties }, tick) {
+export function hashState({ vehicles, structures, game, projectiles, bounties, blooms }, tick) {
   const parts = [`t${tick}`];
 
   const vs = vehicles.instances.filter((v) => !v.dead).sort(byId);
@@ -68,6 +68,21 @@ export function hashState({ vehicles, structures, game, projectiles, bounties },
   const ss = structures.instances.filter((s) => !s.dead).sort(byId);
   for (const s of ss) {
     parts.push(`s${s.id},${s.teamId},${q(s.health)},${q(s.progress)},${s.mode}`);
+  }
+
+  // Blocked crystal fields. This now decides where a team's harvesters go —
+  // two clients disagreeing about a block route their economies differently
+  // and diverge within seconds, well before the effect would show up anywhere
+  // else being hashed. Only fields with at least one block are worth a part;
+  // most fields have none. Team ids are sorted because Set iteration order is
+  // insertion order, which is not guaranteed to agree between two clients
+  // that blocked the same field in a different sequence.
+  if (blooms) {
+    for (const f of blooms.fields) {
+      if (!f.blockedByTeam || f.blockedByTeam.size === 0) continue;
+      const teams = [...f.blockedByTeam].sort((a, b) => a - b);
+      parts.push(`bf${f.id},${teams.join('.')}`);
+    }
   }
 
   // Shells in flight. Their `willHit` is the accuracy roll's verdict, decided
