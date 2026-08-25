@@ -37,8 +37,9 @@ import { FacilityControl, CLEARED, DOCKED, HOLDING } from './vehicles/facilityCo
 import { TrafficController } from './vehicles/trafficController.js';
 import { AiCommander } from './vehicles/aiCommander.js';
 import { CombatController } from './vehicles/combatController.js';
+import * as audio from './audio/audio.js';
 import { Projectiles, resetProjectileIds } from './vehicles/projectiles.js';
-import { ProjectileFx } from './render/projectileFx.js';
+import { ProjectileFx, nightFactor } from './render/projectileFx.js';
 import { Bounties, resetCoinIds } from './vehicles/bounty.js';
 import { BountyFx } from './render/bountyFx.js';
 import { CreditBurst } from './ui/creditBurst.js';
@@ -132,6 +133,11 @@ window.__tickProfiler = tickProfiler; // console access, same convention as wind
 window.__autoQuality = autoQuality;
 
 const world = new World(renderer);
+
+// Procedural, spatial audio — see src/audio/audio.js. Initialized as soon as
+// both the camera and the scene exist; actual playback stays silent until
+// resume() below fires on the first real pointer event.
+audio.initAudio(camera, world.scene);
 // Captured once, before autoQuality (below) ever has a chance to raise it —
 // the value auto-quality restores to once fps recovers.
 const BASE_FOG_DENSITY = world.atmosphere.params.fogDensity;
@@ -563,6 +569,11 @@ function startLongPress() {
 }
 
 canvas.addEventListener('pointerdown', (e) => {
+  // Most browsers (iOS Safari strictly) refuse to produce sound until a real
+  // user gesture resumes the AudioContext. This is that gesture — the first
+  // press on the canvas, whatever it turns out to mean for the game itself.
+  // Cheap to call every press: resume() is a no-op once already running.
+  audio.resume();
   dragged = false;
   dragButton = e.button;
   lastX = e.clientX;
@@ -650,7 +661,10 @@ canvas.addEventListener('pointerup', (e) => {
       // re-validated on apply in case the ground was taken meanwhile.
       if (structures.canPlaceAt(pad, def, snapped.x, snapped.z)) {
         submitIntent(Intent.build(def.id, pad.id, snapped.x, snapped.z, pad.teamId ?? game.localTeamId));
+        audio.playAt('uiConfirm', snapped.x, heightmap.heightAt(snapped.x, snapped.z) + 1, snapped.z, null, 0.6);
         cancelPlacementMode();
+      } else {
+        audio.playAt('uiRefused', snapped.x, heightmap.heightAt(snapped.x, snapped.z) + 1, snapped.z, null, 0.6);
       }
     }
     // An invalid click is not a cancel — mirrors "click far from any bloom has
@@ -778,6 +792,7 @@ function openMenuAt(clientX, clientY) {
       marker.visible = false;
     }
     radialMenu.openFor(instance, commandsFor(instance, commandContext), clearanceSubtitle(instance));
+    audio.playAt('uiConfirm', instance.group.position.x, instance.group.position.y + 2, instance.group.position.z, null, 0.5);
     return;
   }
 
@@ -792,6 +807,7 @@ function openMenuAt(clientX, clientY) {
 
   instance = fieldMenuTarget(field);
   radialMenu.openFor(instance, fieldCommands(field, game.localTeamId), '');
+  audio.playAt('uiConfirm', field.x, heightmap.heightAt(field.x, field.z) + 2, field.z, null, 0.5);
 }
 
 /**
@@ -1243,6 +1259,11 @@ const radialMenu = new RadialMenu(camera, {
   onCommand(cmd, instance) {
     if (instance.kind === 'field') {
       submitIntent(Intent.blockField(instance.id, game.localTeamId, cmd.blocked));
+      const p = instance.group.position;
+      // cmd.blocked is the *new* state the click is about to set — a distinct
+      // confirm/cancel pair for turning avoidance on vs. off, same shape as
+      // any other toggle in the game.
+      audio.playAt(cmd.blocked ? 'uiConfirm' : 'uiCancel', p.x, p.y, p.z, null, 0.6);
       return;
     }
     submitIntent(Intent.command(instance.id, instance.kind, cmd.id));
@@ -1327,6 +1348,7 @@ structures.onComplete = (instance) => {
   // Fires once per finished building whoever placed it — the structure
   // equivalent of produceUnit's single choke point.
   game.teamOf(instance).stats.structuresBuilt++;
+  audio.playAt('structureComplete', instance.x, heightmap.heightAt(instance.x, instance.z) + 2, instance.z);
   if (!instance.def.freeUnitOnComplete) return;
   // produces[0] by convention — the economy unit. A facility must never
   // bootstrap a team with a free combat vehicle.
@@ -1423,6 +1445,34 @@ function showMuzzleFlash(from, to, teamId, fromHeight, toHeight, turretDef) {
     color,
     turretDef?.damage
   );
+  audio.playAt('weaponFire', x, heightmap.heightAt(x, z) + fromHeight, z, { calibre: turretDef?.damage });
+}
+
+/**
+ * One engine loop per live, moving-capable vehicle. Entirely render-side: it
+ * only reads `vehicles.instances` (never writes) and keys loops on vehicle
+ * id, reaping any whose vehicle is no longer in that array — the same
+ * liveness test the projectile/bounty render pools already use, just applied
+ * to audio.js's own key set instead of a local one.
+ *
+ * `immobile` (vehicleController.js — true only while `mode === 'deploying'`)
+ * is excluded: a base station mid-flatten has no speed to react to, and an
+ * engine drone under a stationary deploy animation would just be noise.
+ */
+function updateEngineAudio() {
+  const live = new Set();
+  for (const v of vehicles.instances) {
+    if (v.dead || v.immobile) continue;
+    live.add(v.id);
+    // Heavier vehicles idle lower — the same weight number trackMask.js
+    // already reads to decide how dark a track a vehicle leaves.
+    const baseHz = THREE.MathUtils.clamp(260 - v.def.weight * 14, 55, 220);
+    const speedFrac = v.def.speed > 0 ? Math.min(1, v.speed / v.def.speed) : 0;
+    audio.updateEngineLoop(v.id, v.group, baseHz, speedFrac);
+  }
+  for (const key of audio.activeLoopKeys()) {
+    if (!live.has(key)) audio.stopEngineLoop(key);
+  }
 }
 
 /**
@@ -1432,6 +1482,16 @@ function showMuzzleFlash(from, to, teamId, fromHeight, toHeight, turretDef) {
  */
 function handleImpact(impact) {
   projectileFx.spawnImpact(impact, world.atmosphere.params.elevation);
+  // Same sqrt(damage/REFERENCE_DAMAGE) shape Craters.shapeFor uses to size a
+  // crater, so the bang and the hole agree — see synth.js's explosion() header.
+  const intensity = Math.sqrt(Math.max(0.2, (impact.damage ?? 20) / 20));
+  audio.playAt(
+    impact.ground ? 'explosionGround' : 'explosionHull',
+    impact.x,
+    impact.y,
+    impact.z,
+    { intensity }
+  );
   if (!impact.ground) return;
 
   // Only a ground hit scars the ground. A shell that hit a hull spent itself
@@ -1538,6 +1598,7 @@ function handleBountyCollected(coin, team, collector) {
           y: (-_burstAnchor.y * 0.5 + 0.5) * window.innerHeight,
         };
   creditBurst.play(coin.value, screen);
+  audio.playAt('coinPickup', anchor.x, heightmap.heightAt(anchor.x, anchor.z) + 1, anchor.z);
 }
 
 /** Scratch vector for the projection above — allocating one per coin would
@@ -1563,10 +1624,20 @@ entities.onDestroy((inst) => {
 // The record of what died here, placed while the instance still knows where
 // it was — vehicles.remove/structures.remove below drop that.
 entities.onDestroy((inst) => leaveWreckage(inst));
+// The death sound, placed the same tick and for the same reason as the wreck
+// above: the instance still knows where it was and how big it was.
+entities.onDestroy((inst) => {
+  const p = inst.x !== undefined ? { x: inst.x, z: inst.z } : inst.group.position;
+  const scale = inst.kind === 'structure' ? 2.2 : Math.max(0.6, (inst.def.dims?.hullLength ?? 5) * 0.18);
+  audio.playAt('destroyed', p.x, heightmap.heightAt(p.x, p.z) + 1, p.z, { scale });
+});
 // The salvage, dropped in the same breath and for the same reason: the
 // instance still knows where it was and how many kills it had earned, and
 // vehicles.remove() below takes both away.
-entities.onDestroy((inst) => bounties.drop(inst));
+entities.onDestroy((inst) => {
+  const coin = bounties.drop(inst);
+  if (coin) audio.playAt('coinSpawn', coin.x, heightmap.heightAt(coin.x, coin.z) + 2, coin.z);
+});
 // Match record. Counted here rather than at the kill site so *every* cause of
 // death lands in the tally, not just weapons.
 entities.onDestroy((inst) => {
@@ -1670,8 +1741,10 @@ function checkMatchEnd() {
 
   game.matchOver = true;
   const winner = alive[0] ?? null;
+  const playerWon = !!winner?.isHuman;
+  audio.playGlobal(playerWon ? 'victory' : 'defeat');
   game.matchEndScreen.show({
-    playerWon: !!winner?.isHuman,
+    playerWon,
     winner,
     teams: game.teams,
   });
@@ -2210,6 +2283,7 @@ function isSkirmish() {
 function beginMatch(difficulty) {
   game.difficulty = difficulty;
   game.matchOver = false;
+  audio.playGlobal('matchStart');
   // Re-evaluated per match, not once at startup: `game.mode` is what decides
   // whether author-built vehicles are allowed, and it is only final by the
   // time a match actually begins. Online matches get the built-in catalog back
@@ -2863,6 +2937,8 @@ function renderTick(dt) {
     updateFlares(dt);
     bountyFx.update(bounties.instances, dt, world.atmosphere.params.elevation);
   });
+  p.time('engineAudio', () => updateEngineAudio());
+  p.time('ambienceAudio', () => audio.updateAmbience(nightFactor(world.atmosphere.params.elevation)));
   // Per-frame, unlike the rest of the HUD's half-second poll — see
   // Hud.updateHealth for why health specifically cannot wait.
   p.time('hudHealth', () => hud.updateHealth(vehicles.active));
@@ -2907,6 +2983,10 @@ function renderTick(dt) {
     setFogDensity: (density) => { world.atmosphere.params.fogDensity = density; },
     baseFogDensity: BASE_FOG_DENSITY,
   });
+  // One quality signal, not two: audio's voice budget and panning model
+  // shrink on exactly the same "this device is struggling" verdict the
+  // renderer already reached, rather than running a second detector.
+  audio.setLowPower(autoQuality.low);
 
   frames++;
   statsTimer += dt;
@@ -3080,6 +3160,10 @@ window.__step = (seconds, dt = SIM_DT) => {
  * to read and diff the hash from a console on each side is the cheapest way in.
  */
 window.__hashState = () => hashState({ vehicles, structures, game, projectiles, bounties, blooms: world.blooms }, simClock.tick);
+// Console/e2e debug access to the audio engine — mirrors every other
+// window.__ hook here, and is how a headless smoke test confirms the
+// AudioContext actually reached 'running' rather than staying suspended.
+window.__audio = audio;
 
 /**
  * Issue player intent from the console, exactly as a click would.
