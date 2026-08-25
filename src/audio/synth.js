@@ -372,16 +372,49 @@ export function notification() {
 }
 
 // ---------------------------------------------------------------------------
-// Ambience — short loopable textures, crossfaded by the caller
+// Ambience — generative, chained segments, never a literal loop
 // ---------------------------------------------------------------------------
 
 /**
- * A loop-friendly noise texture. Rendered with a fade-in/out on both ends so
- * a caller looping the buffer via `Audio.setLoop(true)` doesn't click at the
- * seam. `lfoHz` slowly wobbles the filter cutoff — the difference between a
- * flat hiss and something that reads as wind or surf.
+ * Segment length in seconds. Short enough that baking one is cheap and the
+ * next is always ready well before it's needed; long enough that the LFO
+ * wobble inside a segment reads as weather, not a trill.
  */
-function ambienceLoop({ duration, baseFreq, lfoHz, lfoDepth, gain }) {
+export const AMBIENCE_SEGMENT_SECONDS = 5;
+
+/**
+ * One take on an ambience bed's character — filtered noise with a slow LFO
+ * wobbling the lowpass cutoff, the difference between a flat hiss and
+ * something that reads as wind or surf.
+ *
+ * **This is not a loop.** `audio.js` never sets `Audio.setLoop(true)` on
+ * anything built from this — instead it calls `ambienceSegment(kind)` again
+ * for every new segment, and every call here rerolls its own LFO rate/depth
+ * and base cutoff via `variedSeed()`. The result is a continuous stream that
+ * never repeats the same take twice, which a single looped buffer — however
+ * long — structurally cannot be: a loop of any length eventually shows its
+ * seam to a listener who stays long enough, and this doesn't have one to show.
+ *
+ * The buffer still fades its own two ends to silence, which is what makes the
+ * crossfade `audio.js` performs *between* two of these clickless — the fade
+ * is insurance for that handoff, not a loop seam, since nothing here ever
+ * plays past its own end.
+ *
+ * @param {'day'|'night'} kind day is brighter and wobbles faster; night is
+ *   darker, slower, and quieter — the same "night is calmer" read
+ *   `render/projectileFx.js`'s shadow-to-glow cross-fade already gives the
+ *   visuals.
+ */
+export function ambienceSegment(kind) {
+  const night = kind === 'night';
+  // Each call re-rolls its own take — see the header above on why this is
+  // what makes the stream generative rather than a loop with extra steps.
+  const baseFreq = (night ? 500 : 900) * (0.85 + variedSeed() * 0.3);
+  const lfoHz = (night ? 0.07 : 0.13) * (0.7 + variedSeed() * 0.6);
+  const lfoDepth = (night ? 180 : 400) * (0.8 + variedSeed() * 0.4);
+  const gain = night ? 0.32 : 0.5;
+  const duration = AMBIENCE_SEGMENT_SECONDS;
+
   return bake(duration, (ctx) => {
     const frames = Math.ceil(duration * ctx.sampleRate);
     const buffer = ctx.createBuffer(1, frames, ctx.sampleRate);
@@ -404,11 +437,11 @@ function ambienceLoop({ duration, baseFreq, lfoHz, lfoDepth, gain }) {
     filter.frequency.value = baseFreq;
     lfo.start();
 
-    // Fade the whole two-second-plus loop in and out at its very ends only,
-    // so the seam when it repeats is inaudible — the loop point itself stays
-    // at full, steady volume.
+    // Fade this segment's own two ends to silence — insurance for the
+    // crossfade audio.js performs against the *next*, freshly-baked segment,
+    // not a loop seam (nothing here ever plays past its own end).
     const env = ctx.createGain();
-    const fade = Math.min(0.15, duration * 0.1);
+    const fade = Math.min(0.6, duration * 0.15);
     env.gain.setValueAtTime(0, ctx.currentTime);
     env.gain.linearRampToValueAtTime(gain, ctx.currentTime + fade);
     env.gain.setValueAtTime(gain, ctx.currentTime + duration - fade);
@@ -419,16 +452,6 @@ function ambienceLoop({ duration, baseFreq, lfoHz, lfoDepth, gain }) {
     env.connect(ctx.destination);
     source.start();
   });
-}
-
-/** Wind and surf — bright-ish, faster wobble. */
-export function dayAmbience() {
-  return ambienceLoop({ duration: 4, baseFreq: 900, lfoHz: 0.13, lfoDepth: 400, gain: 0.5 });
-}
-
-/** Crickets/quiet wind — darker, slower wobble, lower overall level. */
-export function nightAmbience() {
-  return ambienceLoop({ duration: 4, baseFreq: 500, lfoHz: 0.07, lfoDepth: 180, gain: 0.32 });
 }
 
 // ---------------------------------------------------------------------------

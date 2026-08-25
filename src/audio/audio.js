@@ -51,10 +51,26 @@ let voices = []; // { audio: THREE.PositionalAudio, busyUntil }
 let nextVoice = 0;
 let globalVoices = []; // { audio: THREE.Audio }
 let nextGlobalVoice = 0;
-let dayAmbience = null; // THREE.Audio, looping
-let nightAmbience = null;
 let loops = new Map(); // key -> { audio, engine, group }
 let lowPower = false;
+
+// --- adjustable levels, surfaced as sliders in ui/controlSchema.js's Sound
+// section. Each is independent: master sits on the listener (everything
+// downstream of it), the other three scale one category apiece. ---
+let masterVolume = 0.9;
+let effectsVolume = 1;
+let engineVolume = 0.8;
+// Deliberately low by default — this is meant to read as wind under
+// everything else, not compete with it. The slider gives headroom back up
+// to 1 for anyone who wants it more present.
+let ambienceVolume = 0.35;
+/** Base level the day/night crossfade scales from, before ambienceVolume. */
+const AMBIENCE_BASE = 0.16;
+
+let ambienceSegmentsPlayed = 0; // debug counter — see debugState()
+let dayBed = null; // AmbienceBed
+let nightBed = null;
+let lastNightFactor = 0;
 
 /** Cached baked buffers, keyed `${id}:${variation}`. Synthesis runs once per
  * distinct key and is reused for every subsequent play. */
@@ -100,6 +116,86 @@ function falloffFor(id) {
   return FALLOFF[id] ?? FALLOFF.default;
 }
 
+/** Seconds of overlap between one segment ending and the next beginning —
+ * long enough to be inaudible as a seam, short enough not to smear two
+ * different LFO wobbles together into mush. */
+const AMBIENCE_CROSSFADE = 0.6;
+
+/**
+ * One ambience bed (day or night): a *chain* of freshly-synthesized segments,
+ * never a looped buffer.
+ *
+ * `Audio.setLoop(true)` was the obvious way to keep a bed playing forever,
+ * and is deliberately not used anywhere in this class. A loop, however long,
+ * is a fixed recording that eventually repeats itself to a listener who
+ * stays long enough — which is exactly what "generative, not a loop" rules
+ * out. Instead this alternates between two `THREE.Audio` voices: while one
+ * plays out its segment, the other bakes and starts the *next* one
+ * (`synth.ambienceSegment` rerolls its own parameters every call — see that
+ * function's header), overlapped by `AMBIENCE_CROSSFADE` so the handoff is a
+ * fade, not a click. Each voice schedules its own successor from its
+ * `ended` event, so the chain is self-driving — nothing in `renderTick`
+ * pumps it, the same "reacts to its own completion" shape
+ * `ui/creditBurst.js`'s DOM particles already use via `animationend`.
+ *
+ * `level` is the bed's own target volume, in [0, 1] before the day/night
+ * crossfade and the `ambienceVolume` slider are applied by `updateAmbience` —
+ * this class only ever multiplies its two voices' gains by `level`, it
+ * doesn't know why that number is what it is.
+ */
+class AmbienceBed {
+  constructor(kind) {
+    this.kind = kind;
+    this.level = 0;
+    this.voices = [new THREE.Audio(listener), new THREE.Audio(listener)];
+    this.active = 0; // index into this.voices currently the louder one
+    this.stopped = false;
+    this._playSegment(this.active);
+  }
+
+  setLevel(level) {
+    this.level = level;
+    // The buffer's own fade in/out (synth.js's `ambienceSegment`) is baked
+    // into the sample data at render time, not driven by this live gain node
+    // — so there's no competing automation here to fight, and every playing
+    // voice can simply be set to the new level directly.
+    for (const v of this.voices) {
+      if (v.isPlaying) v.setVolume(this.level);
+    }
+  }
+
+  _playSegment(index) {
+    if (this.stopped) return;
+    const voice = this.voices[index];
+    synth.ambienceSegment(this.kind).then((buffer) => {
+      if (this.stopped) return;
+      ambienceSegmentsPlayed++;
+      voice.setBuffer(buffer);
+      voice.setVolume(this.level);
+      voice.play();
+
+      // Schedule the *other* voice's next segment to start shortly before
+      // this one ends, so the two overlap by AMBIENCE_CROSSFADE instead of
+      // leaving a gap — a real gap would be as audible as a loop seam, just
+      // silent instead of a click.
+      const nextAt = Math.max(0, buffer.duration - AMBIENCE_CROSSFADE) * 1000;
+      this._timer = setTimeout(() => {
+        if (this.stopped) return;
+        this.active = 1 - index;
+        this._playSegment(this.active);
+      }, nextAt);
+    });
+  }
+
+  stop() {
+    this.stopped = true;
+    clearTimeout(this._timer);
+    for (const v of this.voices) {
+      if (v.isPlaying) v.stop();
+    }
+  }
+}
+
 /**
  * One-time setup: attaches the listener to the camera and builds the voice
  * pool. Call once, after `camera` exists.
@@ -117,7 +213,7 @@ export function initAudio(camera, worldScene) {
   // Master volume lives on the listener itself (every PositionalAudio's own
   // gain node connects straight to listener.getInput()), so a separate gain
   // node here would sit outside every voice's signal path and do nothing.
-  listener.setMasterVolume(0.9);
+  listener.setMasterVolume(masterVolume);
 
   voices = [];
   for (let i = 0; i < VOICE_POOL_SIZE; i++) {
@@ -139,43 +235,28 @@ export function initAudio(camera, worldScene) {
     globalVoices.push(a);
   }
 
-  // Two always-playing, looping ambience beds — day and night — crossfaded
-  // by `updateAmbience` rather than swapped, so the transition through dusk
-  // is a fade rather than a cut. Both start baking immediately; playback
-  // (silent until resume()) begins with volume at 0 and is raised once the
-  // first `updateAmbience` call knows the actual sun elevation.
-  dayAmbience = new THREE.Audio(listener);
-  nightAmbience = new THREE.Audio(listener);
-  dayAmbience.setLoop(true);
-  nightAmbience.setLoop(true);
-  dayAmbience.setVolume(0);
-  nightAmbience.setVolume(0);
-  synth.dayAmbience().then((buffer) => {
-    dayAmbience.setBuffer(buffer);
-    if (ctx.state === 'running') dayAmbience.play();
-  });
-  synth.nightAmbience().then((buffer) => {
-    nightAmbience.setBuffer(buffer);
-    if (ctx.state === 'running') nightAmbience.play();
-  });
+  // Two always-running ambience beds — day and night — crossfaded against
+  // each other by `updateAmbience` so the transition through dusk is a fade,
+  // not a cut. Each bed is its own AmbienceBed, a chain of freshly-synthesized
+  // segments rather than one buffer on `Audio.setLoop(true)` — see
+  // AmbienceBed's own header for why that distinction is the point.
+  dayBed = new AmbienceBed('day');
+  nightBed = new AmbienceBed('night');
 }
 
 /**
- * Crossfade the ambience bed by sun elevation. `night` is expected to be the
+ * Crossfade the ambience beds by sun elevation. `night` is expected to be the
  * caller's own `nightFactor(elevation)` (render/projectileFx.js) — the same
  * 0..1 curve already shared by the shadow/glow cross-fade and the headlight
  * gate, so ambience agrees with everything else about when night has started
  * rather than running its own threshold.
  */
 export function updateAmbience(night) {
-  if (!dayAmbience || !nightAmbience) return;
-  if (ctx.state === 'running') {
-    if (!dayAmbience.isPlaying && dayAmbience.buffer) dayAmbience.play();
-    if (!nightAmbience.isPlaying && nightAmbience.buffer) nightAmbience.play();
-  }
-  const AMBIENCE_MASTER = 0.5;
-  dayAmbience.setVolume((1 - night) * AMBIENCE_MASTER);
-  nightAmbience.setVolume(night * AMBIENCE_MASTER);
+  lastNightFactor = night;
+  if (!dayBed || !nightBed) return;
+  const level = AMBIENCE_BASE * ambienceVolume;
+  dayBed.setLevel((1 - night) * level);
+  nightBed.setLevel(night * level);
 }
 
 /**
@@ -197,6 +278,49 @@ export function resume() {
  */
 export function setLowPower(low) {
   lowPower = low;
+}
+
+// --- volume controls, surfaced in ui/controlSchema.js's Sound section ---
+// Each pair follows the `get`/`set` shape every other controlSchema.js entry
+// already expects, so the slider factory there needs no special case for
+// audio at all.
+
+const clamp01 = (v) => Math.min(1, Math.max(0, v));
+
+export function getMasterVolume() {
+  return masterVolume;
+}
+export function setMasterVolume(v) {
+  masterVolume = clamp01(v);
+  listener?.setMasterVolume(masterVolume);
+}
+
+export function getEffectsVolume() {
+  return effectsVolume;
+}
+export function setEffectsVolume(v) {
+  effectsVolume = clamp01(v);
+}
+
+export function getEngineVolume() {
+  return engineVolume;
+}
+export function setEngineVolume(v) {
+  engineVolume = clamp01(v);
+  // Applied live, not just to future loops — a vehicle already driving
+  // shouldn't have to stop and restart its engine to pick up the new level.
+  for (const loop of loops.values()) loop.audio.setVolume(engineVolume);
+}
+
+export function getAmbienceVolume() {
+  return ambienceVolume;
+}
+export function setAmbienceVolume(v) {
+  ambienceVolume = clamp01(v);
+  // Re-apply immediately against whatever elevation updateAmbience was last
+  // called with, rather than waiting for the next render frame's call —
+  // the slider should react the instant it's dragged.
+  updateAmbience(lastNightFactor);
 }
 
 function voicePoolSize() {
@@ -260,7 +384,7 @@ export function playAt(id, x, y, z, params, gain = 1) {
     audio.setRolloffFactor(f.rolloffFactor);
     audio.setMaxDistance(f.maxDistance);
     audio.panner.panningModel = lowPower ? 'equalpower' : 'HRTF';
-    audio.setVolume(Math.min(1, gain));
+    audio.setVolume(Math.min(1, gain * effectsVolume));
     audio.position.set(x, y, z);
     audio.play();
     voice.busyUntil = ctx.currentTime + buffer.duration;
@@ -281,7 +405,7 @@ export function playGlobal(id, params, gain = 1) {
     if (!buffer) return;
     if (a.isPlaying) a.stop();
     a.setBuffer(buffer);
-    a.setVolume(Math.min(1, gain));
+    a.setVolume(Math.min(1, gain * effectsVolume));
     a.play();
   });
 }
@@ -312,7 +436,6 @@ export function updateEngineLoop(key, anchor, baseHz, speedFrac) {
     audio.setRolloffFactor(1.5);
     audio.setMaxDistance(180);
     audio.panner.panningModel = lowPower ? 'equalpower' : 'HRTF';
-    audio.setVolume(1);
     scene.add(audio);
 
     const engine = synth.engineGraph(ctx, baseHz);
@@ -322,6 +445,7 @@ export function updateEngineLoop(key, anchor, baseHz, speedFrac) {
     loops.set(key, loop);
   }
 
+  loop.audio.setVolume(engineVolume);
   loop.audio.position.copy(anchor.position);
   loop.engine.setSpeed(speedFrac);
 }
@@ -350,5 +474,15 @@ export function debugState() {
     playingVoices: voices.filter((v) => v.audio.isPlaying).length,
     loopCount: loops.size,
     cachedBuffers: bufferCache.size,
+    // Rises for as long as the ambience beds run, confirming they're being
+    // continuously replaced with fresh segments rather than looping one —
+    // "not looping" isn't otherwise observable from outside this module.
+    ambienceSegmentsPlayed,
+    volumes: {
+      master: masterVolume,
+      effects: effectsVolume,
+      engine: engineVolume,
+      ambience: ambienceVolume,
+    },
   };
 }

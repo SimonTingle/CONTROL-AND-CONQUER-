@@ -14,12 +14,21 @@
  * about when night starts" rests entirely on this one function's shape being
  * right.
  *
+ * The volume getter/setter pairs are included because they're plain module
+ * state with no Web Audio dependency — `setMasterVolume` reaches for
+ * `listener` only if one has been attached by `initAudio`, which never runs
+ * under `node --test`, so `listener` stays null and that line is a no-op.
+ * This is the same shape `ui/controlSchema.js`'s Sound section calls
+ * directly, so it doubles as a check that the slider wiring's `get`/`set`
+ * pair actually round-trips.
+ *
  * Run: node --test tests/
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { nightFactor, DAY_ELEVATION, NIGHT_ELEVATION } from '../src/render/projectileFx.js';
 import { variedSeed } from '../src/audio/synth.js';
+import * as audio from '../src/audio/audio.js';
 
 // ---- nightFactor: what updateAmbience's crossfade rests on ----
 
@@ -72,4 +81,64 @@ test('variedSeed is not a constant — repeated cues actually vary', () => {
   const samples = new Set();
   for (let i = 0; i < 20; i++) samples.add(variedSeed());
   assert.ok(samples.size > 1, 'every call returned the same value');
+});
+
+// ---- volume controls: plain state, round-trips through get/set ----
+
+test('each volume defaults inside [0, 1]', () => {
+  for (const get of [audio.getMasterVolume, audio.getEffectsVolume, audio.getEngineVolume, audio.getAmbienceVolume]) {
+    const v = get();
+    assert.ok(v >= 0 && v <= 1, `default ${v} out of range`);
+  }
+});
+
+test('set/get round-trips for every control', () => {
+  audio.setMasterVolume(0.42);
+  assert.equal(audio.getMasterVolume(), 0.42);
+  audio.setEffectsVolume(0.7);
+  assert.equal(audio.getEffectsVolume(), 0.7);
+  audio.setEngineVolume(0.15);
+  assert.equal(audio.getEngineVolume(), 0.15);
+  audio.setAmbienceVolume(0.9);
+  assert.equal(audio.getAmbienceVolume(), 0.9);
+});
+
+test('every setter clamps to [0, 1], both directions', () => {
+  audio.setMasterVolume(5);
+  assert.equal(audio.getMasterVolume(), 1);
+  audio.setMasterVolume(-3);
+  assert.equal(audio.getMasterVolume(), 0);
+
+  audio.setAmbienceVolume(2);
+  assert.equal(audio.getAmbienceVolume(), 1);
+  audio.setAmbienceVolume(-1);
+  assert.equal(audio.getAmbienceVolume(), 0);
+});
+
+test('the four controls are independent — setting one leaves the others alone', () => {
+  audio.setMasterVolume(0.5);
+  audio.setEffectsVolume(0.5);
+  audio.setEngineVolume(0.5);
+  audio.setAmbienceVolume(0.5);
+
+  audio.setEffectsVolume(0.9);
+
+  assert.equal(audio.getMasterVolume(), 0.5);
+  assert.equal(audio.getEngineVolume(), 0.5);
+  assert.equal(audio.getAmbienceVolume(), 0.5);
+  assert.equal(audio.getEffectsVolume(), 0.9);
+});
+
+test('setMasterVolume does not throw before initAudio has attached a listener', () => {
+  // node --test never calls initAudio (no AudioContext exists), so `listener`
+  // is null here — this is exactly the path controlSchema.js's slider would
+  // hit if a user somehow dragged it before the engine finished initializing.
+  assert.doesNotThrow(() => audio.setMasterVolume(0.6));
+  assert.equal(audio.getMasterVolume(), 0.6);
+});
+
+test('setAmbienceVolume does not throw with no ambience beds constructed', () => {
+  // Same reasoning as above, for the day/night crossfade re-application path.
+  assert.doesNotThrow(() => audio.setAmbienceVolume(0.3));
+  assert.equal(audio.getAmbienceVolume(), 0.3);
 });
