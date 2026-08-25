@@ -59,11 +59,11 @@ let lowPower = false;
 // downstream of it), the other three scale one category apiece. ---
 let masterVolume = 0.9;
 let effectsVolume = 1;
-let engineVolume = 0.8;
+let engineVolume = 0.15;
 // Deliberately low by default — this is meant to read as wind under
 // everything else, not compete with it. The slider gives headroom back up
 // to 1 for anyone who wants it more present.
-let ambienceVolume = 0.35;
+let ambienceVolume = 0.10;
 /** Base level the day/night crossfade scales from, before ambienceVolume. */
 const AMBIENCE_BASE = 0.16;
 
@@ -309,7 +309,10 @@ export function setEngineVolume(v) {
   engineVolume = clamp01(v);
   // Applied live, not just to future loops — a vehicle already driving
   // shouldn't have to stop and restart its engine to pick up the new level.
-  for (const loop of loops.values()) loop.audio.setVolume(engineVolume);
+  // Scaled by each loop's own presence, same as updateEngineLoop, so
+  // dragging this slider while a vehicle is parked doesn't audibly un-mute
+  // it — presence, not this slider, decides whether it's parked or not.
+  for (const loop of loops.values()) loop.audio.setVolume(engineVolume * loop.presence);
 }
 
 export function getAmbienceVolume() {
@@ -410,11 +413,47 @@ export function playGlobal(id, params, gain = 1) {
   });
 }
 
+/** speedFrac at or below this counts as "stopped" for the presence ramp
+ * below — not exactly 0, since a vehicle very nearly stationary (rolling to
+ * a halt, or nudged by a collision) shouldn't sit right on the boundary and
+ * flicker between ramping up and down. */
+const ENGINE_STOP_EPS = 0.02;
+/** Seconds for presence to ramp fully 0->1 or 1->0. Long enough to read as a
+ * fade, short enough that tapping the throttle doesn't feel sluggish. */
+const ENGINE_RAMP_SECONDS = 0.8;
+
+/**
+ * One ramp step toward silence (stopped) or full presence (moving).
+ * Extracted as a pure function — no THREE, no AudioContext, no module state
+ * — specifically so the ramp's own arithmetic (the stop gate, the linear
+ * rate, the clamp toward the target) can be unit tested without a real
+ * `PositionalAudio` loop, which `node --test` has no way to construct.
+ *
+ * @param {number} presence current value, 0..1
+ * @param {number} speedFrac 0..1
+ * @param {number} dt real frame seconds
+ * @returns {number} the next presence, 0..1
+ */
+export function stepEnginePresence(presence, speedFrac, dt) {
+  const target = speedFrac > ENGINE_STOP_EPS ? 1 : 0;
+  const step = dt / ENGINE_RAMP_SECONDS;
+  return target > presence ? Math.min(target, presence + step) : Math.max(target, presence - step);
+}
+
 /**
  * Start (or update) a continuous looped sound anchored to a moving object —
  * an engine. `key` identifies the loop across calls (a vehicle's id); calling
  * again with the same key updates its position and speed rather than
  * starting a second voice.
+ *
+ * The loop's actual volume is `engineVolume * presence`, not a flat
+ * `engineVolume` — `presence` is a per-loop 0..1 value this function ramps
+ * toward 1 while the vehicle is moving and toward 0 while it's stationary,
+ * so a parked vehicle goes fully silent instead of idling at
+ * `engineGraph`'s own idle floor (which never reaches 0 — see its header).
+ * A new loop starts at presence 0 and fades in on its first few calls even
+ * if the vehicle is already moving, the same "nothing pops in at full
+ * volume" rule every other voice in this file already follows.
  *
  * @param {string|number} key stable per emitting entity
  * @param {THREE.Object3D} anchor followed every call — read, never retained
@@ -423,8 +462,12 @@ export function playGlobal(id, params, gain = 1) {
  *   object itself as "the current position" between calls without re-reading
  * @param {number} baseHz idle pitch
  * @param {number} speedFrac 0..1
+ * @param {number} dt real frame time, to integrate the presence ramp — this
+ *   is render-only presentation, so it follows the same rule
+ *   `render/projectileFx.js`'s effects do and uses wall-clock frame time,
+ *   never simulated time.
  */
-export function updateEngineLoop(key, anchor, baseHz, speedFrac) {
+export function updateEngineLoop(key, anchor, baseHz, speedFrac, dt) {
   if (!ctx || ctx.state !== 'running') return;
   let loop = loops.get(key);
 
@@ -441,11 +484,12 @@ export function updateEngineLoop(key, anchor, baseHz, speedFrac) {
     const engine = synth.engineGraph(ctx, baseHz);
     audio.setNodeSource(engine.output);
 
-    loop = { audio, engine };
+    loop = { audio, engine, presence: 0 };
     loops.set(key, loop);
   }
 
-  loop.audio.setVolume(engineVolume);
+  loop.presence = stepEnginePresence(loop.presence, speedFrac, dt);
+  loop.audio.setVolume(engineVolume * loop.presence);
   loop.audio.position.copy(anchor.position);
   loop.engine.setSpeed(speedFrac);
 }
@@ -484,5 +528,10 @@ export function debugState() {
       engine: engineVolume,
       ambience: ambienceVolume,
     },
+    // Per-loop presence — the stop/start ramp updateEngineLoop drives. Not
+    // otherwise observable from outside this module; this is what a smoke
+    // test watches to confirm a parked vehicle actually reaches 0 rather
+    // than idling at some nonzero floor.
+    enginePresence: Object.fromEntries([...loops].map(([key, loop]) => [key, loop.presence])),
   };
 }

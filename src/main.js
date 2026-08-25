@@ -1459,7 +1459,7 @@ function showMuzzleFlash(from, to, teamId, fromHeight, toHeight, turretDef) {
  * is excluded: a base station mid-flatten has no speed to react to, and an
  * engine drone under a stationary deploy animation would just be noise.
  */
-function updateEngineAudio() {
+function updateEngineAudio(dt) {
   const live = new Set();
   for (const v of vehicles.instances) {
     if (v.dead || v.immobile) continue;
@@ -1468,7 +1468,7 @@ function updateEngineAudio() {
     // already reads to decide how dark a track a vehicle leaves.
     const baseHz = THREE.MathUtils.clamp(260 - v.def.weight * 14, 55, 220);
     const speedFrac = v.def.speed > 0 ? Math.min(1, v.speed / v.def.speed) : 0;
-    audio.updateEngineLoop(v.id, v.group, baseHz, speedFrac);
+    audio.updateEngineLoop(v.id, v.group, baseHz, speedFrac, dt);
   }
   for (const key of audio.activeLoopKeys()) {
     if (!live.has(key)) audio.stopEngineLoop(key);
@@ -2937,7 +2937,7 @@ function renderTick(dt) {
     updateFlares(dt);
     bountyFx.update(bounties.instances, dt, world.atmosphere.params.elevation);
   });
-  p.time('engineAudio', () => updateEngineAudio());
+  p.time('engineAudio', () => updateEngineAudio(dt));
   p.time('ambienceAudio', () => audio.updateAmbience(nightFactor(world.atmosphere.params.elevation)));
   // Per-frame, unlike the rest of the HUD's half-second poll — see
   // Hud.updateHealth for why health specifically cannot wait.
