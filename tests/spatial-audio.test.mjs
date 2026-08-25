@@ -92,6 +92,14 @@ test('each volume defaults inside [0, 1]', () => {
   }
 });
 
+test('engine and ambience default to their new low levels', () => {
+  // These two specifically were turned down from their original defaults
+  // (0.8 and 0.35) — pinned here so a future change to either has to be
+  // deliberate, not an accidental revert.
+  assert.equal(audio.getEngineVolume(), 0.15);
+  assert.equal(audio.getAmbienceVolume(), 0.10);
+});
+
 test('set/get round-trips for every control', () => {
   audio.setMasterVolume(0.42);
   assert.equal(audio.getMasterVolume(), 0.42);
@@ -141,4 +149,44 @@ test('setAmbienceVolume does not throw with no ambience beds constructed', () =>
   // Same reasoning as above, for the day/night crossfade re-application path.
   assert.doesNotThrow(() => audio.setAmbienceVolume(0.3));
   assert.equal(audio.getAmbienceVolume(), 0.3);
+});
+
+// ---- stepEnginePresence: the stop/start ramp's own arithmetic ----
+
+test('presence ramps up from 0 while moving, and reaches 1', () => {
+  let p = 0;
+  for (let i = 0; i < 200; i++) p = audio.stepEnginePresence(p, 1, 1 / 60);
+  assert.equal(p, 1, 'ramped all the way up given enough time');
+});
+
+test('presence ramps down to 0 once stopped', () => {
+  let p = 1;
+  for (let i = 0; i < 200; i++) p = audio.stepEnginePresence(p, 0, 1 / 60);
+  assert.equal(p, 0, 'ramped all the way down given enough time');
+});
+
+test('a single large dt does not overshoot past the target in either direction', () => {
+  assert.equal(audio.stepEnginePresence(0, 1, 999), 1, 'clamped at the top');
+  assert.equal(audio.stepEnginePresence(1, 0, 999), 0, 'clamped at the bottom');
+});
+
+test('a speed at or below the stop epsilon counts as stationary', () => {
+  // Below the epsilon, the ramp heads toward 0 even starting from full
+  // presence — this is the "stop vehicle engine noise if stationary" case.
+  const next = audio.stepEnginePresence(1, 0.01, 1 / 60);
+  assert.ok(next < 1, 'presence started decaying toward silence');
+});
+
+test('a speed just above the stop epsilon counts as moving', () => {
+  const next = audio.stepEnginePresence(0, 0.03, 1 / 60);
+  assert.ok(next > 0, 'presence started rising toward full');
+});
+
+test('presence never leaves [0, 1] across a long random walk of speeds', () => {
+  let p = 0;
+  for (let i = 0; i < 500; i++) {
+    const speedFrac = (i % 7) / 6; // deterministic zig-zag between 0 and 1
+    p = audio.stepEnginePresence(p, speedFrac, 1 / 60);
+    assert.ok(p >= 0 && p <= 1, `presence left range: ${p} at step ${i}`);
+  }
 });
