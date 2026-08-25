@@ -10,6 +10,7 @@
  * write and applies on the next frame.
  */
 import { api } from '../net/api.js';
+import * as audio from '../audio/audio.js';
 
 export function buildSchema(world, view, game) {
   const atmo = world.atmosphere;
@@ -282,6 +283,15 @@ export function buildSchema(world, view, game) {
           () => view.chase.lookAhead, (v) => (view.chase.lookAhead = v)),
         slider('Follow lag', 0.5, 12, 0.1,
           () => view.chase.headingStiffness, (v) => (view.chase.headingStiffness = v)),
+      ],
+    },
+    {
+      title: 'Sound',
+      controls: [
+        slider('Master volume', 0, 1, 0.01, audio.getMasterVolume, audio.setMasterVolume),
+        slider('Effects', 0, 1, 0.01, audio.getEffectsVolume, audio.setEffectsVolume),
+        slider('Engines', 0, 1, 0.01, audio.getEngineVolume, audio.setEngineVolume),
+        slider('Ambience (wind)', 0, 1, 0.01, audio.getAmbienceVolume, audio.setAmbienceVolume),
       ],
     },
     {

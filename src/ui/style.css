@@ -602,9 +602,23 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
   background: var(--panel-bg);
   backdrop-filter: blur(14px);
   pointer-events: none;
+  /* Slides aside rather than being covered when World Settings opens — that
+     drawer is a 320px full-height panel along this same left edge. Mirrors
+     #minimap's own reaction to the *other* (right-hand) drawer below. */
+  transition: transform 0.25s ease, opacity 0.25s ease;
 }
 
 #hud.hidden { display: none; }
+
+/* Set by menu.js's setOpen when the left-hand World Settings drawer opens. */
+body.settings-open #hud { transform: translateX(calc(var(--panel-width) + 8px)); }
+
+/* On a narrow screen the settings drawer is already most of the viewport
+   width — nowhere to slide the HUD sideways to, so fade it instead, the same
+   choice #minimap's own narrow-viewport override makes below. */
+@media (max-width: 720px) {
+  body.settings-open #hud { transform: none; opacity: 0; pointer-events: none; }
+}
 
 /* ---- perf HUD — docs/performance-optimization-plan.md Phase 0 ---- */
 
