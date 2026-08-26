@@ -441,6 +441,77 @@ export function stepEnginePresence(presence, speedFrac, dt) {
 }
 
 /**
+ * How much a value must move before it is worth scheduling an automation event
+ * for it.
+ *
+ * `updateEngineLoop` used to write volume, position and speed unconditionally
+ * on every frame for every loop. Each of those writes schedules AudioParam
+ * automation — `setVolume` one event, `setSpeed` four — and three.js schedules
+ * six more per loop from inside `renderer.render()` when it updates the
+ * panner. Measured on a 40-vehicle benchmark scene with every vehicle parked
+ * and silent: **229.7 AudioParam events per frame, 14.4 per engine loop**,
+ * ~13,800/second at 60fps, to describe a fleet that was not moving and could
+ * not be heard. See docs/plans/fps-regression.md.
+ *
+ * The thresholds are chosen to be inaudible rather than merely small: a
+ * volume step of 1e-3 is roughly -60dB of change, and 1cm of position is far
+ * below what the panner can resolve at this scale.
+ */
+const ENGINE_VOLUME_EPS = 1e-3;
+const ENGINE_SPEED_EPS = 1e-3;
+const ENGINE_POSITION_EPS_SQ = 1e-4; // (1cm)^2
+
+/**
+ * Which of an engine loop's three parameters actually need writing this frame.
+ *
+ * Pure and exported for the same reason `stepEnginePresence` is: this is the
+ * arithmetic worth testing, and `node --test` cannot construct a
+ * `PositionalAudio` to test it through. `last` is null on a loop's first
+ * update, where everything must be written to establish a baseline.
+ *
+ * Each field is compared against the last value *actually written*, not the
+ * last value seen. That matters: comparing against the last seen value would
+ * let a slow drift — a vehicle creeping at a hundredth of the threshold per
+ * frame — never accumulate enough to trigger a write, and the voice would
+ * silently detach from the thing it is supposed to be following.
+ */
+export function engineWritesNeeded(last, next) {
+  if (!last) return { volume: true, speed: true, position: true };
+  const dx = next.x - last.x;
+  const dy = next.y - last.y;
+  const dz = next.z - last.z;
+  return {
+    volume: Math.abs(next.volume - last.volume) > ENGINE_VOLUME_EPS,
+    speed: Math.abs(next.speedFrac - last.speedFrac) > ENGINE_SPEED_EPS,
+    position: dx * dx + dy * dy + dz * dz > ENGINE_POSITION_EPS_SQ,
+  };
+}
+
+/**
+ * Seconds a loop must sit fully silent before its nodes are released.
+ *
+ * Not zero, because a vehicle that stops for a moment at a waypoint and drives
+ * on would otherwise tear down and rebuild five audio nodes on consecutive
+ * frames. Long enough to cover that; short enough that a parked fleet stops
+ * costing anything well inside a normal match.
+ */
+const ENGINE_IDLE_RELEASE_SECONDS = 2;
+
+/**
+ * Whether a silent loop has been silent long enough to release outright.
+ *
+ * Muting a loop is not the same as stopping it. A loop at presence 0 still has
+ * two sawtooth oscillators running through a biquad and an HRTF panner —
+ * convolving, every audio quantum, to produce silence — and still takes six
+ * panner automation events per frame from three.js because it is still in the
+ * scene. Releasing it is what actually reclaims that; `updateEngineLoop`
+ * rebuilds it the moment the vehicle moves again.
+ */
+export function shouldReleaseIdleLoop(presence, speedFrac, idleSeconds) {
+  return presence <= 0 && speedFrac <= ENGINE_STOP_EPS && idleSeconds >= ENGINE_IDLE_RELEASE_SECONDS;
+}
+
+/**
  * Start (or update) a continuous looped sound anchored to a moving object —
  * an engine. `key` identifies the loop across calls (a vehicle's id); calling
  * again with the same key updates its position and speed rather than
@@ -472,6 +543,14 @@ export function updateEngineLoop(key, anchor, baseHz, speedFrac, dt) {
   let loop = loops.get(key);
 
   if (!loop) {
+    // A stationary vehicle gets no voice at all. `stepEnginePresence` already
+    // ramps a stopped engine to silence (that was the point of "silence engine
+    // when parked"), so building the graph here would spend a pool slot, two
+    // running oscillators, an HRTF panner and ~14 automation events a frame to
+    // render nothing audible. Deferring creation until something actually moves
+    // is also what stops the idle release below from thrashing: without this
+    // guard a released loop would be rebuilt on the very next frame.
+    if (speedFrac <= ENGINE_STOP_EPS) return;
     if (loops.size >= loopPoolSize()) return; // budget exhausted; silently skip
     const audio = new THREE.PositionalAudio(listener);
     const f = falloffFor('default');
@@ -484,14 +563,45 @@ export function updateEngineLoop(key, anchor, baseHz, speedFrac, dt) {
     const engine = synth.engineGraph(ctx, baseHz);
     audio.setNodeSource(engine.output);
 
-    loop = { audio, engine, presence: 0 };
+    // `last` holds the values most recently *written* to the audio graph, so
+    // the dirty check below has a baseline. `idleSeconds` accrues only while
+    // fully silent and stopped.
+    loop = { audio, engine, presence: 0, last: null, idleSeconds: 0 };
     loops.set(key, loop);
   }
 
   loop.presence = stepEnginePresence(loop.presence, speedFrac, dt);
-  loop.audio.setVolume(engineVolume * loop.presence);
-  loop.audio.position.copy(anchor.position);
-  loop.engine.setSpeed(speedFrac);
+
+  const stopped = speedFrac <= ENGINE_STOP_EPS;
+  loop.idleSeconds = loop.presence <= 0 && stopped ? loop.idleSeconds + dt : 0;
+  if (shouldReleaseIdleLoop(loop.presence, speedFrac, loop.idleSeconds)) {
+    stopEngineLoop(key);
+    return;
+  }
+
+  const pos = anchor.position;
+  const volume = engineVolume * loop.presence;
+  const next = { volume, speedFrac, x: pos.x, y: pos.y, z: pos.z };
+  const writes = engineWritesNeeded(loop.last, next);
+
+  // Each baseline advances only when that parameter was actually written — see
+  // engineWritesNeeded's note on why comparing against the last *seen* value
+  // would let a slow drift go unnoticed forever.
+  if (!loop.last) loop.last = { volume: 0, speedFrac: 0, x: 0, y: 0, z: 0 };
+  if (writes.volume) {
+    loop.audio.setVolume(volume);
+    loop.last.volume = volume;
+  }
+  if (writes.position) {
+    loop.audio.position.copy(pos);
+    loop.last.x = pos.x;
+    loop.last.y = pos.y;
+    loop.last.z = pos.z;
+  }
+  if (writes.speed) {
+    loop.engine.setSpeed(speedFrac);
+    loop.last.speedFrac = speedFrac;
+  }
 }
 
 /** Stop and release a loop voice — call when its vehicle is destroyed/removed. */

@@ -238,6 +238,14 @@ export class ProjectileFx {
       // Higher shell, larger and softer mark — the altitude cue.
       const spread = 1 + altitude * 0.09;
 
+      // `blending` is the only thing set below that needs a program refresh;
+      // colour, opacity and scale are picked up without one. Remembered here
+      // so `needsUpdate` can be set on the frame it actually changes — which
+      // is at most once per shell, at the day/night crossover — instead of on
+      // every frame for every shell in flight. At the 64-shell pool cap that
+      // was 64 forced program re-acquisitions per frame during a firefight.
+      const prevBlending = slot.markMat.blending;
+
       if (night < 0.5) {
         // Daylight half of the cross-fade: a dark blob, tightening and
         // strengthening as the sun climbs.
@@ -255,7 +263,7 @@ export class ProjectileFx {
         slot.markMat.opacity = 0.4 * nightness / Math.sqrt(spread);
         slot.mark.scale.setScalar(3.2 * spread);
       }
-      slot.markMat.needsUpdate = true;
+      if (slot.markMat.blending !== prevBlending) slot.markMat.needsUpdate = true;
     }
 
     // Release slots whose shell resolved this tick.
