@@ -76,6 +76,10 @@ import {
   releaseReadyTurns,
   reapSilent,
   dropPlayer,
+  roomFor,
+  send,
+  broadcast,
+  rosterOf,
 } from './matchRoom.js';
 
 /**

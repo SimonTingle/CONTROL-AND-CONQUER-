@@ -24,6 +24,14 @@
 //
 // MATCH_START_REPORT_MS is lowered only so the "what am I waiting for" frame
 // arrives inside the test's patience; the barrier itself has no timeout to tune.
+// `ws` is now a declared dependency of server/package.json (it used to be
+// reachable only transitively through @fastify/websocket, which meant the
+// exact version this test ran against was whatever that package happened to
+// pull in, undeclared anywhere). This path still reaches into the server
+// package's own node_modules rather than a bare `import 'ws'`, because this
+// file has no node_modules of its own for Node's resolver to find a
+// same-named package in — but the dependency it reaches for is now pinned
+// and visible in server/package.json instead of merely hoped for.
 import wsPkg from '../../server/node_modules/ws/index.js';
 const { WebSocket } = wsPkg;
 import { LockstepSession } from '../../src/net/lockstep.js';

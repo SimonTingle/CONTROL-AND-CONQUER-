@@ -142,7 +142,7 @@ export function checkProtocolVersion(rawVersion) {
   return { ok: false, clientVersion: Number.isInteger(clientVersion) ? clientVersion : null };
 }
 
-function roomFor(matchId, seed, expectedPlayers, customDefs) {
+export function roomFor(matchId, seed, expectedPlayers, customDefs) {
   let room = rooms.get(matchId);
   if (!room) {
     // Diagnostic only: rooms are in-memory and per-process (see the module
@@ -205,17 +205,17 @@ function reportWaiting(room) {
   });
 }
 
-function send(socket, msg) {
+export function send(socket, msg) {
   if (socket.readyState === 1) socket.send(JSON.stringify(msg));
 }
 
-function broadcast(room, msg, exceptUserId = null) {
+export function broadcast(room, msg, exceptUserId = null) {
   for (const [userId, p] of room.players) {
     if (userId !== exceptUserId) send(p.socket, msg);
   }
 }
 
-function rosterOf(room) {
+export function rosterOf(room) {
   return [...room.players.entries()].map(([userId, p]) => ({
     userId,
     teamId: p.teamId,
