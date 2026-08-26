@@ -219,6 +219,16 @@ export function initAudio(camera, worldScene) {
   for (let i = 0; i < VOICE_POOL_SIZE; i++) {
     const audio = new THREE.PositionalAudio(listener);
     audio.setVolume(1);
+    // The default distanceModel is 'inverse', which never actually reaches
+    // zero gain at any distance and — this is the part that broke "distant
+    // vehicles should not be audible" — ignores `maxDistance` entirely (it
+    // only applies to 'linear'). Every refDistance/rolloffFactor/maxDistance
+    // in FALLOFF below was configured under the assumption that maxDistance
+    // was a real cutoff; under the actual default it was inert, and a sound
+    // 1000 units away still carried ~1% of its near-field amplitude. Set once
+    // here because the property lives on the panner and survives this voice
+    // being reused across many plays.
+    audio.panner.distanceModel = 'linear';
     scene.add(audio);
     voices.push({ audio, busyUntil: 0 });
   }
@@ -557,6 +567,10 @@ export function updateEngineLoop(key, anchor, baseHz, speedFrac, dt) {
     audio.setRefDistance(14);
     audio.setRolloffFactor(1.5);
     audio.setMaxDistance(180);
+    // See initAudio's voice pool for why this line matters: without it,
+    // maxDistance is silently ignored and a distant engine never truly goes
+    // quiet. Same fix, same reason.
+    audio.panner.distanceModel = 'linear';
     audio.panner.panningModel = lowPower ? 'equalpower' : 'HRTF';
     scene.add(audio);
 
