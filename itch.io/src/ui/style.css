@@ -602,9 +602,23 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
   background: var(--panel-bg);
   backdrop-filter: blur(14px);
   pointer-events: none;
+  /* Slides aside rather than being covered when World Settings opens — that
+     drawer is a 320px full-height panel along this same left edge. Mirrors
+     #minimap's own reaction to the *other* (right-hand) drawer below. */
+  transition: transform 0.25s ease, opacity 0.25s ease;
 }
 
 #hud.hidden { display: none; }
+
+/* Set by menu.js's setOpen when the left-hand World Settings drawer opens. */
+body.settings-open #hud { transform: translateX(calc(var(--panel-width) + 8px)); }
+
+/* On a narrow screen the settings drawer is already most of the viewport
+   width — nowhere to slide the HUD sideways to, so fade it instead, the same
+   choice #minimap's own narrow-viewport override makes below. */
+@media (max-width: 720px) {
+  body.settings-open #hud { transform: none; opacity: 0; pointer-events: none; }
+}
 
 /* ---- perf HUD — docs/performance-optimization-plan.md Phase 0 ---- */
 
@@ -1581,4 +1595,198 @@ body.drawer-open #minimap { transform: translateX(calc(-1 * var(--panel-width) +
    large Android phone) — 132px still crowds a 360-390px-wide screen. */
 @media (max-width: 480px) {
   #minimap { width: 104px; height: 104px; }
+}
+
+/* ---- drawer chooser (Statistics / World Settings) ---- */
+
+.panel-chooser-item {
+  display: block;
+  width: calc(100% - 28px);
+  margin: 10px 14px;
+  padding: 13px 14px;
+  text-align: left;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.panel-chooser-item:hover { border-color: var(--accent); }
+
+.panel-chooser-name {
+  display: block;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.panel-chooser-hint {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* button.panel-back, not .panel-back: it also carries .action, whose
+   `button.action { width: 100% }` is the more specific selector and otherwise
+   wins — leaving a full-width button inside 14px margins, overflowing the
+   drawer by exactly the margins. */
+button.panel-back {
+  width: calc(100% - 28px);
+  margin: 10px 14px 2px;
+}
+
+/* ---- statistics ---- */
+
+.stats-screen { padding-bottom: 14px; }
+
+.stats-section { margin: 0 14px; }
+
+.stats-section h2 {
+  margin: 16px 0 0;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+/* Tighter than .match-summary's full-screen sizing — the same table has to
+   fit a 320px drawer here rather than a 620px overlay. */
+.stats-table {
+  margin: 6px 0 4px;
+  font-size: 11px;
+}
+
+.stats-table th { padding: 5px 4px; font-size: 9px; }
+.stats-table td { padding: 6px 4px; }
+
+.stats-team-cell {
+  max-width: 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Per-harvester lists and kill records: text, wrapping, never a bar — these
+   are several values in one cell, so there is nothing single to scale. */
+.stats-list-cell {
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: normal;
+  word-break: break-word;
+}
+
+.stats-total-cell { font-variant-numeric: tabular-nums; }
+
+.stats-note {
+  margin: 14px 14px 0;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+/* Stats down the side, teams across the top (see statisticsScreen.js): the
+   axis that keeps growing is the number of stats, not the number of teams, and
+   a column per stat overflows a 320px drawer. */
+.stats-table-transposed th { text-align: right; }
+.stats-table-transposed th:first-child { width: 42%; }
+
+.stats-row-label {
+  text-align: left !important;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+/* An eliminated player's column header, matching .defeated on a row. */
+.stats-out { opacity: 0.45; }
+
+/* The "graph": one div behind the number, width scaled against the best value
+   in that column. No canvas, no SVG, no library — and because it is purely
+   decoration behind live text, hiding it below is a complete mobile fallback
+   rather than a degraded one. */
+.stat-cell { position: relative; }
+
+.stat-cell-bar {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 0;
+  background: rgba(79, 209, 197, 0.16); /* --accent, low alpha */
+  border-radius: 3px;
+  pointer-events: none;
+}
+
+.stat-cell-value { position: relative; }
+
+/* Same breakpoint the drawer itself narrows at (see --panel-width above): once
+   columns are this tight the bars read as noise behind the digits, so the
+   table becomes plain text. */
+@media (max-width: 720px) {
+  .stat-cell-bar { display: none; }
+  .stats-table { font-size: 10px; }
+  .stats-team-cell { max-width: 72px; }
+}
+
+/* ---- bounty credit flourish (see ui/creditBurst.js) ---------------------- */
+
+/* Above the canvas, below nothing — the dust has to be able to reach the HUD,
+   which sits in the same stacking context. Never interactive: this layer
+   covers the whole viewport and would otherwise eat every click. */
+.credit-burst-layer {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 40;
+  overflow: hidden;
+}
+
+.credit-burst-label {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  font-size: 16px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #f0c65a;
+  text-shadow: 0 0 12px rgba(240, 198, 90, 0.6), 0 1px 2px rgba(0, 0, 0, 0.8);
+  animation: credit-label-rise 1.1s ease-out forwards;
+  will-change: transform, opacity;
+}
+
+@keyframes credit-label-rise {
+  0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.7); }
+  18%  { opacity: 1; transform: translate(-50%, -60%) scale(1.1); }
+  100% { opacity: 0; transform: translate(-50%, -160%) scale(1); }
+}
+
+.credit-burst-dot {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  margin: -2.5px 0 0 -2.5px;
+  border-radius: 50%;
+  background: #f0c65a;
+  box-shadow: 0 0 8px rgba(240, 198, 90, 0.9);
+  animation: credit-dust-fly 620ms cubic-bezier(0.35, 0, 0.3, 1) forwards;
+  will-change: transform, opacity;
+}
+
+/* The arc. --mx/--my is the control point, --dx/--dy the HUD; the midpoint
+   keyframe is what turns a straight translate into a thrown one. */
+@keyframes credit-dust-fly {
+  0%   { opacity: 0; transform: translate(0, 0) scale(0.5); }
+  12%  { opacity: 1; transform: translate(calc(var(--mx) * 0.2), calc(var(--my) * 0.35)) scale(1.2); }
+  55%  { opacity: 1; transform: translate(var(--mx), var(--my)) scale(1); }
+  100% { opacity: 0; transform: translate(var(--dx), var(--dy)) scale(0.35); }
+}
+
+/* The credits readout reacting to the arrival. */
+.hud-credits.credit-flash {
+  animation: credit-flash 420ms ease-out;
+}
+
+@keyframes credit-flash {
+  0%   { color: #f0c65a; text-shadow: 0 0 10px rgba(240, 198, 90, 0.35); }
+  25%  { color: #fff6d8; text-shadow: 0 0 22px rgba(255, 236, 176, 0.95); transform: scale(1.14); }
+  100% { color: #f0c65a; text-shadow: 0 0 10px rgba(240, 198, 90, 0.35); transform: scale(1); }
 }

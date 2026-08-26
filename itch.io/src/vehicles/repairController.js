@@ -16,7 +16,7 @@
  */
 
 import { hasVehicleBehind } from './trafficController.js';
-import { CLEARED } from './facilityControl.js';
+import { CLEARED, DOCKED } from './facilityControl.js';
 
 // A wide-turning vehicle (a crystal-harvester's turning circle is tens of
 // units) can overshoot a tight radius repeatedly without ever settling
@@ -26,12 +26,21 @@ import { CLEARED } from './facilityControl.js';
 const ARRIVE_RADIUS = 10;
 const WAYPOINT_RADIUS = 8;
 const DETOUR_ANGLES = [0.6, -0.6, 1.2, -1.2, 1.9, -1.9]; // radians off the direct bearing
+// Same forward-hemisphere cutoff as harvesterAI's copy of this ladder: a
+// tracked vehicle pivots to face any bearing without reversing, so an angle
+// past this offset — which a wheeled vehicle can only reach by backing up —
+// is never worth sending it toward.
+const TRACKED_DETOUR_LIMIT = Math.PI / 2;
 const STALL_SPEED = 0.4;
 const STALL_TIMEOUT = 1.5; // seconds near-stopped before trying the next detour
 // Speed-blind failure: circling the destination at the alignment floor is fast
 // enough to never look stalled. See _driveTo's progress check.
 const NO_PROGRESS_TIMEOUT = 6; // seconds without getting closer
 const PROGRESS_EPSILON = 0.5; // world units that count as "closer"
+// How long a yield or a reverse may keep suppressing the two escapes below.
+// Mirrors harvesterAI's constant of the same name and for the same reason —
+// see the comment beside `mechanicalHold` in _driveTo.
+const HOLD_GRACE = 10; // seconds
 const REVERSE_DURATION = 1.5; // seconds backing off before the next detour attempt
 // Any non-player vehicle at or below this fraction of health queues for
 // repair on its own, without the player having to notice and click Repair.
@@ -111,6 +120,15 @@ export class RepairController {
     // harvesterAI hands off (sets inst.repair itself), the servicing loop below
     // still runs for them — only the *initiation* is suppressed here.
     if (inst.def.capacity) return;
+    // Same carve-out, same reason, for an AI combat unit already withdrawing:
+    // aiCommander pulls one back at 0.4 and drives the long leg itself with
+    // NavGrid routing, precisely because the drive below has no pathfinder and
+    // strands a unit hundreds of units from home. Grabbing it here at 0.3
+    // would hand that leg straight back to the weaker driver mid-withdrawal.
+    // It hands off on its own once inside the bay's terminal area, and the
+    // servicing loop below then runs for it as normal — only the *initiation*
+    // is suppressed.
+    if (inst._aiRetreat) return;
     if (inst.health > inst.def.maxHealth * AUTO_REPAIR_HEALTH_FRACTION) {
       inst._autoRepairCooldown = 0; // healthy again — re-check instantly if it dips later
       return;
@@ -209,9 +227,11 @@ export class RepairController {
   }
 
   /** Slot claimed — but parking happens on the pad itself, not the approach
-   * point, so there's one more short leg (`'entering'`) before repair starts. */
+   * point, so there's one more short leg (`'entering'`) before repair starts.
+   *
+   * Deliberately does *not* call `markDocked`: that stops the clearance lease,
+   * and the leg below is still an approach. See `_startRepairing`. */
   _claimDock(inst, r, bay) {
-    this.facilityControl.markDocked(inst);
     r.state = 'entering';
     r.waypoint = null;
     r.detours = 0;
@@ -223,6 +243,26 @@ export class RepairController {
   _entering(inst, r, dt) {
     const bay = r.bay;
     if (!this._driveTo(inst, r, bay.x, bay.z, dt)) return;
+
+    // Stopped moving — *now* the approach is over, so convert the clearance
+    // into a service claim. This used to happen a leg earlier, in
+    // `_claimDock`, and that was the bug: `markDocked` stops the lease clock,
+    // but the drive above is still an approach and can still fail, while
+    // `_expireLeases` only ever inspects the *cleared* holder. A vehicle that
+    // stalled in `entering` therefore held the bay with nothing able to
+    // reclaim it — a real match had a scout holding one for 372 seconds from
+    // 228 units away, seven vehicles queued behind it. `harvesterAI._atDock`
+    // already claims at true service start; both callers now mean the same.
+    //
+    // Refused means the lease expired mid-leg and the slot went to whoever was
+    // next. Re-queue rather than servicing a bay we no longer hold, which
+    // would put two vehicles on one pad.
+    if (!this.facilityControl.markDocked(inst) && this.facilityControl.statusOf(inst) !== DOCKED) {
+      r.state = 'queued';
+      r.claimedOrder = false; // new leg — take the wheel back from the old one
+      return;
+    }
+
     // _driveTo's arrival radius is deliberately generous (a wide-turning
     // vehicle can't reliably converge on a tight one — see ARRIVE_RADIUS's
     // own comment), so "arrived" alone can still be several units off centre.
@@ -380,6 +420,13 @@ export class RepairController {
     // fire on that same tick, so this controller always issues its own.
     if (!r.claimedOrder) {
       r.claimedOrder = true;
+      // A new leg is a new destination, so a detour waypoint left over from the
+      // previous one aims at a goal this leg no longer has — and the branch
+      // below drives the waypoint in preference to the destination, so keeping
+      // it would send the vehicle the wrong way with no way back.
+      r.waypoint = null;
+      r.bestDistance = null;
+      r.noProgressTimer = 0;
       if (inst.hasOrder) inst.arrive('cancelled');
     }
 
@@ -392,14 +439,32 @@ export class RepairController {
     }
 
     // Reached a detour waypoint: drop it and aim at the real destination again.
-    if (r.waypoint) {
-      if (Math.hypot(r.waypoint.x - pos.x, r.waypoint.z - pos.z) <= WAYPOINT_RADIUS) {
-        r.waypoint = null;
-        r.detours = 0;
-        inst.setTarget(x, z, this.heightmap);
-      }
+    // Reaching a waypoint deliberately does not reset `r.detours` — see the
+    // matching comment in harvesterAI's `_travel`. A vehicle that can reach
+    // detour waypoints but not its destination would otherwise hold the ladder
+    // at zero forever and never reach the give-up at the end of it.
+    if (r.waypoint && Math.hypot(r.waypoint.x - pos.x, r.waypoint.z - pos.z) <= WAYPOINT_RADIUS) {
+      r.waypoint = null;
+      r.bestDistance = null;
+      r.noProgressTimer = 0;
+      inst.setTarget(x, z, this.heightmap);
       return false;
     }
+
+    // Everything from here down used to be unreachable while a waypoint was
+    // live: the branch above returned whether or not the waypoint had been
+    // reached. So a waypoint leg that lost its order — `driveToTarget` drops one
+    // on a terrain block, and the leg-change cancel above drops one outright —
+    // reached neither the re-issue below nor the stall detection after it, and
+    // the vehicle sat with a live waypoint, no order and every timer reading
+    // zero, holding its place in the bay queue until QUEUE_TIMEOUT. Falling
+    // through is what harvesterAI's `_travel` has always done here.
+    //
+    // While a waypoint *is* live it, not the destination, is what this leg is
+    // driving at, so progress is measured against it — a detour deliberately
+    // moves away from the destination and would otherwise read as failure.
+    const aimX = r.waypoint ? r.waypoint.x : x;
+    const aimZ = r.waypoint ? r.waypoint.z : z;
 
     if (!inst.hasOrder) {
       // The direct line just failed (or this is the first tick for this leg).
@@ -410,6 +475,17 @@ export class RepairController {
         if (inst.setTarget(x, z, this.heightmap)) return false;
         r.detours = 1;
       }
+      if (
+        inst.tracked &&
+        r.detours <= DETOUR_ANGLES.length &&
+        Math.abs(DETOUR_ANGLES[r.detours - 1]) >= TRACKED_DETOUR_LIMIT
+      ) {
+        // Skip the backward-hemisphere angle for tracked vehicles — retry
+        // immediately with the next one instead of waypointing them
+        // somewhere they'd have to reverse to reach.
+        r.detours++;
+        return false;
+      }
       if (r.detours <= DETOUR_ANGLES.length) {
         const bearing = Math.atan2(z - pos.z, x - pos.x) + DETOUR_ANGLES[r.detours - 1];
         r.detours++;
@@ -418,6 +494,11 @@ export class RepairController {
         const wz = pos.z + Math.sin(bearing) * range;
         if (this.heightmap.heightAt(wx, wz) > this.heightmap.seaLevelY + 1) {
           r.waypoint = { x: wx, z: wz };
+          // The point progress is measured against has just changed, so the
+          // record of the closest this leg has come is about a different
+          // question now.
+          r.bestDistance = null;
+          r.noProgressTimer = 0;
           inst.setTarget(wx, wz, this.heightmap);
         }
         return false;
@@ -451,12 +532,21 @@ export class RepairController {
     //
     // Yielding on purpose or already reversing isn't a stall — counting it as
     // one misreads a polite wait as a blockage.
-    const holding = inst.yielding || inst.reverseTimer != null;
+    //
+    // Bounded for the same reason harvesterAI's `_travel` bounds its own copy:
+    // both of these can re-arm indefinitely, and while either holds, this
+    // vehicle's stall *and* no-progress escapes are switched off together —
+    // turning an unresolvable manoeuvre into a permanent one. Neither of these
+    // is an open-ended decision (there is no FLEEING equivalent here), so the
+    // whole expression gets the grace period.
+    const mechanicalHold = inst.yielding || inst.reverseTimer != null;
+    r.holdTimer = mechanicalHold ? (r.holdTimer ?? 0) + dt : 0;
+    const holding = mechanicalHold && r.holdTimer < HOLD_GRACE;
     r.stallTimer = !holding && inst.speed < STALL_SPEED ? (r.stallTimer ?? 0) + dt : 0;
     if (r.stallTimer > STALL_TIMEOUT) {
       r.stallTimer = 0;
       inst.arrive('cancelled');
-      if (inst.reverseTimer == null && !hasVehicleBehind(inst, this.vehicles.instances)) {
+      if (!inst.tracked && inst.reverseTimer == null && !hasVehicleBehind(inst, this.vehicles.instances)) {
         inst.beginReverse(REVERSE_DURATION);
       }
       // Without this, the very next tick's `!inst.hasOrder` branch re-targets
@@ -474,19 +564,26 @@ export class RepairController {
     // _travel covers: a vehicle circling its destination at the alignment floor
     // is well above STALL_SPEED and so never registers as stalled, even though
     // it will orbit forever. Measure progress instead of speed.
-    const d = Math.hypot(x - pos.x, z - pos.z);
+    const d = Math.hypot(aimX - pos.x, aimZ - pos.z);
     if (holding) {
-      r.noProgressTimer = 0;
+      // Paused, not reset — see the matching comment in harvesterAI's `_travel`.
+      // A hold that keeps re-arming (block, reverse, block again) would
+      // otherwise wipe this counter on every cycle and never escalate.
     } else if (r.bestDistance == null || d < r.bestDistance - PROGRESS_EPSILON) {
       r.bestDistance = d;
       r.noProgressTimer = 0;
+      // Progress, not a completed manoeuvre, is what resets the ladder — but
+      // only progress toward the destination itself. `d` is measured against
+      // the waypoint while one is live, and closing on a detour waypoint is
+      // just the detour working as intended, not the leg succeeding.
+      if (!r.waypoint) r.detours = 0;
     } else {
       r.noProgressTimer = (r.noProgressTimer ?? 0) + dt;
       if (r.noProgressTimer > NO_PROGRESS_TIMEOUT) {
         r.noProgressTimer = 0;
         r.bestDistance = null;
         inst.arrive('cancelled');
-        if (inst.reverseTimer == null && !hasVehicleBehind(inst, this.vehicles.instances)) {
+        if (!inst.tracked && inst.reverseTimer == null && !hasVehicleBehind(inst, this.vehicles.instances)) {
           inst.beginReverse(REVERSE_DURATION);
         }
         r.detours = (r.detours ?? 0) + 1;

@@ -26,7 +26,22 @@ const API_BASE = typeof __API_URL__ === 'string' ? __API_URL__ : '';
 // resolve none of those defIds, which is precisely the silent divergence the
 // version check exists to prevent, so this is exactly the kind of change that
 // must bump it rather than ride along as an additive field.
-export const PROTOCOL_VERSION = 2;
+// v3 does not change the wire format at all — it bumps because the
+// *simulation behind it* did. Between v2 and v3, src/ gained travelling
+// projectiles, craters, bounty coins and veterancy (SCHEMA_VERSION 2 -> 3),
+// while the itch.io fork stayed on hitscan combat and none of those modules.
+// Both still declared v2, so the handshake passed and the two builds joined
+// the same match and diverged on the first shot fired — one resolving damage
+// instantly, the other flying a shell.
+//
+// That is the case this constant exists to catch and structurally could not:
+// it guards the shape of the frames, but what actually has to match is the
+// simulation reading them. So the rule is wider than the comment above
+// implies — bump when the wire format changes, *and* when a change lands that
+// two peers would simulate differently. A stale deployed bundle then fails
+// loudly at the handshake instead of silently playing a different game.
+// See docs/plans/itch-fork-silent-split-brain.md.
+export const PROTOCOL_VERSION = 3;
 
 // Exported so the query-string construction can be checked directly without a
 // browser `location` global — see matchClient-protocol.test.mjs, which sets

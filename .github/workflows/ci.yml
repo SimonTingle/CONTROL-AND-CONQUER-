@@ -1,0 +1,46 @@
+# Continuous integration.
+#
+# This repository had no CI until now, and that is the direct reason two test
+# suites sat failing across at least four merged branches: nothing forced
+# anyone to look. One of the two was `match-client-protocol`, whose entire job
+# is catching the client and server disagreeing about PROTOCOL_VERSION — so
+# the guard against version drift was itself silently broken while a version
+# drift happened. See docs/plans/reviving-the-dead-protocol-guard.md.
+#
+# Deliberately minimal: `npm test` and `npm run build`, which is what a
+# contributor runs locally anyway. `tests/e2e/` is not here — it needs a live
+# Postgres and a running API server, so it is a separate job to stand up later
+# rather than a reason to leave the fast checks unautomated.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # `npm ci` needs a lockfile; fall back to `install` so a missing or
+      # out-of-date lockfile fails loudly on its own line instead of being
+      # blamed on the test step below.
+      - name: Install
+        run: npm ci || npm install
+
+      # CLAUDE.md requires this to stay dependency-free — no database, no
+      # browser, no network. Note there is no `npm install` in server/ here,
+      # and that is the point: if a change makes the root suite need the
+      # server's dependencies again, this step is what catches it.
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build

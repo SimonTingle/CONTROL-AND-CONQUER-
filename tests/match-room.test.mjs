@@ -15,15 +15,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-// The rules under test touch neither the database nor a socket, but they live
-// in a module whose import chain reaches server/src/config.js, which refuses to
-// load without a connection string. `pg` connects lazily, so a placeholder is
-// enough to import the module and never opens anything. Set before the dynamic
-// import below, since a static import would be hoisted above it.
-process.env.DATABASE_URL ??= 'postgres://test:test@127.0.0.1:5432/test';
-
-const { createRoom, maybeBegin, releaseReadyTurns, reapSilent, TICKS_PER_TURN,
-  checkProtocolVersion, PROTOCOL_VERSION } = await import('../server/src/ws/match.js');
+// A plain static import of the rules themselves. These used to be reached
+// through `ws/match.js`, whose route handler imports `db/pool.js` — so this
+// suite transitively required `pg` to be installed and died on
+// ERR_MODULE_NOT_FOUND before running a single assertion. The rules now live
+// in their own module with no database in the chain (see matchRoom.js's
+// header), so the DATABASE_URL placeholder this file used to need is gone too.
+import {
+  createRoom,
+  maybeBegin,
+  releaseReadyTurns,
+  reapSilent,
+  TICKS_PER_TURN,
+  checkProtocolVersion,
+  PROTOCOL_VERSION,
+} from '../server/src/ws/matchRoom.js';
 
 /** A socket that records what it was sent, instead of owning a network. */
 function fakeSocket() {

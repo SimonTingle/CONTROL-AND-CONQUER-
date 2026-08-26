@@ -9,6 +9,7 @@ import {
   findTeamSpawnPoints,
 } from './core/pick.js';
 import { Menu } from './ui/menu.js';
+import { StatisticsScreen } from './ui/statisticsScreen.js';
 import { buildSchema } from './ui/controlSchema.js';
 import { VehiclePicker } from './ui/vehiclePicker.js';
 import { DifficultyScreen, DIFFICULTIES } from './ui/difficultyScreen.js';
@@ -36,8 +37,15 @@ import { FacilityControl, CLEARED, DOCKED, HOLDING } from './vehicles/facilityCo
 import { TrafficController } from './vehicles/trafficController.js';
 import { AiCommander } from './vehicles/aiCommander.js';
 import { CombatController } from './vehicles/combatController.js';
+import * as audio from './audio/audio.js';
+import { Projectiles, resetProjectileIds } from './vehicles/projectiles.js';
+import { ProjectileFx, nightFactor } from './render/projectileFx.js';
+import { Bounties, resetCoinIds } from './vehicles/bounty.js';
+import { BountyFx } from './render/bountyFx.js';
+import { CreditBurst } from './ui/creditBurst.js';
 import { MatchEndScreen } from './ui/matchEndScreen.js';
 import { Terraform } from './core/terraform.js';
+import { Craters } from './core/craters.js';
 import { DEFAULT_TERRAIN } from './terrain/heightmap.js';
 import { SIM_DT, simClock, advanceSimClock, resetSimClock } from './core/simClock.js';
 import { hashState } from './core/stateHash.js';
@@ -125,6 +133,11 @@ window.__tickProfiler = tickProfiler; // console access, same convention as wind
 window.__autoQuality = autoQuality;
 
 const world = new World(renderer);
+
+// Procedural, spatial audio — see src/audio/audio.js. Initialized as soon as
+// both the camera and the scene exist; actual playback stays silent until
+// resume() below fires on the first real pointer event.
+audio.initAudio(camera, world.scene);
 // Captured once, before autoQuality (below) ever has a chance to raise it —
 // the value auto-quality restores to once fps recovers.
 const BASE_FOG_DENSITY = world.atmosphere.params.fogDensity;
@@ -140,7 +153,10 @@ const { heightmap } = world;
 // userForced: set once the player touches the settings-drawer toggle themselves — after
 // that, auto-quality (below) leaves shadow quality alone rather than fighting an explicit
 // choice. Fog density is left out of that guard since there's no manual fog control to defer to.
-const shadowQuality = { high: !IS_MOBILE, userForced: false };
+// High by default on every platform, mobile included — unlike antialiasing and pixel ratio
+// just above, this one isn't a per-frame cost that scales with resolution, so there's no
+// mobile-specific reason to start it lower than desktop.
+const shadowQuality = { high: true, userForced: false };
 function applyShadowQuality(high) {
   shadowQuality.high = high;
   renderer.shadowMap.type = high ? THREE.PCFSoftShadowMap : THREE.BasicShadowMap;
@@ -482,6 +498,10 @@ const headlightPool = new HeadlightPool(world.scene);
 window.__headlightPool = headlightPool; // console access, same convention as window.__tickProfiler
 
 const terraform = new Terraform(world);
+// Permanent terrain damage. Simulation state — it changes ground height, and
+// therefore line of sight, wheel grounding and pathing — so it is recorded and
+// replayed rather than left to the renderer. See core/craters.js.
+const craters = new Craters(world);
 const structures = new StructureController(world.scene, vehicles);
 // The one destroy pipeline every killable thing routes through — see
 // core/entities.js. Hooks are registered once every system that needs one
@@ -549,6 +569,11 @@ function startLongPress() {
 }
 
 canvas.addEventListener('pointerdown', (e) => {
+  // Most browsers (iOS Safari strictly) refuse to produce sound until a real
+  // user gesture resumes the AudioContext. This is that gesture — the first
+  // press on the canvas, whatever it turns out to mean for the game itself.
+  // Cheap to call every press: resume() is a no-op once already running.
+  audio.resume();
   dragged = false;
   dragButton = e.button;
   lastX = e.clientX;
@@ -636,7 +661,10 @@ canvas.addEventListener('pointerup', (e) => {
       // re-validated on apply in case the ground was taken meanwhile.
       if (structures.canPlaceAt(pad, def, snapped.x, snapped.z)) {
         submitIntent(Intent.build(def.id, pad.id, snapped.x, snapped.z, pad.teamId ?? game.localTeamId));
+        audio.playAt('uiConfirm', snapped.x, heightmap.heightAt(snapped.x, snapped.z) + 1, snapped.z, null, 0.6);
         cancelPlacementMode();
+      } else {
+        audio.playAt('uiRefused', snapped.x, heightmap.heightAt(snapped.x, snapped.z) + 1, snapped.z, null, 0.6);
       }
     }
     // An invalid click is not a cancel — mirrors "click far from any bloom has
@@ -648,14 +676,19 @@ canvas.addEventListener('pointerup', (e) => {
   if (commandContext.harvestSelectMode) {
     const point = pickTerrain(e.clientX, e.clientY, canvas, camera, heightmap, hit);
     if (point) {
+      const { harvester } = commandContext.harvestSelectMode;
       // requireOnField so a click on bare ground finds nothing, rather than
       // quietly sending the harvester to whichever field is nearest the miss.
+      // A field blocked for the harvester's own team is excluded the same
+      // way: applyIntent's 'harvest' case would refuse the order anyway, and
+      // catching it here means the player sees the click miss instead of
+      // watching the marker appear and then nothing happen.
       const field = world.blooms.nearestTo(point.x, point.z, {
         minStock: 0,
         requireOnField: true,
+        reject: (f) => f.blockedByTeam?.has(harvester.teamId),
       });
       if (field) {
-        const { harvester } = commandContext.harvestSelectMode;
         // The harvester this mode was opened for can have been destroyed
         // while the player was still aiming the click.
         if (!harvester.dead) {
@@ -746,20 +779,75 @@ function pickSelectable(clientX, clientY) {
  * double-tap detector in `pointerdown` above.
  */
 function openMenuAt(clientX, clientY) {
-  const instance = pickSelectable(clientX, clientY);
-  if (!instance) return;
+  let instance = pickSelectable(clientX, clientY);
 
-  // On touch, the first tap of a double-tap can already have issued a move
-  // order through pointerup before this ever runs (the native dblclick path
-  // only, since the manual detector suppresses it up front). Double-tapping a
-  // vehicle means "command this one", not "drive it to the ground behind it"
-  // — so take that order back. A building has no order to cancel.
-  if (input.tapToMove) {
-    instance.arrive?.('cancelled');
-    marker.visible = false;
+  if (instance) {
+    // On touch, the first tap of a double-tap can already have issued a move
+    // order through pointerup before this ever runs (the native dblclick path
+    // only, since the manual detector suppresses it up front). Double-tapping
+    // a vehicle means "command this one", not "drive it to the ground behind
+    // it" — so take that order back. A building has no order to cancel.
+    if (input.tapToMove) {
+      instance.arrive?.('cancelled');
+      marker.visible = false;
+    }
+    radialMenu.openFor(instance, commandsFor(instance, commandContext), clearanceSubtitle(instance));
+    audio.playAt('uiConfirm', instance.group.position.x, instance.group.position.y + 2, instance.group.position.z, null, 0.5);
+    return;
   }
 
-  radialMenu.openFor(instance, commandsFor(instance, commandContext), clearanceSubtitle(instance));
+  // No vehicle or structure under the click — try a crystal field, using the
+  // same ground-pick-then-nearestTo path harvestSelectMode already uses to
+  // aim a manual harvest order, so a click on bare ground finds nothing here
+  // either rather than snapping to whatever field is nearest the miss.
+  const point = pickTerrain(clientX, clientY, canvas, camera, heightmap, hit);
+  if (!point) return;
+  const field = world.blooms.nearestTo(point.x, point.z, { minStock: 0, requireOnField: true });
+  if (!field) return;
+
+  instance = fieldMenuTarget(field);
+  radialMenu.openFor(instance, fieldCommands(field, game.localTeamId), '');
+  audio.playAt('uiConfirm', field.x, heightmap.heightAt(field.x, field.z) + 2, field.z, null, 0.5);
+}
+
+/**
+ * A crystal field wrapped just enough to satisfy RadialMenu.openFor's
+ * contract (`def.name`, `group.position`, `menuAnchorHeight`, `speed`,
+ * `menuOpen`). Fields are InstancedMesh slices with none of those on the
+ * field record itself, and building a real per-field object for something
+ * that never moves and is opened rarely is not worth a second entity system.
+ */
+function fieldMenuTarget(field) {
+  return {
+    kind: 'field',
+    id: field.id,
+    def: { name: 'Crystal Field' },
+    group: { position: new THREE.Vector3(field.x, heightmap.heightAt(field.x, field.z) + 2, field.z) },
+    menuAnchorHeight: 0,
+    speed: 0, // stationary — never trips radialMenu's drove-away auto-close
+    menuOpen: false,
+    // Live, not captured at open time: a base pad poured over this field
+    // while the menu is open must still close it, the same as any other
+    // instance the menu was opened on being destroyed out from under it.
+    get dead() {
+      return field.dead;
+    },
+  };
+}
+
+/** The field's radial menu: a single toggle, scoped to the acting team. */
+function fieldCommands(field, teamId) {
+  const blocked = field.blockedByTeam?.has(teamId);
+  return [
+    {
+      id: blocked ? 'unblock' : 'block',
+      label: blocked ? 'Allow harvesters' : 'Block harvesters',
+      hint: blocked
+        ? 'Your harvesters may work this field again'
+        : 'Your harvesters will avoid this field',
+      blocked: !blocked,
+    },
+  ];
 }
 
 // Kept for real mice/trackpads, and as a fallback on any touch browser that
@@ -895,7 +983,13 @@ function syncDriveIntent() {
 // floodHeadlights is a testing-only switch that gives *every* vehicle real
 // beams — deliberately the expensive shape the headlight pool exists to avoid.
 // Off by default, never persisted; see HeadlightPool.setFlood().
-const lighting = { forceHeadlights: false, floodHeadlights: false };
+//
+// forceHeadlights defaults on for mobile: on a small/dim screen the active
+// vehicle's beam is worth having lit even before headlightsWanted()'s own
+// dusk check would turn it on, and — unlike floodHeadlights — this only ever
+// touches the single light already attached to vehicles.active, not the
+// re-link-triggering light *count* HeadlightPool's header warns about.
+const lighting = { forceHeadlights: IS_MOBILE, floodHeadlights: false };
 function headlightsWanted() {
   if (lighting.forceHeadlights) return true;
   const dusk = vehicles.active?.def.lights?.duskElevation ?? 8;
@@ -918,6 +1012,16 @@ const view = {
     // So are any pads: regenerate swaps in a fresh heightfield array, which
     // orphans the flattening the old one was carrying.
     terraform.clear();
+    // Shells in flight are aimed at points on a heightfield that no longer
+    // exists — they would land in mid-air or inside a new hill.
+    projectiles.clear();
+    projectileFx.clear();
+    // The craters recorded holes in a heightfield that has just been thrown
+    // away; replaying them onto the new one would dig them in the wrong places.
+    craters.clear();
+    // And the coins were hovering over ground that has moved.
+    bounties.clear();
+    bountyFx.clear();
     // Buildings stand on the old heightfield, and harvesters hold references to
     // fields that no longer exist.
     structures.clear();
@@ -971,6 +1075,11 @@ const game = {
   // iterates this every frame regardless of mode, so it must never be null.
   aiCommanders: [],
   matchEndScreen: null,
+  // teamId -> the display name of the player holding that seat. Online only,
+  // and read by exactly one thing: the Statistics screen. Team.name itself is
+  // deliberately left alone, so the minimap, HUD and radial menu keep showing
+  // what they always showed rather than a player-controlled string.
+  playerNames: {},
   // Latched once a result is decided, so the end screen is shown exactly once
   // and the world stops being driven behind it.
   matchOver: false,
@@ -1085,7 +1194,11 @@ const game = {
   buildTime: __BUILD_TIME__,
 };
 
-const menu = new Menu(() => buildSchema(world, view, game));
+// The drawer's second page. Passed in rather than built inside Menu because it
+// reads live simulation collections, which the schema-driven control list has
+// no business knowing about.
+const statisticsScreen = new StatisticsScreen({ game, vehicles, structures });
+const menu = new Menu(() => buildSchema(world, view, game), statisticsScreen);
 
 const hud = new Hud();
 
@@ -1144,6 +1257,15 @@ function cameraGroundQuad() {
  */
 const radialMenu = new RadialMenu(camera, {
   onCommand(cmd, instance) {
+    if (instance.kind === 'field') {
+      submitIntent(Intent.blockField(instance.id, game.localTeamId, cmd.blocked));
+      const p = instance.group.position;
+      // cmd.blocked is the *new* state the click is about to set — a distinct
+      // confirm/cancel pair for turning avoidance on vs. off, same shape as
+      // any other toggle in the game.
+      audio.playAt(cmd.blocked ? 'uiConfirm' : 'uiCancel', p.x, p.y, p.z, null, 0.6);
+      return;
+    }
     submitIntent(Intent.command(instance.id, instance.kind, cmd.id));
   },
 });
@@ -1226,6 +1348,7 @@ structures.onComplete = (instance) => {
   // Fires once per finished building whoever placed it — the structure
   // equivalent of produceUnit's single choke point.
   game.teamOf(instance).stats.structuresBuilt++;
+  audio.playAt('structureComplete', instance.x, heightmap.heightAt(instance.x, instance.z) + 2, instance.z);
   if (!instance.def.freeUnitOnComplete) return;
   // produces[0] by convention — the economy unit. A facility must never
   // bootstrap a team with a free combat vehicle.
@@ -1234,123 +1357,156 @@ structures.onComplete = (instance) => {
 
 // ---- combat visuals: projectiles and wreckage ----
 
-// A small fixed pool of reusable projectile bundles. Shots are frequent and
-// short-lived, so building meshes per shot would allocate (and need
-// disposing) dozens of times a second; the pool caps that at a constant.
-// Bumped from the old instant-flash tracer's 24: a real travel time means
-// several shots are genuinely in flight at once during a multi-unit fight,
-// not just lit for a single frame.
-const TRACER_POOL_SIZE = 48;
-const DEFAULT_PROJECTILE_SPEED = 160; // world units/second, when a turret doesn't specify its own
-const IMPACT_FLASH_DURATION = 0.12; // seconds
+// Shell visuals — the flying shell, its ground shadow/glow, the muzzle flash
+// and the impact. Pooled, and entirely presentational: it reads the sim's
+// projectile array and never writes to it. See render/projectileFx.js.
+const projectileFx = new ProjectileFx(world.scene, heightmap, game);
 
-const tracers = [];
-for (let i = 0; i < TRACER_POOL_SIZE; i++) {
-  const coreMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1 });
-  const glowMat = new THREE.MeshBasicMaterial({
-    color: 0xffffff,
+/**
+ * The heavy-tracked-tank's flare.
+ *
+ * Kept as its own tiny cosmetic list rather than going through the projectile
+ * simulation, because a flare is not a shot: it deals no damage, hits nothing,
+ * decides no hit-or-miss, and must not appear in a lockstep state hash. It is
+ * a light that rises and hangs, so it is drawn like one.
+ */
+const FLARE_POOL_SIZE = 4;
+const flares = [];
+for (let i = 0; i < FLARE_POOL_SIZE; i++) {
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xfff2a8,
     transparent: true,
-    opacity: 0.35,
+    opacity: 0,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
   });
-  const core = new THREE.Mesh(new THREE.SphereGeometry(0.35, 8, 6), coreMat);
-  const glow = new THREE.Mesh(new THREE.SphereGeometry(0.75, 8, 6), glowMat);
-  core.visible = false;
-  glow.visible = false;
-  core.frustumCulled = false; // position moves every frame; a stale bound would pop
-  glow.frustumCulled = false;
-  // Only the solid core casts — the additive halo isn't meant to read as a
-  // real object, and shadowing from both would just double up on a target
-  // this small.
-  core.castShadow = true;
-  world.scene.add(core, glow);
-  tracers.push({
-    core,
-    glow,
-    coreMat,
-    glowMat,
-    from: new THREE.Vector3(),
-    to: new THREE.Vector3(),
-    elapsed: 0,
-    duration: 0,
-    phase: 'idle', // 'idle' | 'travel' | 'impact'
-  });
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(1.1, 8, 6), mat);
+  mesh.frustumCulled = false;
+  mesh.visible = false;
+  world.scene.add(mesh);
+  flares.push({ mesh, mat, from: new THREE.Vector3(), to: new THREE.Vector3(), elapsed: 0, duration: 0, active: false });
 }
-let nextTracer = 0;
+let nextFlare = 0;
 
-/**
- * Draw a shot that has *already* been resolved — purely cosmetic. Unlike the
- * damage it represents, the visual has a real (short) travel time: a small
- * glowing sphere flies from muzzle to the already-decided impact point, then
- * flashes white and dissipates. If the shot was lethal, the target's
- * wreckage can appear slightly before the projectile visually arrives at
- * where it used to be — the same "purely cosmetic" tradeoff this always
- * made, just stretched over a longer visible window than the old instant flash.
- */
-function showTracer(from, to, teamId, fromHeight, toHeight, turretDef) {
-  const t = tracers[nextTracer];
-  nextTracer = (nextTracer + 1) % TRACER_POOL_SIZE;
+const FLARE_SPEED = 60; // units/second, slow enough to read as rising
+const FLARE_HANG = 2.5; // seconds it burns at the top before fading
 
-  t.from.set(from.x, heightmap.heightAt(from.x, from.z) + fromHeight, from.z);
-  t.to.set(to.x, heightmap.heightAt(to.x, to.z) + toHeight, to.z);
-
-  const dist = t.from.distanceTo(t.to);
-  const speed = turretDef?.projectileSpeed ?? DEFAULT_PROJECTILE_SPEED;
-  t.duration = Math.max(1e-3, dist / speed);
-  t.elapsed = 0;
-  t.phase = 'travel';
-
-  // Weapon-colored when the turret specifies one; team colour otherwise, so
-  // an unattended AI-vs-AI fight stays readable even for weapons that never
-  // got their own projectileColor.
-  const color = turretDef?.projectileColor ?? game.teams[teamId]?.color ?? 0xffffff;
-  t.coreMat.color.setHex(color);
-  t.coreMat.opacity = 1;
-  t.glowMat.color.setHex(color);
-  t.glowMat.opacity = 0.35;
-  t.core.scale.setScalar(1);
-  t.glow.scale.setScalar(1);
-  t.core.position.copy(t.from);
-  t.glow.position.copy(t.from);
-  t.core.visible = true;
-  t.glow.visible = true;
+function showFlare(instance, target) {
+  const f = flares[nextFlare];
+  nextFlare = (nextFlare + 1) % FLARE_POOL_SIZE;
+  const pos = instance.group.position;
+  f.from.set(pos.x, heightmap.heightAt(pos.x, pos.z) + 3, pos.z);
+  f.to.set(target.x, heightmap.heightAt(target.x, target.z) + 140, target.z);
+  f.duration = Math.max(1e-3, f.from.distanceTo(f.to) / FLARE_SPEED);
+  f.elapsed = 0;
+  f.active = true;
+  f.mat.opacity = 1;
+  f.mesh.position.copy(f.from);
+  f.mesh.visible = true;
 }
 
-function updateTracers(dt) {
-  for (const t of tracers) {
-    if (t.phase === 'idle') continue;
-    t.elapsed += dt;
-
-    if (t.phase === 'travel') {
-      const frac = Math.min(1, t.elapsed / t.duration);
-      t.core.position.lerpVectors(t.from, t.to, frac);
-      t.glow.position.copy(t.core.position);
-      if (frac >= 1) {
-        // Arrived: flash white and start dissipating.
-        t.phase = 'impact';
-        t.elapsed = 0;
-        t.coreMat.color.setHex(0xffffff);
-        t.glowMat.color.setHex(0xffffff);
-        t.core.scale.setScalar(1.8);
-        t.glow.scale.setScalar(2.2);
-      }
+function updateFlares(dt) {
+  for (const f of flares) {
+    if (!f.active) continue;
+    f.elapsed += dt;
+    if (f.elapsed < f.duration) {
+      f.mesh.position.lerpVectors(f.from, f.to, f.elapsed / f.duration);
       continue;
     }
-
-    // phase === 'impact': scale up a little further while fading out.
-    const frac = Math.min(1, t.elapsed / IMPACT_FLASH_DURATION);
-    t.coreMat.opacity = 1 - frac;
-    t.glowMat.opacity = 0.35 * (1 - frac);
-    const scale = 1.8 + frac * 0.6;
-    t.core.scale.setScalar(scale);
-    t.glow.scale.setScalar(scale * 1.2);
-    if (frac >= 1) {
-      t.phase = 'idle';
-      t.core.visible = false;
-      t.glow.visible = false;
+    // At the top: hang and burn out.
+    f.mesh.position.copy(f.to);
+    const hang = (f.elapsed - f.duration) / FLARE_HANG;
+    f.mat.opacity = Math.max(0, 1 - hang);
+    if (hang >= 1) {
+      f.active = false;
+      f.mesh.visible = false;
     }
   }
+}
+
+/**
+ * A shot was fired. Muzzle flash only — the shell itself is a simulated
+ * entity now and draws itself from the projectile array every frame, so
+ * unlike the old cosmetic tracer this hook has nothing to animate.
+ */
+function showMuzzleFlash(from, to, teamId, fromHeight, toHeight, turretDef) {
+  const color = turretDef?.projectileColor ?? game.teams[teamId]?.color ?? 0xffffff;
+  // Nudged toward the target so the flash sits at the barrel rather than in
+  // the middle of the hull.
+  const dx = to.x - from.x;
+  const dz = to.z - from.z;
+  const d = Math.hypot(dx, dz) || 1;
+  const x = from.x + (dx / d) * 1.6;
+  const z = from.z + (dz / d) * 1.6;
+  projectileFx.spawnMuzzleFlash(
+    x,
+    heightmap.heightAt(x, z) + fromHeight,
+    z,
+    color,
+    turretDef?.damage
+  );
+  audio.playAt('weaponFire', x, heightmap.heightAt(x, z) + fromHeight, z, { calibre: turretDef?.damage });
+}
+
+/**
+ * One engine loop per live, moving-capable vehicle. Entirely render-side: it
+ * only reads `vehicles.instances` (never writes) and keys loops on vehicle
+ * id, reaping any whose vehicle is no longer in that array — the same
+ * liveness test the projectile/bounty render pools already use, just applied
+ * to audio.js's own key set instead of a local one.
+ *
+ * `immobile` (vehicleController.js — true only while `mode === 'deploying'`)
+ * is excluded: a base station mid-flatten has no speed to react to, and an
+ * engine drone under a stationary deploy animation would just be noise.
+ */
+function updateEngineAudio(dt) {
+  const live = new Set();
+  for (const v of vehicles.instances) {
+    if (v.dead || v.immobile) continue;
+    live.add(v.id);
+    // Heavier vehicles idle lower — the same weight number trackMask.js
+    // already reads to decide how dark a track a vehicle leaves.
+    const baseHz = THREE.MathUtils.clamp(260 - v.def.weight * 14, 55, 220);
+    const speedFrac = v.def.speed > 0 ? Math.min(1, v.speed / v.def.speed) : 0;
+    audio.updateEngineLoop(v.id, v.group, baseHz, speedFrac, dt);
+  }
+  for (const key of audio.activeLoopKeys()) {
+    if (!live.has(key)) audio.stopEngineLoop(key);
+  }
+}
+
+/**
+ * A shell landed. The single seam between the simulation and everything that
+ * happens as a consequence of an impact — explosion, light, debris, and (for
+ * a ground hit) the crater and scorch mark.
+ */
+function handleImpact(impact) {
+  projectileFx.spawnImpact(impact, world.atmosphere.params.elevation);
+  // Same sqrt(damage/REFERENCE_DAMAGE) shape Craters.shapeFor uses to size a
+  // crater, so the bang and the hole agree — see synth.js's explosion() header.
+  const intensity = Math.sqrt(Math.max(0.2, (impact.damage ?? 20) / 20));
+  audio.playAt(
+    impact.ground ? 'explosionGround' : 'explosionHull',
+    impact.x,
+    impact.y,
+    impact.z,
+    { intensity }
+  );
+  if (!impact.ground) return;
+
+  // Only a ground hit scars the ground. A shell that hit a hull spent itself
+  // on armour; the wreck it leaves is `leaveWreckage`'s business.
+  //
+  // The crater is simulation state and the scorch is not, but they are sized
+  // off the same shape so the burn always matches the hole it surrounds —
+  // deriving the scorch radius independently is how the two drift apart.
+  const tier = game.teams[impact.teamId]?.weaponTier ?? 0;
+  const record = craters.dig(impact.x, impact.z, impact.damage, tier);
+  const shape = record ?? Craters.shapeFor(impact.damage, tier);
+  // Light weapons leave no crater but still blacken the ground, so the scorch
+  // falls back to a small fixed radius rather than being skipped with it.
+  const scorchRadius = shape ? shape.radius * 1.8 : 2.2;
+  world.scorchMask.stamp(impact.x, impact.z, scorchRadius, shape ? 0.95 : 0.5);
 }
 
 /**
@@ -1390,14 +1546,64 @@ const repairController = new RepairController({
   vehicles, structures, heightmap, game, facilityControl,
 });
 const trafficController = new TrafficController({ vehicles });
-const combatController = new CombatController({
+// Shells in flight. Constructed before combatController because that is what
+// hands shells to it — and after `entities`, since a shell's arrival is what
+// queues a kill now.
+const projectiles = new Projectiles({
   vehicles,
   structures,
   heightmap,
   entities,
   game,
-  onShot: showTracer,
+  onImpact: handleImpact,
 });
+const combatController = new CombatController({
+  vehicles,
+  structures,
+  heightmap,
+  game,
+  projectiles,
+  onShot: showMuzzleFlash,
+});
+
+// Salvage coins. Simulation state (they are credits), with the coin mesh and
+// the HUD flourish on the render side — see vehicles/bounty.js.
+const bountyFx = new BountyFx(world.scene, heightmap);
+const creditBurst = new CreditBurst(hud.creditsValue);
+const bounties = new Bounties({
+  vehicles,
+  game,
+  onCollected: handleBountyCollected,
+});
+
+/**
+ * A coin was picked up. The credits are already in the team's account by the
+ * time this runs — this only decides whether to make a fuss about it.
+ */
+function handleBountyCollected(coin, team, collector) {
+  // Only the local player's own collections get the flourish. An AI hoovering
+  // up coins across the map would otherwise spray the player's HUD with
+  // credits it never received.
+  if (team.id !== game.localTeamId) return;
+  const anchor = collector.group.position;
+  _burstAnchor.set(anchor.x, heightmap.heightAt(anchor.x, anchor.z) + 3, anchor.z);
+  _burstAnchor.project(camera);
+  // z > 1 is behind the camera, where the projected coordinates mirror into
+  // nonsense — same guard radialMenu's `_reposition` uses.
+  const screen =
+    _burstAnchor.z > 1
+      ? null
+      : {
+          x: (_burstAnchor.x * 0.5 + 0.5) * window.innerWidth,
+          y: (-_burstAnchor.y * 0.5 + 0.5) * window.innerHeight,
+        };
+  creditBurst.play(coin.value, screen);
+  audio.playAt('coinPickup', anchor.x, heightmap.heightAt(anchor.x, anchor.z) + 1, anchor.z);
+}
+
+/** Scratch vector for the projection above — allocating one per coin would
+ * churn garbage in the middle of a fight. */
+const _burstAnchor = new THREE.Vector3();
 
 // ---- destroy pipeline: every system that owns instance-keyed state
 // registers its own cleanup hook, in the order it needs to run.
@@ -1418,6 +1624,20 @@ entities.onDestroy((inst) => {
 // The record of what died here, placed while the instance still knows where
 // it was — vehicles.remove/structures.remove below drop that.
 entities.onDestroy((inst) => leaveWreckage(inst));
+// The death sound, placed the same tick and for the same reason as the wreck
+// above: the instance still knows where it was and how big it was.
+entities.onDestroy((inst) => {
+  const p = inst.x !== undefined ? { x: inst.x, z: inst.z } : inst.group.position;
+  const scale = inst.kind === 'structure' ? 2.2 : Math.max(0.6, (inst.def.dims?.hullLength ?? 5) * 0.18);
+  audio.playAt('destroyed', p.x, heightmap.heightAt(p.x, p.z) + 1, p.z, { scale });
+});
+// The salvage, dropped in the same breath and for the same reason: the
+// instance still knows where it was and how many kills it had earned, and
+// vehicles.remove() below takes both away.
+entities.onDestroy((inst) => {
+  const coin = bounties.drop(inst);
+  if (coin) audio.playAt('coinSpawn', coin.x, heightmap.heightAt(coin.x, coin.z) + 2, coin.z);
+});
 // Match record. Counted here rather than at the kill site so *every* cause of
 // death lands in the tally, not just weapons.
 entities.onDestroy((inst) => {
@@ -1425,6 +1645,15 @@ entities.onDestroy((inst) => {
   if (!stats) return;
   if (inst.kind === 'structure') stats.structuresLost++;
   else stats.unitsLost++;
+  // The one stat that genuinely needs capturing at destroy time rather than at
+  // its increment site: the Statistics screen lists earnings *per harvester*,
+  // and a per-unit list can only be appended to when a unit leaves. Live
+  // harvesters are read straight off vehicles.instances instead, so this holds
+  // exactly the ones that would otherwise vanish. Safe here because the
+  // removal hook below runs last, so creditsDelivered is still readable.
+  if (inst.kind === 'vehicle' && inst.def?.id === 'crystal-harvester') {
+    stats.deadHarvesterEarnings.push(inst.creditsDelivered ?? 0);
+  }
 });
 // The radial menu holds a direct reference, not a lookup — nothing else
 // would ever notice it's pointed at a dead instance.
@@ -1512,8 +1741,10 @@ function checkMatchEnd() {
 
   game.matchOver = true;
   const winner = alive[0] ?? null;
+  const playerWon = !!winner?.isHuman;
+  audio.playGlobal(playerWon ? 'victory' : 'defeat');
   game.matchEndScreen.show({
-    playerWon: !!winner?.isHuman,
+    playerWon,
     winner,
     teams: game.teams,
   });
@@ -1554,7 +1785,7 @@ const navGrid = new NavGrid(heightmap);
 // `entities` is here for the deployDefense intent, which consumes the vehicle
 // it deploys from and must do so through the destroy pipeline rather than
 // splicing an array another system may still be walking.
-const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit, navGrid, entities, facilityControl };
+const commandContext = { vehicles, world, heightmap, terraform, structures, game, produceUnit, navGrid, entities, facilityControl, onFlare: showFlare };
 
 /**
  * One line of ground-control status for the radial menu: how many vehicles are
@@ -1584,7 +1815,7 @@ function clearanceSubtitle(instance) {
  * have.
  */
 function snapshotContext() {
-  return { world, heightmap, terraform, vehicles, structures, game, harvesterAI };
+  return { world, heightmap, terraform, vehicles, structures, game, harvesterAI, projectiles, craters, bounties };
 }
 
 const vehiclePicker = new VehiclePicker(VEHICLE_CATALOG, {
@@ -1727,6 +1958,24 @@ function endOnlineMatch(reason) {
 }
 
 /**
+ * Record who is holding which seat, for the Statistics screen.
+ *
+ * Fed from all three places the server describes the roster — `welcome` on
+ * connect, `begin` when the match starts, and `playerJoined` for anyone who
+ * arrives after. Purely additive: a name is never cleared when a player drops,
+ * because their team's stats stay on the board and an anonymous row would be
+ * worse than a name that has stepped away.
+ *
+ * @param {Array<{teamId: number, displayName: string}>|undefined} players
+ */
+function rememberPlayerNames(players) {
+  for (const p of players ?? []) {
+    if (p?.teamId == null || !p.displayName) continue;
+    game.playerNames[p.teamId] = p.displayName;
+  }
+}
+
+/**
  * Join a match and hand the simulation's clock to the lockstep session.
  *
  * Everything about the world is derived, not received: the seed comes from the
@@ -1745,11 +1994,20 @@ async function startOnlineMatch(matchId, difficulty) {
     console.error('startOnlineMatch called while a match is already live — ignoring.');
     return;
   }
+  // Cleared per match rather than in beginMatch: the roster arrives with
+  // `welcome`, which lands *before* beginMatch runs, so clearing there would
+  // wipe the names this match just learned. Seats are reassigned every match,
+  // so a stale entry would put the previous opponent's name on a new player.
+  game.playerNames = {};
   const { match: info } = await api.getMatch(matchId);
   const client = new MatchClient(matchId, {
     // The server holds every client at the gate until the roster is complete;
     // reporting input before that is what used to deadlock the match.
     onBegin: (msg) => {
+      // Reconciled here as well as at connect: `begin` carries the final
+      // roster, which is the first point a client that joined early knows who
+      // else ended up in the match.
+      rememberPlayerNames(msg.players);
       if (!match || match.begun) return;
       match.begun = true;
       if (msg.resuming) {
@@ -1792,6 +2050,13 @@ async function startOnlineMatch(matchId, difficulty) {
       // boundary, which is the one moment both machines agree on.
       if (match) match.pendingSnapshot = msg;
     },
+    // The server has always sent this; nothing read it until the Statistics
+    // screen needed a name for each seat. Deliberately no toast — the arrival
+    // is already visible in the lobby, and onPlayerLeft below toasts because a
+    // *departure* pauses the match, which is a different kind of news.
+    onPlayerJoined: (msg) => {
+      rememberPlayerNames([msg]);
+    },
     onPlayerLeft: (msg) => {
       // Their team is not handed to an AI commander — that would be a sensible
       // follow-up but is not implemented. The match pauses on them instead (see
@@ -1824,6 +2089,7 @@ async function startOnlineMatch(matchId, difficulty) {
 
   game.mode = 'multiplayer-online';
   game.localTeamId = welcome.teamId;
+  rememberPlayerNames(welcome.players);
 
   // The match's vehicle set, pinned from the host's loadout when the lobby was
   // created and relayed identically to every peer. Every client validates the
@@ -1958,7 +2224,7 @@ function onMatchTurn(inputs, turn) {
   }
 
   if (turn % HASH_EVERY_TURNS === 0) {
-    const hash = hashState({ vehicles, structures, game }, simClock.tick);
+    const hash = hashState({ vehicles, structures, game, projectiles, bounties, blooms: world.blooms }, simClock.tick);
     // Kept as well as sent: the on-screen readout shows this turn-aligned
     // value so two devices are always comparing the same simulated moment.
     match.checkpoint = { turn, hash: hash.split(':')[1] ?? hash };
@@ -2017,6 +2283,7 @@ function isSkirmish() {
 function beginMatch(difficulty) {
   game.difficulty = difficulty;
   game.matchOver = false;
+  audio.playGlobal('matchStart');
   // Re-evaluated per match, not once at startup: `game.mode` is what decides
   // whether author-built vehicles are allowed, and it is only final by the
   // time a match actually begins. Online matches get the built-in catalog back
@@ -2025,6 +2292,16 @@ function beginMatch(difficulty) {
   // A match is the unit of simulated time — tick 0 is its first step. Every
   // ban, threat memory and (later) lockstep turn number is relative to this.
   resetSimClock(0);
+  // Shell ids restart with the match for the same reason the clock does: they
+  // are only ever compared within one, and a save from a long session should
+  // not carry ids into a fresh one.
+  projectiles.clear();
+  projectileFx.clear();
+  resetProjectileIds();
+  craters.clear();
+  bounties.clear();
+  bountyFx.clear();
+  resetCoinIds();
   // Sandbox is a one-team match; Multiplayer AI adds one team per AI opponent.
   game.teams = createTeams(game.aiMatch?.teamCount ?? 0);
 
@@ -2426,6 +2703,16 @@ function simTick(dt) {
   // queued for the single flush below rather than removed underneath the
   // movement step that is about to run.
   p.time('combatController', () => combatController.update(dt));
+  // Immediately after the guns, and before the fleet moves: a shell resolves
+  // against where things are *this* frame, and any resulting death is queued
+  // for the single flush below rather than removed underneath the movement
+  // step that is about to run — the same placement, and the same reasoning,
+  // that hitscan resolution used to have inside combatController itself.
+  p.time('projectiles', () => projectiles.update(dt));
+  // After the shells, so a coin dropped by a kill this tick is claimable from
+  // the next one — and before entities.flush(), so a collector destroyed on
+  // the same tick it drove over a coin has already been paid.
+  p.time('bounties', () => bounties.update());
   p.time('vehicles', () => {
     const headlights = headlightsWanted();
     vehicles.update(dt, heightmap, headlights, camera);
@@ -2500,6 +2787,13 @@ function simTick(dt) {
     }
     mask.decay(dt);
     mask.commit();
+
+    // Scorch decays on the same tick as tracks — same shape of mask, same
+    // reason it belongs in the sim step rather than the render one: the fade
+    // is expressed in simulated seconds so it runs at the same rate under
+    // window.__step's headless fast-forward as it does in real play.
+    world.scorchMask.decay(dt);
+    world.scorchMask.commit();
   });
 
 
@@ -2514,7 +2808,16 @@ function simTick(dt) {
     checkMatchEnd();
     updateRespawns(dt);
   });
-  p.time('radialMenu', () => radialMenu.update());
+  p.time('radialMenu', () => {
+    // A field has no entities.onDestroy hook to close the menu for it (that
+    // pipeline is vehicles/structures only), so the one case radialMenu.update
+    // can't already catch — a base pad poured over the field while its menu
+    // is open — is handled here instead.
+    if (radialMenu.isOpen && radialMenu.instance.kind === 'field' && radialMenu.instance.dead) {
+      radialMenu.close();
+    }
+    radialMenu.update();
+  });
 
   // Before the render-only early return, same reasoning as updateRespawns
   // above: this has to fire correctly under window.__step's headless
@@ -2625,7 +2928,17 @@ function renderTick(dt) {
     matchStallSeconds = 0;
   }
 
-  p.time('updateTracers', () => updateTracers(dt));
+  // Shell visuals. Driven by real frame time, not sim time: the shells' own
+  // positions come from the fixed-step sim, but how their flashes and debris
+  // decay is presentation and should follow the viewer's clock.
+  p.time('projectileFx', () => {
+    projectileFx.updateShells(projectiles.instances, world.atmosphere.params.elevation);
+    projectileFx.updateEffects(dt);
+    updateFlares(dt);
+    bountyFx.update(bounties.instances, dt, world.atmosphere.params.elevation);
+  });
+  p.time('engineAudio', () => updateEngineAudio(dt));
+  p.time('ambienceAudio', () => audio.updateAmbience(nightFactor(world.atmosphere.params.elevation)));
   // Per-frame, unlike the rest of the HUD's half-second poll — see
   // Hud.updateHealth for why health specifically cannot wait.
   p.time('hudHealth', () => hud.updateHealth(vehicles.active));
@@ -2655,6 +2968,9 @@ function renderTick(dt) {
     );
   });
   p.time('vehiclePicker', () => vehiclePicker.update(dt));
+  // Only does anything while the Statistics page is the one showing — see
+  // Menu.update. Render-side, like everything else in this loop.
+  p.time('menu', () => menu.update(dt));
   p.time('render', () => renderer.render(world.scene, camera));
   perfHud.record(dt);
   perfHud.render(renderer, tickProfiler);
@@ -2667,6 +2983,10 @@ function renderTick(dt) {
     setFogDensity: (density) => { world.atmosphere.params.fogDensity = density; },
     baseFogDensity: BASE_FOG_DENSITY,
   });
+  // One quality signal, not two: audio's voice budget and panning model
+  // shrink on exactly the same "this device is struggling" verdict the
+  // renderer already reached, rather than running a second detector.
+  audio.setLowPower(autoQuality.low);
 
   frames++;
   statsTimer += dt;
@@ -2839,7 +3159,11 @@ window.__step = (seconds, dt = SIM_DT) => {
  * disagree, the first question is always "disagree about what" — and being able
  * to read and diff the hash from a console on each side is the cheapest way in.
  */
-window.__hashState = () => hashState({ vehicles, structures, game }, simClock.tick);
+window.__hashState = () => hashState({ vehicles, structures, game, projectiles, bounties, blooms: world.blooms }, simClock.tick);
+// Console/e2e debug access to the audio engine — mirrors every other
+// window.__ hook here, and is how a headless smoke test confirms the
+// AudioContext actually reached 'running' rather than staying suspended.
+window.__audio = audio;
 
 /**
  * Issue player intent from the console, exactly as a click would.
@@ -2890,7 +3214,7 @@ window.__determinismCheck = ({ ticks = 900, sampleEvery = 60 } = {}) => {
   if (!game.teams?.length) return { ok: false, error: 'Start a match first.' };
 
   const baseline = JSON.stringify(serialize(snapshotContext()));
-  const hashCtx = { vehicles, structures, game };
+  const hashCtx = { vehicles, structures, game, projectiles, bounties, blooms: world.blooms };
 
   const run = () => {
     deserialize(snapshotContext(), JSON.parse(baseline));
@@ -3004,7 +3328,7 @@ Object.assign(window, {
   syncQueueIcons, queueIcons, checkBaseRepositioning,
   updatePlacementPreview, placementPreview, snapToGrid, footprintSize, resizeFootprintOutline,
   entities, pendingRespawns, pickSelectable, combatController, leaveWreckage,
-  showTracer, updateTracers, tracers, tick, perfHud,
+  projectiles, projectileFx, tick, perfHud,
 });
 
 // docs/performance-optimization-plan.md Phase 0 — `?perf=1` shows the HUD

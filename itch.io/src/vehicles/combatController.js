@@ -1,14 +1,25 @@
 /**
  * Weapons: who can see whom, who is shooting whom, and what that costs them.
  *
- * Resolution is **hitscan** — a shot that clears line of sight lands the same
- * tick it is fired. At a 60-90 unit engagement range a real projectile would
- * be in flight about a fifth of a second, which is not long enough to dodge
- * and not long enough to read, but is long enough to need a per-frame
- * projectile-versus-everything loop and to make "who killed what" ambiguous
- * when a shooter dies mid-flight. The travelling tracer is therefore purely
- * cosmetic: it is drawn after the damage it represents has already been
- * applied, and nothing reads it back.
+ * Resolution is **ballistic**. Pulling the trigger launches a shell into
+ * `projectiles.js`, which carries it to its impact point over several ticks
+ * and applies the damage there. This file therefore decides three things and
+ * then lets go: whether a shot is taken at all, whether it will hit, and where
+ * it is aimed.
+ *
+ * It used to be hitscan, and the header here used to argue for that on the
+ * grounds that a travelling shell needs a per-tick loop and makes kill credit
+ * ambiguous when a shooter dies mid-flight. `projectiles.js`'s own header
+ * answers both in detail; the short version is that a shell decided at launch
+ * needs no per-tick collision search, and copies its shooter's identity out at
+ * launch so it never has to dereference an instance that may since have died.
+ *
+ * **Hit and miss are decided here, at launch.** `hitChance` scores the shot
+ * from the shooter's rank, its team's weapon tier and the range, and
+ * `shotRoll` turns that into a yes or no. A miss is not a shot that misses by
+ * accident — it is aimed at a point on the ground beside the target, so the
+ * shell visibly falls wide and craters where it lands. That is the whole
+ * reason the decision happens at launch rather than at arrival.
  *
  * The same targeting discipline as everything else autonomous in this
  * codebase (see harvesterAI's header): a target is a *reference that can die*,
@@ -20,6 +31,8 @@
 // Simulated time, never wall clock — threat memory is simulation state that
 // must advance with the sim and match across clients. See core/simClock.js.
 import { simClock } from '../core/simClock.js';
+import { shotRoll, shotDamage } from './projectiles.js';
+import { rankOfInstance, ACCURACY_PER_RANK } from './veterancy.js';
 
 // Reacquisition is the expensive part (an O(targets) scan plus a line-of-sight
 // march each), so it runs on a cadence rather than per frame, staggered across
@@ -49,25 +62,52 @@ const DEFAULT_TARGET_HEIGHT = 1.5;
 // between shots; short enough that it goes back to work once genuinely clear.
 const THREAT_MEMORY = 6;
 
+// --- accuracy ---------------------------------------------------------------
+// A shot's chance to connect. Deliberately well below certainty at the base:
+// the whole point of a travelling shell is that some of them land in the dirt,
+// and a 95% base rate would make craters a curiosity rather than a feature.
+const BASE_ACCURACY = 0.6;
+// Per team weapon tier (core/team.js's WEAPON_TIERS). The tier already divides
+// the fire interval; this makes it buy precision as well as rate, so upgrading
+// reads as "my guns got better" rather than only "my guns got faster".
+const ACCURACY_PER_WEAPON_TIER = 0.1;
+// How much of the base accuracy is lost at maximum range. Applied as a scale
+// rather than a subtraction so rank and tier bonuses degrade with distance too
+// — an elite crew is still better at long range, just not immune to it.
+const RANGE_ACCURACY_FALLOFF = 0.45;
+// Floor and ceiling. The ceiling exists so no amount of stacking makes a unit
+// unmissable; the floor so a maximum-range shot from a green crew is still
+// worth taking.
+const MIN_ACCURACY = 0.15;
+const MAX_ACCURACY = 0.95;
+// How far wide a miss lands, as a fraction of the distance to the target. Big
+// enough that the shell visibly goes somewhere else, small enough that it
+// still reads as a shot at *that* target rather than at nothing.
+const MISS_SPREAD = 0.12;
+// A miss never lands closer to the target than this, in world units — without
+// it a close-range miss would land inside the target's own footprint and read
+// as a hit that did no damage.
+const MIN_MISS_OFFSET = 2.5;
+
 export class CombatController {
   /**
    * @param {object} opts
    * @param {object} opts.vehicles VehicleController
    * @param {object} opts.structures StructureController
    * @param {object} opts.heightmap for line-of-sight against terrain
-   * @param {object} opts.entities destroy pipeline — a kill is queued, never
-   *   spliced here, so it lands at the tick's single flush point like every
-   *   other death
    * @param {object} opts.game for teamOf/teams
-   * @param {(from, to, teamId) => void} [opts.onShot] cosmetic hook; the shot
-   *   has already been resolved by the time this is called
+   * @param {object} opts.projectiles the Projectiles controller a fired shell
+   *   is handed to. Damage is applied there, on arrival, not here.
+   * @param {(from, to, teamId) => void} [opts.onShot] muzzle-flash hook, fired
+   *   at launch. The shell's own travel and impact visuals come from the
+   *   projectile array, not from this.
    */
-  constructor({ vehicles, structures, heightmap, entities, game, onShot = null }) {
+  constructor({ vehicles, structures, heightmap, game, projectiles, onShot = null }) {
     this.vehicles = vehicles;
     this.structures = structures;
     this.heightmap = heightmap;
-    this.entities = entities;
     this.game = game;
+    this.projectiles = projectiles;
     this.onShot = onShot;
     this._tick = 0;
   }
@@ -230,37 +270,103 @@ export class CombatController {
   _fire(inst, target) {
     // Team-wide Weapon Tier upgrade (see core/team.js) — divides the interval,
     // not the damage, so a fully upgraded team's guns are simply faster, not
-    // individually harder-hitting.
-    inst._fireCooldown = inst.def.turret.fireInterval / this.game.teamOf(inst).fireRateMultiplier;
+    // individually harder-hitting. It does buy accuracy, in `hitChance`.
+    const team = this.game.teamOf(inst);
+    inst._fireCooldown = inst.def.turret.fireInterval / team.fireRateMultiplier;
 
-    // Tell the victim it is under fire, and from where. Read by harvesterAI's
-    // FLEEING state; anything that ignores these fields simply stands its
-    // ground, which is the right default for something armed.
+    // Tell the victim it is under fire, and from where — at *launch*, not at
+    // impact. Read by harvesterAI's FLEEING state, and a harvester should
+    // start running when it is shot at, not a third of a second later when the
+    // shell happens to land. Anything that ignores these fields simply stands
+    // its ground, which is the right default for something armed.
     target.threatUntil = simClock.time + THREAT_MEMORY;
     target.threatFrom = { x: inst.group.position.x, z: inst.group.position.z };
 
-    const killed = target.takeDamage(inst.def.turret.damage);
-    if (killed) {
-      // Credited to the shooter for its Active-card "units destroyed" stat.
-      // Counted at the kill site (not the destroy pipeline) precisely because
-      // only here is the responsible vehicle known.
-      inst.kills = (inst.kills ?? 0) + 1;
-      // Queued, not removed: the destroy pipeline's single flush point is what
-      // guarantees nothing is spliced out of an array another system is still
-      // walking this tick.
-      this.entities.queueDestroy(target);
-      inst.combatTarget = null;
+    const from = inst.group.position;
+    const to = targetPoint(target);
+    const dist = flatDistance(from, to);
+    const tHeight = targetHeight(target);
+
+    // One roll, one shot. `simClock.tick` is in the key so a turret firing at
+    // the same target every second doesn't get the same answer every time;
+    // shooter and target ids are in it so two units firing on the same tick
+    // don't share a fate.
+    const chance = hitChance(inst, team, dist);
+    const willHit = shotRoll(inst.id, target.id, simClock.tick, 'hit') < chance;
+
+    let aimX = to.x;
+    let aimZ = to.z;
+    let aimY = this.heightmap.heightAt(to.x, to.z) + tHeight;
+
+    if (!willHit) {
+      // Aim the miss. A second, differently-salted roll picks which way it
+      // goes, so the direction is uncorrelated with the hit decision — reusing
+      // the same number would make every miss from a given shooter fall on the
+      // same side.
+      const angle = shotRoll(inst.id, target.id, simClock.tick, 'dir') * Math.PI * 2;
+      const spread = Math.max(MIN_MISS_OFFSET, dist * MISS_SPREAD);
+      aimX = to.x + Math.cos(angle) * spread;
+      aimZ = to.z + Math.sin(angle) * spread;
+      // A miss lands on the ground, not at turret height — that is what makes
+      // it crater.
+      aimY = this.heightmap.heightAt(aimX, aimZ);
     }
 
+    this.projectiles.spawn({
+      shooter: inst,
+      target,
+      willHit,
+      // Rank's damage bonus is baked in at launch alongside everything else the
+      // shell carries, so a crew promoted mid-flight doesn't retroactively
+      // strengthen a shell already in the air.
+      damage: shotDamage(inst),
+      turretDef: inst.def.turret,
+      muzzleHeight: inst.def.turret.muzzleHeight ?? DEFAULT_TARGET_HEIGHT,
+      targetHeight: tHeight,
+      aimX,
+      aimZ,
+      aimY,
+    });
+
     this.onShot?.(
-      inst.group.position,
-      targetPoint(target),
+      from,
+      to,
       inst.teamId,
       inst.def.turret.muzzleHeight ?? DEFAULT_TARGET_HEIGHT,
-      targetHeight(target),
+      tHeight,
       inst.def.turret
     );
   }
+}
+
+/**
+ * How likely this shot is to connect, in [MIN_ACCURACY, MAX_ACCURACY].
+ *
+ * Exported and pure — it takes the shooter, its team and a distance, and reads
+ * nothing else — so the tests can assert the shape of the curve directly
+ * rather than inferring it from observed hit rates.
+ *
+ * The three terms compose deliberately: rank and tier are *added* to the base,
+ * then the whole thing is *scaled* by range. Adding the range term instead
+ * would let a high enough rank cancel distance out entirely, which would make
+ * an elite unit as accurate at the edge of its range as at point blank.
+ *
+ * @param {object} inst the shooter
+ * @param {object} team the shooter's team, for `weaponTier`
+ * @param {number} dist flat distance to the target, in world units
+ */
+export function hitChance(inst, team, dist) {
+  const range = inst.def?.turret?.range ?? 1;
+  const rank = rankOfInstance(inst);
+  const tier = team?.weaponTier ?? 0;
+
+  const skill = BASE_ACCURACY + rank * ACCURACY_PER_RANK + tier * ACCURACY_PER_WEAPON_TIER;
+  // Clamped so a target held inside RANGE_HYSTERESIS — i.e. slightly beyond
+  // nominal range — doesn't push the falloff past 1 and invert the curve.
+  const reach = Math.min(1, Math.max(0, dist / range));
+  const chance = skill * (1 - RANGE_ACCURACY_FALLOFF * reach);
+
+  return Math.min(MAX_ACCURACY, Math.max(MIN_ACCURACY, chance));
 }
 
 /**

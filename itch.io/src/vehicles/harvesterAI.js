@@ -52,6 +52,12 @@ const STALL_TIMEOUT = 3; // seconds barely moving in a driving state
 // for a few seconds without being stuck.
 const NO_PROGRESS_TIMEOUT = 6; // seconds without getting closer
 const PROGRESS_EPSILON = 0.5; // world units that count as "closer"
+// How long a mechanical hold (yielding to traffic, or mid-reverse) may go on
+// suppressing the stall and no-progress escapes before it stops counting as
+// deliberate. Comfortably longer than a real three-point turn — several
+// reverse-and-forward cycles — so an honest manoeuvre is never cut short, and
+// far shorter than the freezes this exists to end. See _travel.
+const HOLD_GRACE = 10; // seconds
 const RETRY_PAUSE = 1.5;
 const REVERSE_DURATION = 1.5; // seconds backing off before trying the next detour angle
 const BAN_SECONDS = 45;
@@ -78,6 +84,12 @@ const REPAIR_RETRY_COOLDOWN = 8;
 
 /** Widening, alternating. A straight retry cannot work: the heading is unchanged. */
 const DETOUR_ANGLES = [0.9, -0.9, 1.6, -1.6, 2.4];
+// Angles at or past this offset from the direct bearing point behind the
+// vehicle rather than around the obstacle. A wheeled vehicle has no way to
+// reach one except by reversing into it; a tracked vehicle can pivot to face
+// any bearing without moving at all (see vehicleController.js's tracked
+// sharp-turn branch), so there is no reason to ever send it toward one.
+const TRACKED_DETOUR_LIMIT = Math.PI / 2;
 /**
  * Holding-fix arrival tolerance. The fix itself, and the ring it sits on, are
  * `facilityControl`'s business now — a waiter only needs to get near enough to
@@ -334,16 +346,41 @@ export class HarvesterAI {
     // A field the player picked wins over the driver's own judgement, once.
     let field = this._consumeTargetField(inst);
     if (!field) {
-      // Prefer a healthy, uncrowded field, but fall back to plain nearest if
-      // nothing satisfies both constraints — never let the harvester idle.
+      // Prefer an untouched field over one already being worked, even a
+      // lightly worked one under the crowd cap. Two harvesters filling the
+      // same field at once draw far faster than any field regenerates
+      // (fillRate 48/s each against a regen ceiling of 6/s), and the
+      // low-stock check below only gates *new* assignments — a field already
+      // being drained keeps getting drained past it. Left to plain nearest,
+      // an AI's fixed two-harvester economy routinely converges both onto
+      // the same field and stalls its own income for tens of seconds while
+      // that field claws back from empty. See docs/plans/ai-commander-overhaul.md.
       field = this.world.blooms.nearestTo(inst.group.position.x, inst.group.position.z, {
         minStock: 1,
-        reject: (f) => (s.bans.get(f.id) ?? 0) > now || this._isFieldCrowdedOrLow(f, inst),
+        reject: (f) =>
+          (s.bans.get(f.id) ?? 0) > now ||
+          f.blockedByTeam?.has(inst.teamId) ||
+          this._isFieldCrowdedOrLow(f, inst) ||
+          this._countHarvestersOnField(f, inst) > 0,
       });
+      if (!field) {
+        // No untouched field reachable — sharing one that isn't yet crowded
+        // or low is still better than idling.
+        field = this.world.blooms.nearestTo(inst.group.position.x, inst.group.position.z, {
+          minStock: 1,
+          reject: (f) =>
+            (s.bans.get(f.id) ?? 0) > now ||
+            f.blockedByTeam?.has(inst.teamId) ||
+            this._isFieldCrowdedOrLow(f, inst),
+        });
+      }
       if (!field) {
         field = this.world.blooms.nearestTo(inst.group.position.x, inst.group.position.z, {
           minStock: 1,
-          reject: (f) => (s.bans.get(f.id) ?? 0) > now,
+          // Note this last, most permissive tier still respects a block — a
+          // player-blocked field is never "share anything reachable" either;
+          // only the temporary per-harvester `bans` are given up on here.
+          reject: (f) => (s.bans.get(f.id) ?? 0) > now || f.blockedByTeam?.has(inst.teamId),
         });
       }
     }
@@ -471,8 +508,22 @@ export class HarvesterAI {
     // Drifted off the dock (bumped, slid down a grade) — holding the lock
     // from out here isn't doing anyone any good. Give it up and re-approach
     // properly instead of "unloading" from wherever it ended up.
+    //
+    // Measured against the *dock*, which is the same point `_destination`
+    // defines arrival against — not the building centre. Those are 12 units
+    // apart (`dockOffset`), and measuring arrival from one while releasing
+    // from the other opened a dead band: at 22 from the dock a harvester can
+    // be up to 34 from the centre, so anything landing in (33, 34] was both
+    // "arrived" and "drifted" on the same tick. It then cycled
+    // arrive → _atDock → UNLOADING → release → TO_BASE → arrive, forever,
+    // never issuing an order (so no stall or no-progress timer ever ran) and
+    // never unloading. A real 44-minute match had one team on 0 credits with
+    // its only harvester frozen there, full, 92 units of odometer to its name.
+    // Same reference point on both sides makes the overlap arithmetically
+    // impossible rather than merely narrow.
+    const dock = facility.dock ?? facility;
     const pos = inst.group.position;
-    if (Math.hypot(pos.x - facility.x, pos.z - facility.z) > DOCK_DISTANCE * 1.5) {
+    if (Math.hypot(pos.x - dock.x, pos.z - dock.z) > DOCK_DISTANCE * 1.5) {
       this._releaseDock(facility, inst);
       s.state = TO_BASE;
       s.dest = null;
@@ -486,10 +537,17 @@ export class HarvesterAI {
     s.load -= moved;
     // Credited to the harvester's own team. `_facility()` only ever returns a
     // same-team facility, so the two can never disagree.
-    this.game.teamOf(inst).earn(moved);
+    const team = this.game.teamOf(inst);
+    team.earn(moved);
     // Lifetime tally on the instance (not the states Map) so the vehicle picker
     // and snapshot both read it without reaching into harvesterAI internals.
     inst.creditsDelivered += moved;
+    // And the team-wide harvest total, which earn() above deliberately does not
+    // give us: stats.creditsEarned also counts sell refunds and AI build
+    // refunds, so it is not an answer to "how much did this economy produce".
+    // Tallied here rather than summed from live harvesters later, so a
+    // harvester's contribution outlives the harvester.
+    team.stats.harvesterEarningsTotal += moved;
 
     if (s.load <= 1e-6) {
       s.load = 0;
@@ -782,6 +840,15 @@ export class HarvesterAI {
       return false;
     }
     if (inst.health > inst.def.maxHealth * REPAIR_RETREAT_FRACTION) return false;
+    // Finish the delivery already under way. Breaking off from TO_BASE throws
+    // away a completed round trip and takes the load out of the economy for as
+    // long as the bay queue is — measured at eight to ten minutes with a
+    // handful of damaged scouts ahead of it, during which the team earned
+    // nothing and its credits drained paying for *their* repairs. The
+    // unloading itself is a few seconds away, and IDLE re-checks this the
+    // moment it is done, so the repair is deferred rather than skipped.
+    // Danger is a separate question and FLEEING still owns it.
+    if (s.state === TO_BASE && s.load > 0) return false;
     // The vehicle the player is driving stays under their hand, same carve-out
     // repairController's auto-queue makes.
     if (inst === this.vehicles.active) return false;
@@ -874,11 +941,19 @@ export class HarvesterAI {
     }
 
     // Reached a detour waypoint: drop it and aim at the real goal again.
+    //
+    // Deliberately does *not* reset `s.detours`. Reaching a waypoint means the
+    // manoeuvre worked, not that the leg is going anywhere — and a harvester
+    // wedged short of its field can reach detour waypoints all day. Resetting
+    // here put the ladder back to zero on every cycle, so it never reached
+    // DETOUR_ANGLES.length and the give-up below it (ban the field, go
+    // somewhere else) was unreachable. Amber's harvester rode that loop for the
+    // whole match. The ladder is reset by *progress* instead — see the
+    // bestDistance branch at the end of this function.
     if (s.waypoint) {
       const wd = Math.hypot(s.waypoint.x - pos.x, s.waypoint.z - pos.z);
       if (wd <= WAYPOINT_RADIUS) {
         s.waypoint = null;
-        s.detours = 0;
         this._order(inst, s, dest);
         return;
       }
@@ -902,7 +977,25 @@ export class HarvesterAI {
     // Fleeing joins them for the same reason: a harvester that has run home and
     // is deliberately holding station under its facility's protection is doing
     // precisely what it should, and a detour would send it back out into fire.
-    const holding = inst.yielding || inst.reverseTimer != null || s.state === FLEEING;
+    // ...but a manoeuvre is only a manoeuvre for so long. Both of the
+    // mechanical holds can re-arm themselves indefinitely — `yielding` while
+    // the obstacle stays put, `reverseTimer` from driveToTarget's sharp-turn
+    // escape — and while either is true *both* escapes below are switched off,
+    // which makes an unresolvable one permanent rather than slow. A harvester
+    // was found frozen exactly this way for fourteen simulated minutes: order
+    // live, speed 0, odometer unmoved, and both timers reading 0.00 because
+    // `reverseTimer` was re-armed before it could ever expire. So they get a
+    // grace period, generous against a real three-point turn (~1.2s of reverse
+    // plus a beat of forward travel, a few times over) and far short of a
+    // freeze.
+    //
+    // FLEEING is deliberately *not* bounded. That one is not a manoeuvre in
+    // progress but a standing decision — a harvester holding station under its
+    // facility's guns is doing precisely what it should, for as long as the
+    // threat lasts, and timing it out would send it back into fire.
+    const mechanicalHold = inst.yielding || inst.reverseTimer != null;
+    s.holdTimer = mechanicalHold ? (s.holdTimer ?? 0) + dt : 0;
+    const holding = s.state === FLEEING || (mechanicalHold && s.holdTimer < HOLD_GRACE);
     s.stallTimer = !holding && inst.speed < STALL_SPEED ? s.stallTimer + dt : 0;
     if (s.stallTimer > STALL_TIMEOUT) {
       s.stallTimer = 0;
@@ -933,10 +1026,30 @@ export class HarvesterAI {
     }
 
     if (holding) {
-      s.noProgressTimer = 0; // a deliberate hold is not a failure to progress
+      // A deliberate hold is not a failure to progress — but it is not evidence
+      // of progress either, so the timer *pauses* here rather than resetting.
+      //
+      // That distinction is the whole fix. `holding` re-arms: driveToTarget's
+      // terrain-blocked escape reverses for REVERSE_DURATION, the reverse ends,
+      // the vehicle drives back at the same unclimbable grade, and it reverses
+      // again — a two-second cycle. Zeroing the counter on every cycle meant it
+      // never got past a few tenths of a second, so a vehicle bouncing off one
+      // slope forever read as perfectly healthy. Amber's harvester did exactly
+      // that: forty minutes, full speed, six units of ground covered, `stall`
+      // and `noProgress` both sat at 0.00 the entire time. Pausing instead
+      // accumulates the moving-but-getting-nowhere fraction of each cycle, so
+      // the escalation arrives in a minute or so instead of never.
+      //
+      // The bound in `holding` above and this are complementary, not
+      // duplicates: that one catches a hold that never *ends*, this one catches
+      // a hold that ends and immediately starts again.
     } else if (s.bestDistance == null || d < s.bestDistance - PROGRESS_EPSILON) {
       s.bestDistance = d;
       s.noProgressTimer = 0;
+      // Closer than this leg has ever been: the detours are working, so the
+      // ladder starts again from the direct line. This is the only thing that
+      // resets it, which is what keeps it monotonic when nothing is working.
+      s.detours = 0;
     } else {
       s.noProgressTimer = (s.noProgressTimer ?? 0) + dt;
       if (s.noProgressTimer > NO_PROGRESS_TIMEOUT) {
@@ -965,12 +1078,25 @@ export class HarvesterAI {
     // it, so grind gets the reverse immediately instead of waiting for the
     // second abandon.
     const alreadyTrying = s.detours > 0 || !!s.waypoint;
+    // Tracked vehicles never take this reverse: they can pivot to face any
+    // heading without moving, so backing off first buys nothing they can't
+    // already do by turning toward the next detour angle in place.
     if (
       (alreadyTrying || inst.blocked) &&
       inst.reverseTimer == null &&
+      !inst.tracked &&
       !hasVehicleBehind(inst, this.vehicles.instances)
     ) {
       inst.beginReverse(REVERSE_DURATION);
+    }
+
+    if (inst.tracked && s.detours < DETOUR_ANGLES.length && Math.abs(DETOUR_ANGLES[s.detours]) >= TRACKED_DETOUR_LIMIT) {
+      // Skip the backward-hemisphere angle(s) entirely for tracked vehicles —
+      // retry immediately with the next one rather than waypointing them
+      // somewhere they'd have to reverse to reach.
+      s.detours++;
+      s.retryTimer = 0.2;
+      return;
     }
 
     if (s.detours < DETOUR_ANGLES.length) {

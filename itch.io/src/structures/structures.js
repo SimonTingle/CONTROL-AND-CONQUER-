@@ -36,7 +36,7 @@ export const STRUCTURE_CATALOG = [
     // command, so adding a unit here is the whole change — no new command, no
     // AI change (aiCommander picks by tag off the produced defs). Economy
     // only — military production moved to armed-factory, below.
-    produces: ['crystal-harvester'],
+    produces: ['crystal-harvester', 'tracked-harvester'],
     /** The bootstrap: without this the first harvester could never be afforded.
      * Ships `produces[0]` — the economy unit, never a combat one. */
     freeUnitOnComplete: true,
@@ -84,7 +84,11 @@ export const STRUCTURE_CATALOG = [
     // Light Tank checked first: while under its own cap, aiCommander's
     // per-structure produce scan (_tryBuildUnit) prefers it over topping up
     // scouts, since produces order is the tie-break within one structure.
-    produces: ['gun-platform', 'scout-buggy', 'field-engineer'],
+    // Tracked options appended last: they cost more than every wheeled combat
+    // unit above, so this keeps the AI's per-structure tie-break preferring
+    // the cheaper wheeled units by default while still making the tracked
+    // ones buildable.
+    produces: ['gun-platform', 'scout-buggy', 'field-engineer', 'tracked-tank', 'heavy-tracked-tank'],
     // Deliberately no freeUnitOnComplete — unlike the harvester facility this
     // isn't bootstrapping a team from zero credits, so it ships nothing free.
     // Spawn location is handled entirely by commands.js's armed-factory build
