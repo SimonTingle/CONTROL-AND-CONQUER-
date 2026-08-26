@@ -9,6 +9,19 @@
  * A command's `enabled` returns `true`, or a **string explaining why not** —
  * the menu renders that string under a dimmed entry, so a refusal always says
  * what is wrong instead of silently doing nothing.
+ *
+ * ## `local: true`
+ *
+ * A handful of commands change nothing in the world — they only put *this*
+ * client into a UI mode ("now click a target", "now click where to build").
+ * The world change comes later, from the click, as its own intent.
+ *
+ * They must not travel as intents. `applyIntent` runs a command's `execute` on
+ * **every** peer, so a player choosing "Select target" was putting everyone
+ * else into target-select mode too: their next click got swallowed by the mode
+ * instead of issuing a move order, and the intent it then tried to submit was
+ * rejected by the ownership check anyway. `local: true` marks them so
+ * main.js's `onCommand` runs them here and never submits.
  */
 
 import { STRUCTURE_CATALOG } from '../structures/structures.js';
@@ -128,6 +141,7 @@ const SELECT_TARGET_COMMAND = {
   id: 'select-target',
   label: 'Select target',
   hint: 'Click an enemy to lock fire on it',
+  local: true,
   execute(instance, ctx) {
     ctx.targetSelectMode = { unit: instance };
   },
@@ -610,6 +624,7 @@ const COMMANDS = {
           if (!ctx.structures.freeSlot(pad, def.footprint)) return 'No free slot on the pad';
           return true;
         },
+        local: true,
         execute(instance, ctx) {
           const pad = basePad(instance, ctx);
           // Enters manual placement instead of placing immediately — the
@@ -635,6 +650,7 @@ const COMMANDS = {
           if (!ctx.structures.freeSlot(pad, def.footprint)) return 'No free slot on the pad';
           return true;
         },
+        local: true,
         execute(instance, ctx) {
           const pad = basePad(instance, ctx);
           const def = ctx.structures.defOf('repair-bay');
@@ -660,6 +676,7 @@ const COMMANDS = {
           if (!ctx.structures.freeSlot(pad, def.footprint)) return 'No free slot on the pad';
           return true;
         },
+        local: true,
         execute(instance, ctx) {
           const pad = basePad(instance, ctx);
           const def = ctx.structures.defOf('armed-factory');
@@ -728,6 +745,7 @@ const COMMANDS = {
         id: 'target-harvest',
         label: 'Target Harvest',
         hint: 'Click a specific bloom',
+        local: true,
         execute(instance, ctx) {
           ctx.harvestSelectMode = { harvester: instance };
         },
@@ -755,6 +773,7 @@ const COMMANDS = {
         id: 'target-harvest',
         label: 'Target Harvest',
         hint: 'Click a specific bloom',
+        local: true,
         execute(instance, ctx) {
           ctx.harvestSelectMode = { harvester: instance };
         },

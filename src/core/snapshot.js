@@ -180,6 +180,7 @@ function serializeProjectile(p) {
     id: p.id,
     teamId: p.teamId,
     shooterId: p.shooterId,
+    shooterKind: p.shooterKind,
     shooterDefId: p.shooterDefId,
     damage: round(p.damage, 3),
     calibre: round(p.calibre, 3),
