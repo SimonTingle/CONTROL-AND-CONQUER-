@@ -56,6 +56,13 @@ export const Intent = {
   harvest: (instanceId, fieldId) => ({ t: 'harvest', instanceId, fieldId }),
   /** Lock sustained fire onto a specific enemy. */
   target: (instanceId, targetId, targetKind) => ({ t: 'target', instanceId, targetId, targetKind }),
+  /**
+   * Block or unblock a crystal field for one team's harvesters. Its own intent
+   * rather than a `cmd` because a field has no catalog def or mode for
+   * `commandsFor` to key off — see intents.js's `applyIntent` for the rest of
+   * the reasoning.
+   */
+  blockField: (fieldId, teamId, blocked) => ({ t: 'blockField', fieldId, teamId, blocked }),
 };
 
 function vehicleById(ctx, id) {
@@ -130,7 +137,10 @@ export function applyIntent(intent, ctx, teamId = null) {
       const inst = vehicleById(ctx, intent.instanceId);
       if (!owns(inst)) return false;
       const field = (ctx.world.blooms?.fields ?? []).find((f) => f.id === intent.fieldId) ?? null;
-      if (!field) return false;
+      // A field blocked for this team refuses the order the same way a stale
+      // one does — silently, per this function's own "false is normal"
+      // contract. The harvester keeps whatever it was doing before.
+      if (!field || field.blockedByTeam?.has(inst.teamId)) return false;
       inst.targetField = field;
       return true;
     }
@@ -143,6 +153,19 @@ export function applyIntent(intent, ctx, teamId = null) {
       if (!victim || victim.teamId === inst.teamId) return false;
       inst.mode = 'armed';
       inst.combatTarget = victim;
+      return true;
+    }
+
+    case 'blockField': {
+      // A team can only ever set its own block — `owns` doesn't apply here
+      // (there is no instance to own), so the same roster check is done
+      // directly against the intent's own claimed team.
+      if (teamId !== null && intent.teamId !== teamId) return false;
+      const field = (ctx.world.blooms?.fields ?? []).find((f) => f.id === intent.fieldId) ?? null;
+      if (!field) return false;
+      field.blockedByTeam ??= new Set();
+      if (intent.blocked) field.blockedByTeam.add(intent.teamId);
+      else field.blockedByTeam.delete(intent.teamId);
       return true;
     }
 

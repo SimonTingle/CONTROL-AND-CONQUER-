@@ -322,6 +322,12 @@ export class Blooms {
       count: CRYSTALS_PER_FIELD,
       crystals,
       _fillQ: -1,
+      // Per-team harvester block, set by the player via the field's radial
+      // menu (net/intents.js's 'blockField'). A Set rather than one boolean:
+      // two teams sharing an island must be able to disagree about the same
+      // field. Left undefined until first blocked rather than allocated here
+      // for every field on every map — most fields are never touched.
+      blockedByTeam: undefined,
     };
   }
 

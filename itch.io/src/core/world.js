@@ -5,6 +5,7 @@ import { Water } from '../terrain/water.js';
 import { Atmosphere } from '../sky/atmosphere.js';
 import { FogTerrain, FogMask } from './fogOfWar.js';
 import { TrackMask } from './trackMask.js';
+import { ScorchMask } from '../render/scorchMask.js';
 import { Blooms } from '../terrain/blooms.js';
 
 /**
@@ -55,6 +56,12 @@ export class World {
     // team-private about where a vehicle has driven.
     this.trackMask = new TrackMask(this.heightmap.params.size);
     this.terrain.uniforms.uTrackMask.value = this.trackMask.texture;
+
+    // Scorch marks — shared for the same reason tracks are, and assigned once
+    // for the same reason: the texture object is never replaced, so a
+    // regenerate rewrites the mask in place rather than needing a re-point.
+    this.scorchMask = new ScorchMask(this.heightmap.params.size);
+    this.terrain.uniforms.uScorchMask.value = this.scorchMask.texture;
   }
 
   /**
@@ -71,6 +78,7 @@ export class World {
     this.fogTerrain.refresh();
     for (const mask of this.fogMasks) mask.reset();
     this.trackMask.clear(); // describes ground that no longer has this shape
+    this.scorchMask.clear(); // ditto — and the craters under them are gone too
     this.blooms.refresh();
     this.lastGenerateMs = performance.now() - t0;
     return this.lastGenerateMs;
