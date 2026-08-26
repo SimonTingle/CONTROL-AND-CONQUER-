@@ -21,7 +21,11 @@ import WebSocket from '../../server/node_modules/ws/index.js';
 import { blankDef, syncId } from '../../src/builder/vehicleDraft.js';
 
 const API = process.env.API_URL ?? 'http://127.0.0.1:3999';
-const PROTOCOL_VERSION = 2;
+// Imported, not copied. This was a hand-written `= 2` while its sibling
+// two-client-match.mjs deliberately imports the constant — so the copy here
+// would have gone silently stale on the next bump, which is exactly the drift
+// tests/match-client-protocol.test.mjs exists to prevent.
+const { PROTOCOL_VERSION } = await import('../../server/src/ws/matchRoom.js');
 
 let passed = 0;
 let failed = 0;
