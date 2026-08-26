@@ -161,6 +161,12 @@ export class Projectiles {
       id: nextProjectileId++,
       teamId: shooter.teamId,
       shooterId: shooter.id,
+      // Recorded alongside the id because the two id spaces are separate:
+      // vehicle and structure ids are independent counters that both start at
+      // 1 (see net/intents.js), so `shooterId` alone is ambiguous. Without
+      // this, a turret structure's kill was credited to the *vehicle* of the
+      // same number.
+      shooterKind: shooter.kind ?? 'vehicle',
       shooterDefId: shooter.def?.id ?? null,
       damage,
       // Drives crater size, explosion scale and light radius downstream.
@@ -234,7 +240,13 @@ export class Projectiles {
       // here now because *here* is where a kill actually happens — and it
       // works without the shooter still existing, since everything it needs
       // beyond the tallies was copied into the shell at launch.
-      const shooter = this._lookup('vehicle', p.shooterId) ?? this._lookup('structure', p.shooterId);
+      // By kind, not by trying vehicles first and falling back — that fallback
+      // silently mis-credited every turret kill to a same-numbered vehicle.
+      // `?? 'vehicle'` covers a shell restored from a save written before
+      // `shooterKind` existed; those carry the old ambiguity and nothing can
+      // recover it, but they resolve the way they always did rather than
+      // throwing.
+      const shooter = this._lookup(p.shooterKind ?? 'vehicle', p.shooterId);
       if (shooter && !shooter.dead) {
         shooter.kills = (shooter.kills ?? 0) + 1;
         // Only ever "is this run better than the best so far", answerable now.

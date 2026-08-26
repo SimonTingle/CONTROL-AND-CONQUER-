@@ -891,10 +891,18 @@ addEventListener('keydown', (e) => {
   }
   if (e.key === 'Escape' && commandContext.buildPlacementMode) cancelPlacementMode();
   if (e.key === 'Escape' && commandContext.targetSelectMode) commandContext.targetSelectMode = null;
-  // Debug: destroy whatever's under the cursor — 2B's destroy pipeline has
-  // nothing to trigger it yet (combat is 2D), so this is its only way to run
-  // until then.
-  if (k === 'k' && !isTextInputFocused() && !overlayOpen) {
+  // Debug: destroy whatever's under the cursor. This writes simulation state
+  // directly — `queueDestroy` marks the instance dead synchronously — which
+  // is exactly what CLAUDE.md says has silently desynced matches before, so
+  // it is gated to local play. Press it online and only your client would
+  // lose the unit; the peer keeps simulating it, and there is no recovery
+  // from that.
+  //
+  // It is not routed through an intent instead because it should not be a
+  // player action at all: it exists so the destroy pipeline can be triggered
+  // by hand, and combat now triggers it constantly, so the original reason
+  // for it ("combat is 2D, this is its only way to run") no longer holds.
+  if (k === 'k' && !isTextInputFocused() && !overlayOpen && game.mode !== 'multiplayer-online') {
     const target = pickSelectable(lastX, lastY);
     if (target) entities.queueDestroy(target);
   }
@@ -1256,7 +1264,29 @@ function cameraGroundQuad() {
  * opened on, so it serialises without touching the command table itself.
  */
 const radialMenu = new RadialMenu(camera, {
+  /**
+   * A menu opened or closed on a unit. `menuOpen` is read by the autonomous
+   * drivers, so this is simulation state and goes through the intent stream
+   * like every other player action — not written onto the instance from the
+   * DOM handler, which held the unit on this client only.
+   *
+   * The crystal-field wrapper (`fieldMenuTarget`) is skipped: it is a
+   * throwaway object built per open, it has no presence in the simulation,
+   * and there is nothing about a field that can be held still.
+   */
+  onHold(instance, held) {
+    if (!instance || instance.kind === 'field') return;
+    submitIntent(Intent.menuHold(instance.id, instance.kind, held));
+  },
   onCommand(cmd, instance) {
+    // Commands that only put *this* client into a UI mode ("now click a
+    // target", "now click where to build") never travel as intents —
+    // applyIntent runs execute() on every peer, so submitting one put
+    // everybody into the mode. See commands.js's `local: true`.
+    if (cmd.local) {
+      cmd.execute?.(instance, commandContext);
+      return;
+    }
     if (instance.kind === 'field') {
       submitIntent(Intent.blockField(instance.id, game.localTeamId, cmd.blocked));
       const p = instance.group.position;
@@ -2808,16 +2838,6 @@ function simTick(dt) {
     checkMatchEnd();
     updateRespawns(dt);
   });
-  p.time('radialMenu', () => {
-    // A field has no entities.onDestroy hook to close the menu for it (that
-    // pipeline is vehicles/structures only), so the one case radialMenu.update
-    // can't already catch — a base pad poured over the field while its menu
-    // is open — is handled here instead.
-    if (radialMenu.isOpen && radialMenu.instance.kind === 'field' && radialMenu.instance.dead) {
-      radialMenu.close();
-    }
-    radialMenu.update();
-  });
 
   // Before the render-only early return, same reasoning as updateRespawns
   // above: this has to fire correctly under window.__step's headless
@@ -2936,6 +2956,23 @@ function renderTick(dt) {
     projectileFx.updateEffects(dt);
     updateFlares(dt);
     bountyFx.update(bounties.instances, dt, world.atmosphere.params.elevation);
+  });
+  // Presentation, so it runs here rather than in simTick — where it used to.
+  // `_reposition` closes the menu when its anchor goes behind the near plane,
+  // which is a *camera* test, and the camera is not replicated: running it
+  // inside the simulation meant the sim branched on where each client happened
+  // to be looking. The hold it applies to a vehicle now travels as an intent
+  // (see radialMenu's onHold), so the sim state is agreed even though the
+  // trigger is local.
+  p.time('radialMenu', () => {
+    // A field has no entities.onDestroy hook to close its menu (that pipeline
+    // is vehicles/structures only), so the one case radialMenu.update can't
+    // already catch — a base pad poured over the field while its menu is open
+    // — is handled here.
+    if (radialMenu.isOpen && radialMenu.instance.kind === 'field' && radialMenu.instance.dead) {
+      radialMenu.close();
+    }
+    radialMenu.update();
   });
   p.time('engineAudio', () => updateEngineAudio(dt));
   p.time('ambienceAudio', () => audio.updateAmbience(nightFactor(world.atmosphere.params.elevation)));
