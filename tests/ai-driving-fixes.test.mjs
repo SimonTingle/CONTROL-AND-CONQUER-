@@ -886,3 +886,177 @@ test('with every bay full, the vehicle carries on damaged instead of queueing', 
   const { controller, inst } = makeCappedCtx([a, b], { 1: MAX_REPAIR_QUEUE, 2: MAX_REPAIR_QUEUE });
   assert.equal(controller._nearestBay(inst), null);
 });
+
+// ---- weapon-tier escalation --------------------------------------------------
+//
+// TEAM_WEAPON_UPGRADE_COMMAND has always existed and was wired only to the
+// player's radial menu, so `weaponTier` stayed 0 on every AI team for whole
+// matches — the uploaded 41-minute diagnostic recorded exactly that on all
+// five teams. The gap was a missing caller, not a missing system. See
+// docs/plans/ai-weapon-tier-escalation.md.
+//
+// These build their own commander rather than reusing makeBuildCommander,
+// because that harness gives AiCommander a *different* team object than
+// ctx.game.teamOf() returns. In production both are the same Team out of
+// game.teams (main.js's teamOf indexes game.teams; the commander is
+// constructed with a member of it), and the upgrade path reads `this.team`
+// for its guard while the command reads `teamOf()` for the spend — so a split
+// mock would test a shape the game never has.
+
+function makeUpgradeCommander({ credits = 10000, weaponTier = 0, difficulty = 'hard', owned = [] } = {}) {
+  const team = {
+    id: 1,
+    defeated: false,
+    homePoint: { x: 0, z: 0 },
+    credits,
+    weaponTier,
+    spend(n) {
+      if (this.credits < n) return false;
+      this.credits -= n;
+      return true;
+    },
+  };
+  const factory = {
+    teamId: 1, mode: 'idle',
+    def: { id: 'armed-factory', produces: ['gun-platform', 'tracked-tank', 'scout-buggy'] },
+  };
+  const defs = [GUN, TANK, SCOUT, HARVESTER, CUSTOM_HARVESTER];
+  const built = [];
+  const ctx = {
+    game: { difficulty: { id: difficulty }, teams: [{}, team], teamOf: () => team },
+    vehicles: {
+      instances: owned.map((def, i) => ({ id: 200 + i, teamId: 1, def, dead: false, group: { position: { x: 0, y: 0, z: 0 } } })),
+      active: null,
+      instanceOf: () => null,
+      defOf: (id) => defs.find((d) => d.id === id),
+    },
+    structures: { instances: [factory] },
+    heightmap: DRY_HEIGHTMAP,
+    produceUnit: (def) => built.push(def.id),
+  };
+  const ai = new AiCommander({ team, buildDelaySeconds: 0, ctx, camera: null });
+  return { ai, team, built };
+}
+
+test('an AI with a full army and money buys the next weapon tier', () => {
+  const { ai, team } = makeUpgradeCommander({ credits: 10000 });
+  assert.equal(ai._tryUpgradeWeapons(), true);
+  assert.equal(team.weaponTier, 1, 'tier actually advanced');
+  assert.equal(team.credits, 10000 - 800, 'and the tier was paid for');
+});
+
+test('upgrades stop at the difficulty cap, not at the catalog max', () => {
+  // normal caps at 2 of the catalog's 3. This is the first knob in
+  // DIFFICULTY_ECONOMY that changes behaviour rather than a magnitude.
+  const { ai, team } = makeUpgradeCommander({ credits: 100000, weaponTier: 2, difficulty: 'normal' });
+  assert.equal(ai._tryUpgradeWeapons(), false, 'normal has spent its allowance');
+  assert.equal(team.weaponTier, 2, 'and bought nothing');
+});
+
+test('hard goes one tier further than normal on identical money', () => {
+  const onHard = makeUpgradeCommander({ credits: 100000, weaponTier: 2, difficulty: 'hard' });
+  assert.equal(onHard.ai._tryUpgradeWeapons(), true);
+  assert.equal(onHard.team.weaponTier, 3);
+});
+
+test('easy never upgrades at all', () => {
+  const { ai, team } = makeUpgradeCommander({ credits: 100000, difficulty: 'easy' });
+  assert.equal(ai._tryUpgradeWeapons(), false);
+  assert.equal(team.weaponTier, 0);
+});
+
+test('an upgrade never spends the money that would replace a harvester', () => {
+  // Tier 1 costs 800 and the reserve is a crystal-harvester's 600. 1000 is
+  // affordable by the command's own `enabled()` and must still be refused.
+  const { ai, team } = makeUpgradeCommander({ credits: 1000 });
+  assert.equal(ai._tryUpgradeWeapons(), false, 'affordable, but it would strand the economy');
+  assert.equal(team.credits, 1000, 'nothing spent');
+
+  const flush = makeUpgradeCommander({ credits: 1400 });
+  assert.equal(flush.ai._tryUpgradeWeapons(), true, 'clears cost + reserve exactly');
+});
+
+test('a maxed-out team stops buying', () => {
+  const { ai, team } = makeUpgradeCommander({ credits: 100000, weaponTier: 3, difficulty: 'expert' });
+  assert.equal(ai._tryUpgradeWeapons(), false);
+  assert.equal(team.credits, 100000);
+});
+
+test('rebuilding a lost tank outranks escalation', () => {
+  // The escalation mechanic in one assertion: the chain reaches an upgrade
+  // only when _tryBuildUnit('combat') declines, which is exactly when the army
+  // is at cap. Below cap, the army buy wins and the tier waits.
+  const belowCap = makeUpgradeCommander({ credits: 10000, difficulty: 'hard', owned: [GUN] });
+  assert.equal(belowCap.ai._tryBuildUnit('combat', 5), true, 'army is short — build first');
+  // Which army unit is value-per-cost's business (gun-platform outranks the
+  // tank on that measure); this test's claim is only that it bought *army*.
+  assert.equal(belowCap.built.length, 1, 'exactly one army unit');
+  assert.ok(isArmyUnit({ id: belowCap.built[0], tags: ['combat'] }), 'and it was army, not recon');
+  assert.equal(belowCap.team.weaponTier, 0, 'no tier bought while the army is short');
+
+  const atCap = makeUpgradeCommander({
+    credits: 10000, difficulty: 'hard', owned: [GUN, GUN, GUN, GUN, GUN],
+  });
+  assert.equal(atCap.ai._tryBuildUnit('combat', 5), false, 'army full — nothing better to buy');
+  assert.equal(atCap.ai._tryUpgradeWeapons(), true, 'so the chain escalates instead');
+});
+
+test('the chain escalates only once the army is full', () => {
+  // The ordering claim itself, exercised through _manageEconomy rather than by
+  // calling the two methods separately — the escalation mechanic *is* the
+  // chain order, so testing the pieces in isolation would not catch the
+  // upgrade being moved ahead of the army buy.
+  //
+  // BASE is deployed and every structure is already built, so _tryBuildNext
+  // declines and the chain runs. harvesterCap/defenseCap are satisfied by the
+  // owned roster so economy and defense decline too, leaving combat -> upgrade
+  // -> recon as the live part.
+  const BASE = { id: 'base-station', tags: [], cost: 0, maxHealth: 500 };
+
+  const run = ({ owned, credits }) => {
+    const team = {
+      id: 1, defeated: false, homePoint: { x: 0, z: 0 }, credits, weaponTier: 0,
+      spend(n) { if (this.credits < n) return false; this.credits -= n; return true; },
+    };
+    const base = {
+      id: 300, teamId: 1, def: BASE, dead: false, mode: 'deployed',
+      group: { position: { x: 0, y: 0, z: 0 } },
+    };
+    const defs = [GUN, TANK, SCOUT, HARVESTER, CUSTOM_HARVESTER, BASE];
+    const built = [];
+    // Only an armed factory: no harvester-facility/repair-bay to build means
+    // _tryBuildNext finds nothing affordable-and-missing to distract the chain.
+    const factory = {
+      teamId: 1, mode: 'idle',
+      def: { id: 'armed-factory', produces: ['gun-platform', 'tracked-tank', 'scout-buggy'] },
+    };
+    const ctx = {
+      game: { difficulty: { id: 'hard' }, teams: [{}, team], teamOf: () => team },
+      vehicles: {
+        instances: [base, ...owned.map((def, i) => ({
+          id: 400 + i, teamId: 1, def, dead: false, group: { position: { x: 0, y: 0, z: 0 } },
+        }))],
+        active: null, instanceOf: () => null, defOf: (id) => defs.find((d) => d.id === id),
+      },
+      structures: { instances: [factory], instanceOf: () => null, freeSlot: () => null },
+      heightmap: DRY_HEIGHTMAP,
+      // No pad: basePad returns null so _tryBuildNext declines outright,
+      // isolating the unit/upgrade half of the chain that this test is about.
+      terraform: { padAt: () => null },
+      produceUnit: (def) => built.push(def.id),
+    };
+    const ai = new AiCommander({ team, buildDelaySeconds: 0, ctx, camera: null });
+    ai.buildTimer = 0;
+    ai._manageEconomy(0.016);
+    return { team, built };
+  };
+
+  // hard: combatCap 5. Four army units is one short.
+  const short = run({ owned: [HARVESTER, HARVESTER, GUN, GUN, GUN, GUN], credits: 10000 });
+  assert.equal(short.team.weaponTier, 0, 'army short — the chain must not reach the upgrade');
+  assert.equal(short.built.length, 1, 'it built instead');
+
+  const full = run({ owned: [HARVESTER, HARVESTER, GUN, GUN, GUN, GUN, GUN], credits: 10000 });
+  assert.equal(full.team.weaponTier, 1, 'army full — nothing better to buy, so escalate');
+  assert.deepEqual(full.built, [], 'and it bought no unit');
+});
