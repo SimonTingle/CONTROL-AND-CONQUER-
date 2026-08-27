@@ -803,6 +803,15 @@ export class StructureController {
     this.instances = [];
     /** Called with (instance) when a building finishes. */
     this.onComplete = null;
+    /**
+     * Bumped whenever the set of standing structures changes — built, rebuilt
+     * from a save, or removed. NavGrid's own `structuresVersion` staleness
+     * check reads this the same way it already reads `heightmap.terrainVersion`
+     * for craters/terraform, so a structure appearing or disappearing
+     * invalidates cached routes instead of leaving a harvester routed around
+     * (or through) a building that no longer stands there.
+     */
+    this.version = 0;
     // Stable per-instance identity for save/load cross-references — see
     // VehicleController.spawn for the reasoning. Kept in a separate number
     // space from vehicle ids; snapshots always say which kind an id refers to.
@@ -906,6 +915,7 @@ export class StructureController {
     this._assignId(instance);
     instance.group.userData.selectable = instance;
     this.instances.push(instance);
+    this.version++;
     this.scene.add(instance.group);
     pad.buildings.push({ id: def.id, x: pos.x, z: pos.z, instance });
     return instance;
@@ -953,6 +963,7 @@ export class StructureController {
     this._assignId(instance, saved.id);
     instance.group.userData.selectable = instance;
     this.instances.push(instance);
+    this.version++;
     this.scene.add(instance.group);
     // Keep the pad's own registry consistent with what actually stands on it,
     // so placement checks for anything built later see the restored buildings.
@@ -979,6 +990,7 @@ export class StructureController {
     this._assignId(instance);
     instance.group.userData.selectable = instance;
     this.instances.push(instance);
+    this.version++;
     this.scene.add(instance.group);
     return instance;
   }
@@ -1011,7 +1023,7 @@ export class StructureController {
    */
   remove(inst) {
     const i = this.instances.indexOf(inst);
-    if (i !== -1) this.instances.splice(i, 1);
+    if (i !== -1) { this.instances.splice(i, 1); this.version++; }
     // Freestanding buildings (the power spire) have no pad and nothing to
     // unlist here.
     if (inst.pad) {
