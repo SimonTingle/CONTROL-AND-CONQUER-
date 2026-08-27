@@ -52,6 +52,24 @@ const READY_LINGER = 2; // seconds the ring stays green before the dock frees
 // is ahead of it. This only exists to reclaim a queue that's stuck for a
 // reason the self-heal sweep didn't catch.
 const QUEUE_TIMEOUT = 600;
+/**
+ * How many vehicles may be waiting at one bay before a newly damaged one stops
+ * joining the back of the line.
+ *
+ * A bay repairs one vehicle at a time, so the queue is a strictly serial
+ * resource and its depth *is* the wait. `facilityControl._assignSlots` has no
+ * cap of its own — its comment argues the geometry substitutes for one, since
+ * `holdingFix` puts every fourth waiter on a wider ring. A 41-minute
+ * four-AI-team diagnostic disproved that: slots 0 through 10 filled at a single
+ * bay, 14 vehicles sat queued against 2 actually being repaired, and one scout
+ * had been holding for 23,753 ticks — 6.6 minutes — with `QUEUE_TIMEOUT`'s
+ * 10-minute backstop still not reached. The bay had become a car park.
+ *
+ * Four is deliberately small. Past that the wait is longer than the fight the
+ * vehicle would have rejoined, and a damaged unit doing something useful beats
+ * a healthy one arriving after the match is decided.
+ */
+export const MAX_REPAIR_QUEUE = 4;
 
 export class RepairController {
   constructor({ vehicles, structures, heightmap, game, facilityControl }) {
@@ -148,7 +166,18 @@ export class RepairController {
     inst.repair = { bay, state: 'to-bay' };
   }
 
-  /** Nearest finished repair bay, or null — mirrors commands.js's own lookup. */
+  /**
+   * Nearest finished repair bay with room in its queue, or null — mirrors
+   * commands.js's own lookup, plus the depth cap.
+   *
+   * Skipping a full bay rather than joining it is what keeps `MAX_REPAIR_QUEUE`
+   * from simply relocating the logjam: with two bays and one full, the second
+   * still takes the vehicle. With every bay full, this returns null and the
+   * caller treats it exactly as it already treats "no bay at all" — a retry
+   * cooldown, and carry on damaged. That disposition is the existing one, not
+   * a new branch: `_maybeAutoQueue` has always had to cope with there being
+   * nowhere to go.
+   */
   _nearestBay(inst) {
     const pos = inst.group.position;
     let best = null;
@@ -156,6 +185,7 @@ export class RepairController {
     for (const s of this.structures?.instances ?? []) {
       if (s.def.id !== 'repair-bay' || s.mode !== 'idle') continue;
       if (s.teamId !== inst.teamId) continue; // never queue at an enemy bay
+      if (this.facilityControl.queueDepth(s) >= MAX_REPAIR_QUEUE) continue;
       const d = Math.hypot(s.x - pos.x, s.z - pos.z);
       if (d < bestD) {
         bestD = d;

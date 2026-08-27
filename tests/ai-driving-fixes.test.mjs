@@ -13,9 +13,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { AiCommander } from '../src/vehicles/aiCommander.js';
+import { AiCommander, isArmyUnit } from '../src/vehicles/aiCommander.js';
 import { HarvesterAI } from '../src/vehicles/harvesterAI.js';
-import { RepairController } from '../src/vehicles/repairController.js';
+import { RepairController, MAX_REPAIR_QUEUE } from '../src/vehicles/repairController.js';
 import { FacilityControl, CLEARED, DOCKED } from '../src/vehicles/facilityControl.js';
 
 const DRY_HEIGHTMAP = { heightAt: () => 10, seaLevelY: 0 };
@@ -313,13 +313,16 @@ test('losing the clearance mid-approach re-queues instead of servicing', () => {
 // ---------------------------------------------------------------------------
 
 const GUN = { id: 'gun-platform', tags: ['combat'], cost: 650, maxHealth: 400, turret: { damage: 22, fireInterval: 1.4 } };
+// A second *army* id, so "one budget shared across ids" can still be tested
+// now that scout-buggy is recon and no longer draws on it.
+const TANK = { id: 'tracked-tank', tags: ['combat'], cost: 1300, maxHealth: 400, turret: { damage: 30, fireInterval: 1.6 } };
 const SCOUT = { id: 'scout-buggy', tags: ['recon', 'combat'], cost: 350, maxHealth: 100, turret: { damage: 2, fireInterval: 1.5 } };
 const HARVESTER = { id: 'crystal-harvester', tags: ['economy'], cost: 600, maxHealth: 220 };
 const CUSTOM_HARVESTER = { id: 'custom:abc', tags: ['economy'], cost: 600, maxHealth: 220 };
 
 function makeBuildCommander(owned, produces) {
   const built = [];
-  const defs = [GUN, SCOUT, HARVESTER, CUSTOM_HARVESTER];
+  const defs = [GUN, TANK, SCOUT, HARVESTER, CUSTOM_HARVESTER];
   const factory = { teamId: 1, mode: 'idle', def: { id: 'armed-factory', produces } };
   const team = { id: 1, credits: 10000, weaponTier: 0, spend: () => true };
   const ctx = {
@@ -343,14 +346,40 @@ function makeBuildCommander(owned, produces) {
   return { ai, built };
 }
 
-test('combat budget counts every combat-tagged unit, not each id separately', () => {
-  // Seven combat-tagged units already owned, of two different ids — the exact
-  // shape a real match reached (7 tanks, then 7 scouts, against combatCap 7).
-  const owned = [GUN, GUN, GUN, GUN, GUN, GUN, SCOUT];
-  const { ai, built } = makeBuildCommander(owned, ['gun-platform', 'scout-buggy']);
+test('combat budget counts every army unit, not each id separately', () => {
+  // Seven army units already owned, of two different ids. The per-id version
+  // of this cap let each id have its own allowance, so a real match ended with
+  // 7 tanks *and* 7 gun platforms against a cap of 7.
+  const owned = [GUN, GUN, GUN, GUN, GUN, GUN, TANK];
+  const { ai, built } = makeBuildCommander(owned, ['gun-platform', 'tracked-tank']);
 
   assert.equal(ai._tryBuildUnit('combat', 7), false, 'budget is spent');
-  assert.deepEqual(built, [], 'no scout bought to top up a per-id allowance');
+  assert.deepEqual(built, [], 'no second-id unit bought to top up a per-id allowance');
+});
+
+test('scouts do not spend the army budget, and cannot be bought as army', () => {
+  // The inverse of the test above, and the bug it replaced. scout-buggy is
+  // tagged ['recon','combat'], and `_tryBuildUnit` used to count it while
+  // `_manageArmy` refused to field it — so scouts spent the army budget
+  // without ever being army. Because a scout is also the cheapest combat
+  // candidate and build candidates are filtered by what is affordable right
+  // now, it won that race repeatedly: 23 scouts, one gun platform and zero
+  // tanks across four AI teams in a 41-minute match.
+  const owned = [GUN, SCOUT, SCOUT, SCOUT, SCOUT, SCOUT, SCOUT];
+  const { ai, built } = makeBuildCommander(owned, ['gun-platform', 'scout-buggy']);
+
+  assert.equal(ai._tryBuildUnit('combat', 7), true, 'six scouts must not exhaust an army budget of 7');
+  assert.deepEqual(built, ['gun-platform'], 'and the army buy is the tank, never the scout');
+});
+
+test('the army budget and the army roster agree on what a scout is', () => {
+  // The actual invariant. These two answers were hard-coded separately and
+  // drifted; they now share `isArmyUnit`, so assert they cannot disagree.
+  assert.equal(isArmyUnit(GUN), true);
+  assert.equal(isArmyUnit(TANK), true);
+  assert.equal(isArmyUnit(SCOUT), false, 'combat-tagged, but recon');
+  assert.equal(isArmyUnit(HARVESTER), false);
+  assert.equal(isArmyUnit(undefined), false, 'a missing def is not army');
 });
 
 test('the combat budget still builds while there is room', () => {
@@ -585,6 +614,10 @@ const STUB_CLEARANCE = {
   statusOf: () => null,
   release: () => {},
   holdingFix: () => null,
+  // An empty queue, so bay lookups that now consult MAX_REPAIR_QUEUE behave
+  // as they did before the cap existed — these tests are about the retreat
+  // decision, not about contention.
+  queueDepth: () => 0,
 };
 
 function makeHarvesterAI(inst, structures = []) {
@@ -790,4 +823,66 @@ test('the same harvester retreats the moment it is empty', () => {
 
   assert.equal(ai._maybeRetreatForRepair(inst, s, 0.1), true);
   assert.equal(s.state, 'to-repair');
+});
+
+// ---- repair-queue depth cap -------------------------------------------------
+//
+// A bay repairs one vehicle at a time, so queue depth *is* the wait.
+// `facilityControl._assignSlots` has no cap of its own and argues the geometry
+// substitutes for one. A 41-minute four-AI diagnostic disproved that: slots 0
+// through 10 filled at one bay, 14 vehicles queued against 2 being repaired,
+// and a scout had been holding 23,753 ticks (6.6 minutes) without reaching
+// QUEUE_TIMEOUT's 10-minute backstop. The bay had become a car park.
+
+function makeQueuedBay(id, x) {
+  return {
+    id, teamId: 1, mode: 'idle', x, z: 0, dock: { x: x + 16, z: 0 },
+    def: { id: 'repair-bay', repair: { creditsPerHealth: 1, secondsPerHealth: 0.1 }, upgradeTiers: [] },
+    upgradeLevel: 0, group: { userData: {} },
+  };
+}
+
+/** A repairController whose facilityControl reports a fixed depth per bay id. */
+function makeCappedCtx(bays, depths) {
+  const inst = makeDriveInst({ x: 0, z: 0 });
+  inst.health = 30;
+  inst.def.maxHealth = 200;
+  const controller = new RepairController({
+    vehicles: { instances: [inst], active: null },
+    structures: { instances: bays },
+    heightmap: DRY_HEIGHTMAP,
+    game: { teamOf: () => ({ credits: 100000, spend: () => true }) },
+    facilityControl: { queueDepth: (bay) => depths[bay.id] ?? 0 },
+  });
+  return { controller, inst };
+}
+
+test('a bay with room still takes the vehicle', () => {
+  const bay = makeQueuedBay(1, 0);
+  const { controller, inst } = makeCappedCtx([bay], { 1: MAX_REPAIR_QUEUE - 1 });
+  assert.equal(controller._nearestBay(inst)?.id, 1, 'under the cap, so still open');
+});
+
+test('a bay at the queue cap is skipped', () => {
+  const bay = makeQueuedBay(1, 0);
+  const { controller, inst } = makeCappedCtx([bay], { 1: MAX_REPAIR_QUEUE });
+  assert.equal(controller._nearestBay(inst), null, 'full — do not join a car park');
+});
+
+test('a full near bay defers to an emptier far one rather than blocking repair', () => {
+  // The cap must not simply relocate the logjam: with two bays and one full,
+  // the second still takes the vehicle even though it is further away.
+  const near = makeQueuedBay(1, 0);
+  const far = makeQueuedBay(2, 500);
+  const { controller, inst } = makeCappedCtx([near, far], { 1: MAX_REPAIR_QUEUE, 2: 0 });
+  assert.equal(controller._nearestBay(inst)?.id, 2);
+});
+
+test('with every bay full, the vehicle carries on damaged instead of queueing', () => {
+  // Returning null here is the *existing* "no bay at all" disposition, not a
+  // new branch — _maybeAutoQueue has always had to cope with nowhere to go.
+  const a = makeQueuedBay(1, 0);
+  const b = makeQueuedBay(2, 500);
+  const { controller, inst } = makeCappedCtx([a, b], { 1: MAX_REPAIR_QUEUE, 2: MAX_REPAIR_QUEUE });
+  assert.equal(controller._nearestBay(inst), null);
 });

@@ -2224,7 +2224,7 @@ function onMatchTurn(inputs, turn) {
   }
 
   if (turn % HASH_EVERY_TURNS === 0) {
-    const hash = hashState({ vehicles, structures, game, projectiles, bounties, blooms: world.blooms }, simClock.tick);
+    const hash = hashState({ vehicles, structures, game, projectiles, bounties, blooms: world.blooms, harvesterAI }, simClock.tick);
     // Kept as well as sent: the on-screen readout shows this turn-aligned
     // value so two devices are always comparing the same simulated moment.
     match.checkpoint = { turn, hash: hash.split(':')[1] ?? hash };
@@ -3159,7 +3159,7 @@ window.__step = (seconds, dt = SIM_DT) => {
  * disagree, the first question is always "disagree about what" — and being able
  * to read and diff the hash from a console on each side is the cheapest way in.
  */
-window.__hashState = () => hashState({ vehicles, structures, game, projectiles, bounties, blooms: world.blooms }, simClock.tick);
+window.__hashState = () => hashState({ vehicles, structures, game, projectiles, bounties, blooms: world.blooms, harvesterAI }, simClock.tick);
 // Console/e2e debug access to the audio engine — mirrors every other
 // window.__ hook here, and is how a headless smoke test confirms the
 // AudioContext actually reached 'running' rather than staying suspended.
@@ -3214,7 +3214,7 @@ window.__determinismCheck = ({ ticks = 900, sampleEvery = 60 } = {}) => {
   if (!game.teams?.length) return { ok: false, error: 'Start a match first.' };
 
   const baseline = JSON.stringify(serialize(snapshotContext()));
-  const hashCtx = { vehicles, structures, game, projectiles, bounties, blooms: world.blooms };
+  const hashCtx = { vehicles, structures, game, projectiles, bounties, blooms: world.blooms, harvesterAI };
 
   const run = () => {
     deserialize(snapshotContext(), JSON.parse(baseline));
