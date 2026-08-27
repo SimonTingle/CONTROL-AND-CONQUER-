@@ -16,6 +16,10 @@
 
 import { hasVehicleBehind } from './trafficController.js';
 import { CLEARED, DOCKED } from './facilityControl.js';
+// Imported rather than re-declared: a harvester and a combat unit deciding
+// differently how full is "full" is exactly the kind of split answer that put
+// 14 vehicles in one bay's queue in the first place.
+import { MAX_REPAIR_QUEUE } from './repairController.js';
 // Simulated time, never wall clock: field bans and threat memory are
 // simulation state, so they have to advance with the sim (including under
 // __step's fast-forward) and tick identically on every machine.
@@ -63,6 +67,34 @@ const REVERSE_DURATION = 1.5; // seconds backing off before trying the next deto
 const BAN_SECONDS = 45;
 // How far a cornered harvester runs when it has no facility to run to.
 const FLEE_DISTANCE = 90;
+
+/**
+ * Ground a harvester was shot on stays off-limits to the whole team for this
+ * long, within DANGER_ZONE_RADIUS of where the shooter was standing.
+ *
+ * Deliberately much longer than `BAN_SECONDS` (45) and than combatController's
+ * `THREAT_MEMORY` (6). Those two answer different questions: THREAT_MEMORY is
+ * "am I being shot at *right now*", which is what drives the flee itself, and a
+ * ban is one harvester's private "that field failed me". This is the team's
+ * memory of contested ground, and it should outlast the engagement that taught
+ * it — a harvester that returns the moment the shooting pauses has not learned
+ * anything, it has just respawned into the same ambush.
+ */
+const DANGER_ZONE_SECONDS = 90;
+/**
+ * How wide a lesson one shot teaches. Sized against the map (1024 units) and
+ * the weapons that do the shooting — a gun turret's reach is a few tens of
+ * units, so this covers the shooter's footprint and the approach to it without
+ * blanking a quarter of the island off the harvest map.
+ */
+const DANGER_ZONE_RADIUS = 70;
+/**
+ * Hard cap on remembered zones per team. Zones expire on their own, but a long
+ * running fight can mint them faster than they lapse, and every entry is walked
+ * on every field pick by every harvester. Oldest-first eviction: the newest
+ * lesson is the one worth keeping.
+ */
+const MAX_DANGER_ZONES = 12;
 const TRANSFER_SPEED = 0.5; // must be near enough stopped to load or unload
 
 // A fresh automatic pick prefers to leave a nearly-drained field alone and to
@@ -119,6 +151,71 @@ export class HarvesterAI {
     // Owns what `dockedHarvester` + `_haulQueue` + `_sweepFacilities` used to.
     this.facilityControl = facilityControl;
     this.states = new Map();
+    /**
+     * Contested ground, per team: `teamId -> [{ x, z, radius, until }]`.
+     *
+     * Team-shared rather than per-harvester, which is the whole point — one
+     * harvester getting shot should teach the fleet, not just itself. The
+     * per-harvester `s.bans` still exists alongside this and means something
+     * different ("this field failed *me*", from an unroutable or dry field);
+     * the two are complementary and both filter the same picker.
+     *
+     * Positional rather than field-keyed so that a harvester ambushed between
+     * fields — with no `s.field` to blame — still records the lesson.
+     */
+    this.dangerZones = new Map();
+  }
+
+  /** Live zones for a team, pruned of expired entries. The prune happens on
+   * read because there is no other tick that owns this structure, and a team
+   * that stops harvesting should not keep a stale list alive forever. */
+  dangerZonesFor(teamId) {
+    const zones = this.dangerZones.get(teamId);
+    if (!zones || !zones.length) return zones ?? [];
+    const now = simClock.time;
+    const live = zones.filter((z) => z.until > now);
+    if (live.length !== zones.length) this.dangerZones.set(teamId, live);
+    return live;
+  }
+
+  /**
+   * Remember that a team was fired on here. Called when a harvester enters
+   * FLEEING, from the shooter's position that combatController recorded.
+   *
+   * Merges into an overlapping existing zone rather than stacking a new one
+   * for every shot in a sustained exchange — otherwise a single turret firing
+   * for twenty seconds mints twenty near-identical zones and evicts the
+   * memory of every *other* contested place on the map.
+   */
+  markDangerZone(teamId, x, z, { radius = DANGER_ZONE_RADIUS, seconds = DANGER_ZONE_SECONDS } = {}) {
+    if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
+    const until = simClock.time + seconds;
+    const zones = this.dangerZonesFor(teamId).slice();
+
+    const existing = zones.find((zone) => Math.hypot(zone.x - x, zone.z - z) <= zone.radius);
+    if (existing) {
+      // Refresh rather than replace: the ground is still hot, and the older
+      // centre is as good a description of it as the newer one.
+      existing.until = Math.max(existing.until, until);
+      existing.radius = Math.max(existing.radius, radius);
+      this.dangerZones.set(teamId, zones);
+      return existing;
+    }
+
+    const zone = { x, z, radius, until };
+    zones.push(zone);
+    // Oldest-first: `zones` is append-ordered, so the head is the stalest.
+    while (zones.length > MAX_DANGER_ZONES) zones.shift();
+    this.dangerZones.set(teamId, zones);
+    return zone;
+  }
+
+  /** Is this point inside ground the team currently considers contested? */
+  inDangerZone(teamId, x, z) {
+    for (const zone of this.dangerZonesFor(teamId)) {
+      if (Math.hypot(zone.x - x, zone.z - z) <= zone.radius) return true;
+    }
+    return false;
   }
 
   stateOf(instance) {
@@ -128,6 +225,9 @@ export class HarvesterAI {
   /** Terrain regenerated: every field reference and destination is meaningless. */
   reset() {
     this.states.clear();
+    // Zones are world coordinates, so a regenerated world makes every one of
+    // them a statement about ground that no longer exists.
+    this.dangerZones.clear();
     // Player-set targets live on the instance, not in `states`, so clearing the
     // map alone would leave a harvester holding a field from the old world —
     // still not `dead`, so it would pass validation and route to coordinates
@@ -245,6 +345,14 @@ export class HarvesterAI {
     if (inst.threatUntil != null) {
       if (simClock.time < inst.threatUntil) {
         if (s.state !== FLEEING && s.state !== UNLOADING && s.state !== WAITING_FOR_DOCK) {
+          // Record the contested ground on the way into the flee, not on the
+          // way out: `threatFrom` is not serialized (see snapshot.js), so a
+          // save taken mid-flee would otherwise lose the one fact worth
+          // keeping. Marked once per flee — the guard above means a sustained
+          // exchange re-enters this branch only after the threat lapses.
+          if (inst.threatFrom) {
+            this.markDangerZone(inst.teamId, inst.threatFrom.x, inst.threatFrom.z);
+          }
           s.resumeState = this._safeResumeState(inst, s);
           s.state = FLEEING;
           s.dest = null;
@@ -364,6 +472,7 @@ export class HarvesterAI {
         reject: (f) =>
           (s.bans.get(f.id) ?? 0) > now ||
           f.blockedByTeam?.has(inst.teamId) ||
+          this.inDangerZone(inst.teamId, f.x, f.z) ||
           this._isFieldCrowdedOrLow(f, inst) ||
           this._countHarvestersOnField(f, inst) > 0,
       });
@@ -375,6 +484,7 @@ export class HarvesterAI {
           reject: (f) =>
             (s.bans.get(f.id) ?? 0) > now ||
             f.blockedByTeam?.has(inst.teamId) ||
+            this.inDangerZone(inst.teamId, f.x, f.z) ||
             this._isFieldCrowdedOrLow(f, inst),
         });
       }
@@ -384,6 +494,18 @@ export class HarvesterAI {
           // Note this last, most permissive tier still respects a block — a
           // player-blocked field is never "share anything reachable" either;
           // only the temporary per-harvester `bans` are given up on here.
+          //
+          // It also deliberately does *not* consult danger zones, and that
+          // omission is the release valve for the whole avoidance feature. The
+          // two tiers above route around contested ground whenever anywhere
+          // else will do; this one is reached only when nowhere else will. An
+          // economy that starves rather than work dangerous ground has not
+          // been made cautious, it has been switched off — and with zones
+          // lasting 90s across the whole team, a single well-placed turret
+          // could otherwise mean a team never harvests again. Taking the risk
+          // is the right call at this tier, and it is also what keeps the
+          // fallback below from spinning: clearing bans could never release a
+          // zone, so a zone-checking tier 3 would idle forever.
           reject: (f) => (s.bans.get(f.id) ?? 0) > now || f.blockedByTeam?.has(inst.teamId),
         });
       }
@@ -820,6 +942,13 @@ export class HarvesterAI {
     for (const s of this.structures?.instances ?? []) {
       if (s.def.id !== 'repair-bay' || s.mode !== 'idle') continue;
       if (s.teamId !== inst.teamId) continue;
+      // Same depth cap repairController applies (MAX_REPAIR_QUEUE there): a
+      // harvester that joins a full bay's queue stops harvesting for as long
+      // as the wait, which costs the team more than the damage does. Returning
+      // null here just means `_maybeBreakOffForRepair` declines and the
+      // harvester keeps working — the same path a missing or unaffordable bay
+      // already takes.
+      if (this.facilityControl.queueDepth(s) >= MAX_REPAIR_QUEUE) continue;
       const d = Math.hypot(s.x - pos.x, s.z - pos.z);
       if (d < bestD) {
         bestD = d;

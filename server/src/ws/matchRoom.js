@@ -50,11 +50,12 @@ export const INPUT_DELAY_TURNS = 2;
  * which is what catches an *old* server that predates this file's check
  * entirely and so never rejects the query param at all.
  */
-// Bumped to 3 alongside the client. See src/net/matchClient.js for why a
-// change with no wire-format difference still had to bump this — the itch.io
-// fork and the web build both declared v2 while running different simulations,
-// so the handshake waved through a guaranteed desync.
-export const PROTOCOL_VERSION = 3;
+// Bumped to 4 alongside the client. Same reasoning as the v3 bump — no wire
+// format changed, but the simulation behind it did: harvesters now consult
+// team-shared danger zones when picking a field, and the AI commander's army
+// budget no longer counts scouts. Two peers on either side of that route their
+// economies and armies differently within seconds.
+export const PROTOCOL_VERSION = 4;
 /** A player silent this long is dropped so the rest of the match can continue. */
 const DROP_AFTER_MS = 15000;
 /**

@@ -41,7 +41,13 @@ const API_BASE = typeof __API_URL__ === 'string' ? __API_URL__ : '';
 // two peers would simulate differently. A stale deployed bundle then fails
 // loudly at the handshake instead of silently playing a different game.
 // See docs/plans/itch-fork-silent-split-brain.md.
-export const PROTOCOL_VERSION = 3;
+//
+// v4 is that wider rule applied deliberately rather than in hindsight: the
+// frames are unchanged again, but harvesters now consult team-shared danger
+// zones when choosing a field (harvesterAI.js) and the AI commander's army
+// budget no longer counts scouts (aiCommander.js). Both decide where units
+// drive, so two peers straddling this bump diverge within seconds.
+export const PROTOCOL_VERSION = 4;
 
 // Exported so the query-string construction can be checked directly without a
 // browser `location` global — see matchClient-protocol.test.mjs, which sets
