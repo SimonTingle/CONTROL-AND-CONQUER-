@@ -31,6 +31,9 @@
  */
 
 import { commandsFor, basePad, producedUnitIds } from './commands.js';
+// For the tier's price only — the purchase itself goes through
+// TEAM_WEAPON_UPGRADE_COMMAND so there is one owner of the cost table.
+import { WEAPON_TIERS } from '../core/team.js';
 import { findSpawnPointNear } from '../core/pick.js';
 import { STRUCTURE_CATALOG } from '../structures/structures.js';
 import { simClock } from '../core/simClock.js';
@@ -76,12 +79,35 @@ const ADVANCE_DETOURS = [0.8, -0.8, 1.5, -1.5, 2.3, -2.3];
 // whether the commander commits to an attack at all — but the diagnostic that
 // prompted this had teams holding six and seven of them, which bought no extra
 // intel and cost the entire army budget.
+// maxWeaponTier is how far up WEAPON_TIERS (core/team.js) this difficulty will
+// buy. It is the first thing in this table that changes what an AI *does*
+// rather than how much or how often — every other knob here scales a number,
+// which is why a harder AI has so far been the same AI acting more often. A
+// tier is a real capability step: it divides fire interval (combatController)
+// and widens craters (craters.js's `1 + 0.12 * weaponTier`).
+//
+// easy stays at 0 deliberately. Combined with the army fix that made the
+// commander field a full roster at all, an easy opponent at tier 3 would be a
+// very large jump from the passive AI that shipped before it — 1.9x fire rate
+// *and* bigger holes is not an easy match.
 const DIFFICULTY_ECONOMY = {
-  easy: { harvesterCap: 2, buildInterval: 20, combatCap: 1, attackAt: 2, defenseCap: 1, reconCap: 1 },
-  normal: { harvesterCap: 2, buildInterval: 15, combatCap: 3, attackAt: 2, defenseCap: 2, reconCap: 2 },
-  hard: { harvesterCap: 2, buildInterval: 11, combatCap: 5, attackAt: 3, defenseCap: 3, reconCap: 2 },
-  expert: { harvesterCap: 2, buildInterval: 8, combatCap: 7, attackAt: 3, defenseCap: 3, reconCap: 3 },
+  easy: { harvesterCap: 2, buildInterval: 20, combatCap: 1, attackAt: 2, defenseCap: 1, reconCap: 1, maxWeaponTier: 0 },
+  normal: { harvesterCap: 2, buildInterval: 15, combatCap: 3, attackAt: 2, defenseCap: 2, reconCap: 2, maxWeaponTier: 2 },
+  hard: { harvesterCap: 2, buildInterval: 11, combatCap: 5, attackAt: 3, defenseCap: 3, reconCap: 2, maxWeaponTier: 3 },
+  expert: { harvesterCap: 2, buildInterval: 8, combatCap: 7, attackAt: 3, defenseCap: 3, reconCap: 3, maxWeaponTier: 3 },
 };
+
+/**
+ * Credits an upgrade must leave behind.
+ *
+ * Not an arbitrary cushion: it is the cost of a crystal-harvester, the economy
+ * unit this commander actually rebuilds when one dies. A tier bought with the
+ * last of the treasury speeds up guns the team can no longer afford to keep
+ * supplied — and a dead harvester it cannot replace costs far more over the
+ * rest of a match than a fire-rate step gains. Stated as the number it is
+ * protecting so a catalog price change is visibly the thing to re-check.
+ */
+const UPGRADE_RESERVE = 600;
 const DEFAULT_ECONOMY = DIFFICULTY_ECONOMY.normal;
 
 /**
@@ -472,10 +498,30 @@ export class AiCommander {
     // chain it wins the affordability race on every tick the team is between
     // paydays and the army never gets funded — which, with a shared budget,
     // is precisely how the AI ended up with 23 scouts and no tanks.
+    // Weapon tiers sit *after* combat, and that placement is the whole
+    // escalation mechanic — no timer, no separate schedule. `_tryBuildUnit`
+    // returns false precisely when the army is at `combatCap`, so the chain
+    // reaches an upgrade exactly when there is nothing better left to buy.
+    // Lose a tank and the army drops below cap, so the next tick rebuilds it
+    // instead: replacement outranks escalation for free, which is the right
+    // priority and would have taken explicit code to express any other way.
+    //
+    // Ahead of recon because a fire-rate tier is worth more than a second
+    // scout.
+    //
+    // Not, however, a fix for the AI's hoarding, and worth saying so here so
+    // nobody assumes it was: all three tiers together cost 5,200, against a
+    // strong team's 43,000+ match income. Measured, a team that ended at
+    // 29,109 idle credits before this existed ended at 27,891 after — it buys
+    // its tiers and goes right back to accumulating. A treasury that large
+    // wants a sink that scales (repairs, reinforcements, a second base), which
+    // is its own piece of work.
     if (!this._tryBuildUnit('economy', this.economy.harvesterCap)) {
       if (!this._manageDefense()) {
         if (!this._tryBuildUnit('combat', this.economy.combatCap)) {
-          this._tryBuildUnit('recon', this.economy.reconCap);
+          if (!this._tryUpgradeWeapons()) {
+            this._tryBuildUnit('recon', this.economy.reconCap);
+          }
         }
       }
     }
@@ -584,6 +630,48 @@ export class AiCommander {
     if (!bestCmd) return false;
     bestCmd.execute(bestStructure, this.ctx);
     return true;
+  }
+
+  /**
+   * Buy the next weapon tier, if this difficulty still allows one and the
+   * treasury can stand it.
+   *
+   * The upgrade itself is not reimplemented here — `TEAM_WEAPON_UPGRADE_COMMAND`
+   * (commands.js) already owns the cost table, the max-tier check and the
+   * spend, and it is the same command the player's radial menu fires. This
+   * only decides *whether the AI wants to*, which was the entire gap: the
+   * command has always existed and nothing on the AI side ever called it, so
+   * `weaponTier` stayed 0 on every AI team for whole matches. See
+   * docs/plans/ai-strategy-genre-audit.md.
+   *
+   * Same one-action-per-tick contract as `_tryBuildUnit`/`_manageDefense`, so
+   * `_manageEconomy` can chain it the same way.
+   */
+  _tryUpgradeWeapons() {
+    // `weaponTier` is a count of tiers already bought, so this reads as "has
+    // this difficulty spent its allowance". It covers easy's cap of 0 without
+    // a separate early-out — `0 >= 0` refuses, and a difficulty that somehow
+    // omits the knob defaults to 0 and refuses too. An explicit `maxTier <= 0`
+    // guard was written here first and removed once a negative control showed
+    // it could never change an outcome.
+    const maxTier = this.economy.maxWeaponTier ?? 0;
+    if (this.team.weaponTier >= maxTier) return false;
+
+    for (const s of this.ctx.structures.instances) {
+      if (s.teamId !== this.team.id || s.mode !== 'idle') continue;
+      const cmd = commandsFor(s, this.ctx).find((c) => c.id === 'upgrade-weapons');
+      // `enabledResult` covers affordability and the catalog's own max tier;
+      // the reserve below is this commander's own, stricter, question.
+      if (cmd?.enabledResult !== true) continue;
+
+      const cost = WEAPON_TIERS[this.team.weaponTier]?.cost;
+      if (cost == null) return false;
+      if (this.team.credits < cost + UPGRADE_RESERVE) return false;
+
+      cmd.execute(s, this.ctx);
+      return true;
+    }
+    return false;
   }
 
   // ---- army: arm what it builds, and send it at something it can see ----

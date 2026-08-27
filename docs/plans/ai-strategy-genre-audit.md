@@ -122,13 +122,23 @@ diagnostic's 147,610): scouts 23 → 8, gun platforms 1 → 10, AI teams fieldin
 an army 0 → 4 of 4, commanded kills 0 → 2. The strategic layer described above
 now actually executes.
 
-Deliberately not attempted, in rough order of value:
+Done since, on a follow-up branch — see
+`docs/plans/ai-weapon-tier-escalation.md`:
 
-- **Weapon-tier and structure upgrades for the AI.** The single largest
-  remaining gap against C&C, and the reason a fixed AI still cannot escalate.
-  It needs `TEAM_WEAPON_UPGRADE_COMMAND` reachable from the commander plus a
-  spending policy that weighs an upgrade against another tank.
+- **Weapon-tier upgrades for the AI**, which this document called the single
+  largest remaining gap. It turned out to be a missing *caller* rather than a
+  missing system: `TEAM_WEAPON_UPGRADE_COMMAND` already existed and was wired
+  only to the player's radial menu. The commander now buys tiers, gated by a
+  new `maxWeaponTier` per difficulty — the first entry in `DIFFICULTY_ECONOMY`
+  that changes behaviour rather than a magnitude.
+
+Still deliberately not attempted, in rough order of value:
+
+- **Structure upgrades.** The weapon tier is bought; per-building
+  `upgradeLevel` (`UPGRADE_COMMAND`) is still human-only.
 - **Tech-gated build order.** Cheapest-first is a placeholder, not a strategy.
+  Escalating *capability* is now covered; escalating *unit choice* is not, and
+  that is the other half of C&C's tech rhythm.
 - **Base relocation.** Implemented, never triggered — worth finding out whether
   the threshold is wrong or the situation never arises.
 - **Economy escort.** Homeworld's other half: nothing assigns a combat unit to
