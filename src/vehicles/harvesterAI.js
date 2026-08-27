@@ -105,12 +105,16 @@ const MAX_PARKING_BAYS = 4;
 const ABANDON_ESCALATION = 2;
 
 export class HarvesterAI {
-  constructor({ vehicles, world, heightmap, structures, game, facilityControl }) {
+  constructor({ vehicles, world, heightmap, structures, game, facilityControl, navGrid }) {
     this.vehicles = vehicles;
     this.world = world;
     this.heightmap = heightmap;
     this.structures = structures;
     this.game = game;
+    // Optional, same as aiCommander's — a match built without one (or an
+    // older save's context) just gets every leg driven straight-line, exactly
+    // today's behaviour.
+    this.navGrid = navGrid;
     // Who is allowed to approach the dock, and where everyone else holds.
     // Owns what `dockedHarvester` + `_haulQueue` + `_sweepFacilities` used to.
     this.facilityControl = facilityControl;
@@ -396,7 +400,7 @@ export class HarvesterAI {
 
     s.field = field;
     s.detours = 0;
-    if (this._order(inst, s, { x: field.x, z: field.z })) s.state = TO_FIELD;
+    if (this._advanceViaNavGrid(inst, s, { x: field.x, z: field.z })) s.state = TO_FIELD;
     else {
       s.bans.set(field.id, now + BAN_SECONDS);
       s.retryTimer = RETRY_PAUSE;
@@ -427,9 +431,10 @@ export class HarvesterAI {
   _retargetInFlight(inst, s) {
     const field = this._consumeTargetField(inst);
     if (!field || field === s.field) return;
-    if (!this._order(inst, s, { x: field.x, z: field.z })) return;
+    if (!this._advanceViaNavGrid(inst, s, { x: field.x, z: field.z })) return;
     s.field = field;
     s.waypoint = null;
+    s.navWaypoint = null;
     s.detours = 0;
     s.stallTimer = 0;
   }
@@ -869,6 +874,7 @@ export class HarvesterAI {
     s.state = TO_REPAIR;
     s.dest = null;
     s.waypoint = null;
+    s.navWaypoint = null;
     s.detours = 0;
     s.stallTimer = 0;
     return true;
@@ -934,6 +940,7 @@ export class HarvesterAI {
       inst.arrive('reached');
       s.dest = null;
       s.waypoint = null;
+      s.navWaypoint = null;
       s.detours = 0;
       s.stallTimer = 0;
       onArrive();
@@ -954,7 +961,19 @@ export class HarvesterAI {
       const wd = Math.hypot(s.waypoint.x - pos.x, s.waypoint.z - pos.z);
       if (wd <= WAYPOINT_RADIUS) {
         s.waypoint = null;
-        this._order(inst, s, dest);
+        this._advanceViaNavGrid(inst, s, dest);
+        return;
+      }
+    }
+
+    // Reached a NavGrid step: ask for the next one. Same shape as the local
+    // detour waypoint above, deliberately kept as a separate branch — see
+    // `_advanceViaNavGrid`'s header for why `s.navWaypoint` is its own field
+    // rather than reusing `s.waypoint`.
+    if (s.navWaypoint) {
+      const nd = Math.hypot(s.navWaypoint.x - pos.x, s.navWaypoint.z - pos.z);
+      if (nd <= WAYPOINT_RADIUS) {
+        this._advanceViaNavGrid(inst, s, dest);
         return;
       }
     }
@@ -1214,6 +1233,60 @@ export class HarvesterAI {
     const ok = inst.setTarget(point.x, point.z, this.heightmap);
     if (ok) s.dest = point;
     return ok;
+  }
+
+  /**
+   * Head toward the real destination `dest`, but ask NavGrid which way to go
+   * first — the same pattern `aiCommander.js`'s `_advanceUnit` already uses
+   * for army units, so a harvester routes around a structure sitting on the
+   * direct line instead of driving through it (see
+   * docs/plans/harvester-structure-avoidance.md).
+   *
+   * Deliberately a wrapper around `_order`, not a change to it: `_order`
+   * itself stays the single, simple "drive to this point" primitive that
+   * `_onAbandoned`'s local detour fan also calls directly (with its own
+   * short escape point, which has no business going through NavGrid — a
+   * three-metre reverse-and-retry manoeuvre is not "go around the mountain").
+   * Only the calls aiming at a *real* destination — a fresh leg, a retarget,
+   * or `_travel`'s own re-aim once a waypoint here is reached — route through
+   * this instead.
+   *
+   * `s.navWaypoint` is intentionally its own field, separate from
+   * `s.waypoint`. That one already means something specific — `_onAbandoned`
+   * treats it truthy as "already tried a local escape" and reverses
+   * immediately on the next abandonment — and a NavGrid step is almost always
+   * truthy on any leg longer than one ~24-unit cell. Reusing `s.waypoint` for
+   * it would make ordinary multi-cell travel indistinguishable from "already
+   * failed once," and change that escalation for the worse.
+   */
+  _advanceViaNavGrid(inst, s, dest) {
+    const pos = inst.group.position;
+    const waypoint = this.navGrid?.nextWaypoint(pos.x, pos.z, dest.x, dest.z);
+
+    // No grid, unreachable, or already in the goal's own cell (nextWaypoint
+    // answers with `dest` itself in that case) — nothing to route through,
+    // so drive the last/only leg directly. Exactly today's behaviour.
+    if (!waypoint || (waypoint.x === dest.x && waypoint.z === dest.z)) {
+      s.navWaypoint = null;
+      return this._order(inst, s, dest);
+    }
+
+    // NavGrid's cells are coarser than the fine-grained slope probe
+    // driveToTarget actually steers by, so a waypoint that hides an
+    // unclimbable local bump can come back identical call after call — a
+    // deterministic stall nothing here would otherwise break. Two repeats in
+    // a row means this step isn't working; fall through to the direct point
+    // instead, the same safe degrade as when NavGrid has nothing at all.
+    const repeat = s.navWaypoint &&
+      Math.hypot(waypoint.x - s.navWaypoint.x, waypoint.z - s.navWaypoint.z) < 1;
+    s.navStallCount = repeat ? (s.navStallCount ?? 0) + 1 : 0;
+    if (s.navStallCount >= 2) {
+      s.navWaypoint = null;
+      return this._order(inst, s, dest);
+    }
+
+    s.navWaypoint = waypoint;
+    return this._order(inst, s, waypoint);
   }
 
   _updateLoadCells(inst, s) {

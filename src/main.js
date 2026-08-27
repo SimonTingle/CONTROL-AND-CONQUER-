@@ -1535,12 +1535,21 @@ function leaveWreckage(inst) {
   world.scene.add(group);
 }
 
+// Built once and reused for the whole match — see navGrid.js's own header for
+// why one coarse flow-field cache can serve an entire army, and now every
+// harvester too. Moved up here (it used to live much further down, built
+// after harvesterAI) specifically so harvesterAI can take it as a
+// constructor dependency the same way aiCommander already does via
+// commandContext, rather than reaching for a module-level binding that
+// didn't exist yet at its own construction time.
+const navGrid = new NavGrid(heightmap, structures);
+
 // Ground control for every dock. Constructed before its two consumers because
 // both take it as a dependency — it owns the claim bookkeeping they each used
 // to keep their own copy of.
 const facilityControl = new FacilityControl({ vehicles, structures, heightmap });
 const harvesterAI = new HarvesterAI({
-  vehicles, world, heightmap, structures, game, facilityControl,
+  vehicles, world, heightmap, structures, game, facilityControl, navGrid,
 });
 const repairController = new RepairController({
   vehicles, structures, heightmap, game, facilityControl,
@@ -1775,11 +1784,6 @@ function updateRespawns(dt) {
     if (team.isHuman && chase.enabled) chase.reset(inst);
   }
 }
-
-// Built once and reused for the whole match — see navGrid.js's own header
-// for why one coarse flow-field cache can serve an entire army. Only
-// aiCommander queries it; nothing here needs its own reference.
-const navGrid = new NavGrid(heightmap);
 
 /** Everything a command might need, so commands.js imports no game systems. */
 // `entities` is here for the deployDefense intent, which consumes the vehicle
