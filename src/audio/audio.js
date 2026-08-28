@@ -750,3 +750,64 @@ export function debugState() {
     enginePresence: Object.fromEntries([...loops].map(([key, loop]) => [key, loop.presence])),
   };
 }
+
+/**
+ * Audition a recipe the author is editing, at a chosen distance.
+ *
+ * Deliberately routed through the *real* voice pool, the real panner and the
+ * real falloff — the same discipline `BuilderPreview` follows in using the
+ * actual `buildVehicleMesh` rather than an editor-only renderer. A preview
+ * with its own audio path could disagree with what a match plays, and the
+ * disagreement would be invisible until someone noticed the game sounded
+ * wrong. There is one path.
+ *
+ * The recipe is installed under a reserved id rather than its own event, so
+ * auditioning an unsaved edit never changes what the game around the editor is
+ * playing, and does not need the sound to be bound to an event at all.
+ *
+ * Placed to the listener's right rather than in front: with `panningModel`
+ * 'HRTF' a source directly ahead is the least informative position there is,
+ * and off to one side makes the distance cue legible.
+ *
+ * @param {object} recipe a validated recipe
+ * @param {number} distance metres from the listener
+ */
+export const AUDITION_ID = '__audition';
+
+export function auditionRecipe(recipe, distance = 10) {
+  if (!ctx || ctx.state !== 'running' || !listener) return;
+  setRecipe(AUDITION_ID, recipe);
+
+  const origin = new THREE.Vector3();
+  listener.getWorldPosition(origin);
+  const right = new THREE.Vector3(1, 0, 0).applyQuaternion(listener.getWorldQuaternion(new THREE.Quaternion()));
+  const at = origin.addScaledVector(right, Math.max(0, distance));
+  playAt(AUDITION_ID, at.x, at.y, at.z);
+}
+
+/** Stop auditioning and forget the buffer, so a stale bake can't be reused. */
+export function clearAudition() {
+  setRecipe(AUDITION_ID, null);
+}
+
+/**
+ * The gain a source at `distance` gets from `falloff`, as the panner computes
+ * it — `distanceModel: 'linear'`, per the Web Audio spec.
+ *
+ * Exported so the editor's distance graph can draw the curve the engine will
+ * actually apply rather than an artist's impression of it. Restating the
+ * formula in the preview would be the usual way for a graph to start lying
+ * about the thing it depicts.
+ */
+export function linearGainAt(distance, falloff) {
+  const ref = falloff?.refDistance ?? FALLOFF.default.refDistance;
+  const max = falloff?.maxDistance ?? FALLOFF.default.maxDistance;
+  const rolloff = falloff?.rolloffFactor ?? FALLOFF.default.rolloffFactor;
+  if (max <= ref) return 0;
+  const d = Math.min(Math.max(distance, ref), max);
+  return Math.max(0, 1 - rolloff * ((d - ref) / (max - ref)));
+}
+
+/** Seconds for sound to travel `distance` metres. Dry air, 20°C. */
+export const SPEED_OF_SOUND = 343;
+export const propagationDelay = (distance) => Math.max(0, distance) / SPEED_OF_SOUND;

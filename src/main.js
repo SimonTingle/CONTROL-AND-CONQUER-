@@ -16,6 +16,9 @@ import { DifficultyScreen, DIFFICULTIES } from './ui/difficultyScreen.js';
 import { PortalScreen } from './ui/portalScreen.js';
 import { AuthScreen } from './ui/authScreen.js';
 import { BuilderScreen } from './builder/builderScreen.js';
+import { SoundScreen } from './sound/soundScreen.js';
+import { loadCustomRecipes } from './sound/customSounds.js';
+import { soundCatalogFor } from './sound/soundCatalog.js';
 import { loadCustomDefs } from './builder/customVehicles.js';
 import { catalogFor } from './builder/customCatalog.js';
 import { validateDef } from './builder/vehicleDraft.js';
@@ -2293,6 +2296,7 @@ function beginMatch(difficulty) {
   // time a match actually begins. Online matches get the built-in catalog back
   // even if a sandbox session just added to it.
   applyCustomCatalog();
+  applyCustomSounds();
   // A match is the unit of simulated time — tick 0 is its first step. Every
   // ban, threat memory and (later) lockstep turn number is relative to this.
   resetSimClock(0);
@@ -2453,6 +2457,7 @@ game.signOut = async () => {
   game.portalScreen?.refreshAccount();
   // Another player's vehicles must not stay in the drawer after a sign-out.
   refreshCustomDefs();
+  refreshCustomSounds();
 };
 
 game.lobbyScreen = new LobbyScreen({
@@ -2487,7 +2492,7 @@ game.portalScreen = new PortalScreen(
     getAccount: () => game.account,
     onSignIn: () => game.signIn(),
     onSignOut: () => game.signOut(),
-    onGodMode: () => game.openBuilder(),
+    onGodMode: (app) => (app === 'sound' ? game.openSoundCreator() : game.openBuilder()),
   }
 );
 
@@ -2508,6 +2513,16 @@ game.customDefs = [];
 game.matchDefs = [];
 
 /**
+ * Author-built sounds, and the set an online match supplied — kept apart for
+ * exactly the reason `customDefs` and `matchDefs` are. A sound cannot desync a
+ * match (audio is presentation-only), but a recipe is still instructions to
+ * render a graph on every peer, so online takes its sounds from the match
+ * rather than from whatever this machine happens to have. See soundCatalog.js.
+ */
+game.customRecipes = [];
+game.matchRecipes = [];
+
+/**
  * Point the picker and the vehicle controller at the catalog this mode is
  * allowed to see.
  *
@@ -2522,6 +2537,34 @@ function applyCustomCatalog() {
   const extras = catalog.filter((d) => !VEHICLE_CATALOG.includes(d));
   vehicles.setExtraDefs(extras);
   vehiclePicker.setCatalog(catalog);
+}
+
+/**
+ * Install the sounds this mode is allowed to play.
+ *
+ * Called from the same places `applyCustomCatalog()` is, and for the same
+ * reason: the answer changes when the mode changes, and a stale answer here
+ * means the wrong sound plays rather than the wrong vehicle spawning.
+ */
+function applyCustomSounds() {
+  audio.setRecipes(soundCatalogFor(game.mode, game.customRecipes, game.matchRecipes));
+}
+
+/** Reload the signed-in author's sounds and make them available. */
+async function refreshCustomSounds() {
+  if (!api.isConfigured || !game.account) {
+    game.customRecipes = [];
+    applyCustomSounds();
+    return;
+  }
+  try {
+    const { recipes } = await loadCustomRecipes();
+    game.customRecipes = recipes;
+  } catch {
+    // A sound editor that cannot reach the backend must not stop the game.
+    game.customRecipes = [];
+  }
+  applyCustomSounds();
 }
 
 /** Reload the signed-in author's vehicles and make them available. */
@@ -2551,6 +2594,18 @@ game.openBuilder = () => {
     });
   }
   game.builderScreen.open();
+};
+
+game.openSoundCreator = () => {
+  if (!game.soundScreen) {
+    game.soundScreen = new SoundScreen({
+      toast: (m) => showToast(m),
+      // Reloading on close is what makes a sound saved in the editor take
+      // effect without a page refresh — the same rule as the vehicle builder.
+      onClose: () => refreshCustomSounds(),
+    });
+  }
+  game.soundScreen.open();
 };
 
 // Restores an existing session on load. Never throws and never blocks startup:

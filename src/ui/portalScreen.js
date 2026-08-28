@@ -95,14 +95,19 @@ export class PortalScreen {
       this.buttonRow.appendChild(btn);
     }
 
+    // God mode is now two apps rather than one, so it offers a choice instead
+    // of launching straight into the vehicle builder. Listed as data so a
+    // third app is one line here and one branch at the callback.
     const user = this.account.getAccount?.();
     if (user?.email === 'tingleteaching@gmail.com') {
-      const godBtn = document.createElement('button');
-      godBtn.type = 'button';
-      godBtn.className = 'portal-mode-btn god-mode-btn';
-      godBtn.textContent = 'God Mode';
-      godBtn.addEventListener('click', () => this.account.onGodMode?.());
-      this.buttonRow.appendChild(godBtn);
+      for (const app of GOD_MODE_APPS) {
+        const godBtn = document.createElement('button');
+        godBtn.type = 'button';
+        godBtn.className = 'portal-mode-btn god-mode-btn';
+        godBtn.textContent = app.label;
+        godBtn.addEventListener('click', () => this.account.onGodMode?.(app.id));
+        this.buttonRow.appendChild(godBtn);
+      }
     }
   }
 
@@ -161,3 +166,13 @@ export class PortalScreen {
     this.root.replaceChildren(panel);
   }
 }
+
+/**
+ * The god-mode apps. `vehicle` is first and keeps the plain "God Mode" label
+ * it has always had, so the button someone already knows does not move or
+ * rename underneath them.
+ */
+const GOD_MODE_APPS = [
+  { id: 'vehicle', label: 'God Mode' },
+  { id: 'sound', label: 'Sound Creator' },
+];

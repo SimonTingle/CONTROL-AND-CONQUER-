@@ -241,3 +241,56 @@ export function validateRecipe(recipe, { catalog = [] } = {}) {
 
   return problems;
 }
+
+/**
+ * The `low` level's four macros, applied to a recipe from a captured base.
+ *
+ * The problem a macro solves: the honest per-layer parameters are cutoff
+ * frequencies and envelope times, which is the right vocabulary for someone
+ * who knows what a lowpass is and the wrong one for everybody else. "Bigger"
+ * and "brighter" are what an author actually wants to say.
+ *
+ * They are applied *from a base* rather than accumulated, and are deliberately
+ * **not stored on the recipe**. Both follow from the same requirement: the
+ * three levels must be one sound, not three. If macros were stored, a sound
+ * nudged at `low` and then opened at `advanced` would show layer values that
+ * disagreed with the macro that produced them, and the author would have two
+ * sets of numbers fighting over one sound. Writing them through to the layers
+ * means `advanced` always shows the truth, and the macros simply return to
+ * neutral — they are a way of moving the sliders, not a second sound model.
+ *
+ * The cost, stated plainly: macros are not undoable by returning them to 1.0
+ * once the recipe has been reloaded, because the base they were measured from
+ * is gone. That is the same bargain any destructive macro control makes.
+ *
+ * @param {object} recipe mutated in place
+ * @param {object} base the recipe as it was when the macros were last neutral
+ * @param {{size?: number, brightness?: number, length?: number}} macros
+ */
+export function applyMacros(recipe, base, macros = {}) {
+  const size = Number(macros.size) || 1;
+  const brightness = Number(macros.brightness) || 1;
+  const length = Number(macros.length) || 1;
+
+  recipe.layers = (base.layers ?? []).map((layer, i) => {
+    const next = { ...(recipe.layers?.[i] ?? {}), ...layer };
+    // Length stretches both the body and when a staggered layer comes in, so
+    // a two-layer sound keeps its internal timing rather than collapsing.
+    next.duration = clampField(layer.duration * length, 0.02, 4);
+    next.startTime = clampField((layer.startTime ?? 0) * length, 0, 4);
+    if (layer.kind === 'tone') {
+      // Bigger means lower, which is the one piece of real acoustics in here:
+      // a larger radiating body resonates lower. Inverting size is what makes
+      // "Size" read as mass rather than as volume.
+      next.startHz = clampField((layer.startHz * brightness) / size, 20, 6000);
+      next.endHz = clampField((layer.endHz * brightness) / size, 20, 6000);
+    } else {
+      next.startFreq = clampField((layer.startFreq * brightness) / size, 60, 11000);
+      next.endFreq = clampField((layer.endFreq * brightness) / size, 20, 11000);
+    }
+    return next;
+  });
+  return syncId(recipe);
+}
+
+const clampField = (v, min, max) => Math.min(max, Math.max(min, Number(v) || min));
