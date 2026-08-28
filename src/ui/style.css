@@ -1073,6 +1073,21 @@ body.settings-open #hud { transform: translateX(calc(var(--panel-width) + 8px));
    own look later without touching the shared .portal-mode-btn rule. */
 .god-mode-btn {}
 
+/* The app chooser's own row. Deliberately NOT .portal-button-row: that one is
+   absolutely positioned against the screen's lower third to sit on the
+   backdrop image, which is right for the landing screen and wrong inside a
+   panel — it would pull the buttons out of the panel they belong to. */
+.god-mode-row {
+  display: flex;
+  gap: 12px;
+  width: 100%;
+  margin: 8px 0 4px;
+}
+
+@media (max-width: 620px) {
+  .god-mode-row { flex-wrap: wrap; }
+}
+
 @media (max-width: 620px) {
   .portal-button-row { flex-wrap: wrap; bottom: 4%; }
   .portal-mode-btn { flex: 1 1 40%; }

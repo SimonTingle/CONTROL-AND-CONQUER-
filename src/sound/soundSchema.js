@@ -62,10 +62,34 @@ const pick = (path, label, options, level = 'medium') =>
  *
  * `field` rather than `path` because a layer's real path depends on its index.
  */
-export const LAYER_KINDS = ['noise', 'tone'];
+export const LAYER_KINDS = ['noise', 'tone', 'fm', 'sweep', 'pulse', 'chirp'];
+
+/** Display names. The raw kind is a shorthand; the label says what it makes. */
+export const LAYER_LABELS = {
+  noise: 'Noise',
+  tone: 'Tone',
+  fm: 'FM (metallic)',
+  sweep: 'Sweep (band)',
+  pulse: 'Pulse (rhythm)',
+  chirp: 'Chirp (repeats)',
+};
 
 const layerNum = (field, label, min, max, step, level = 'medium') =>
   ({ type: 'slider', field, label, min, max, step, level });
+
+/**
+ * A layer's dropdown.
+ *
+ * Deliberately NOT `pick()` above, which is for the fixed-path controls and
+ * emits `path`. A layer control is addressed by `field` — its real path
+ * depends on the layer's index — and the editor's `buildLayerControl` reads
+ * `control.field` for every widget type. Using `pick()` here wrote to
+ * `layer[undefined]`, so the waveform dropdown silently did nothing: it
+ * looked right, changed nothing, and re-read as blank. One helper per
+ * addressing mode is what stops that recurring.
+ */
+const layerPick = (field, label, options, level = 'medium') =>
+  ({ type: 'select', field, label, options, level });
 
 export const LAYER_CONTROLS = {
   noise: [
@@ -77,11 +101,79 @@ export const LAYER_CONTROLS = {
     layerNum('startTime', 'Delay in', 0, 4, 0.01, 'advanced'),
   ],
   tone: [
-    pick('wave', 'Waveform', ['sine', 'square', 'sawtooth', 'triangle'], 'medium'),
+    layerPick('wave', 'Waveform', ['sine', 'square', 'sawtooth', 'triangle'], 'medium'),
     layerNum('duration', 'Length', 0.02, 4, 0.01, 'medium'),
     layerNum('startHz', 'Start pitch (Hz)', 20, 6000, 1, 'medium'),
     layerNum('endHz', 'End pitch (Hz)', 20, 6000, 1, 'medium'),
     layerNum('attack', 'Attack', 0.001, 0.5, 0.001, 'advanced'),
+    layerNum('gain', 'Level', 0, 1, 0.01, 'medium'),
+    layerNum('startTime', 'Delay in', 0, 4, 0.01, 'advanced'),
+  ],
+
+  // --- the four added after the first release --------------------------
+  //
+  // `noise` and `tone` between them cover impacts and chimes and very little
+  // else: both are a single source through a lowpass, so anything metallic,
+  // anything that moves past you, anything that repeats, and anything with a
+  // resonant band rather than a ceiling was simply unmakeable. Each of these
+  // is one extra Web Audio node over what already exists, and each unlocks a
+  // whole family rather than one more variation.
+
+  // Carrier modulated by a second oscillator. The classic way to get
+  // inharmonic partials — bells, clangs, alarms, sci-fi tones — none of which
+  // can be built by summing `tone` layers, because their partials are not
+  // whole-number multiples of the fundamental.
+  fm: [
+    layerPick('wave', 'Carrier wave', ['sine', 'square', 'sawtooth', 'triangle'], 'medium'),
+    layerNum('duration', 'Length', 0.02, 4, 0.01, 'medium'),
+    layerNum('startHz', 'Start pitch (Hz)', 20, 6000, 1, 'medium'),
+    layerNum('endHz', 'End pitch (Hz)', 20, 6000, 1, 'medium'),
+    // Expressed as a ratio, not Hz: the character of an FM sound follows the
+    // carrier:modulator *ratio*, so a bell stays a bell when transposed.
+    layerNum('ratio', 'Modulator ratio', 0.1, 12, 0.05, 'medium'),
+    layerNum('index', 'Brightness (FM index)', 0, 2000, 5, 'medium'),
+    layerNum('attack', 'Attack', 0.001, 0.5, 0.001, 'advanced'),
+    layerNum('gain', 'Level', 0, 1, 0.01, 'medium'),
+    layerNum('startTime', 'Delay in', 0, 4, 0.01, 'advanced'),
+  ],
+
+  // Noise through a *bandpass* that sweeps, rather than the lowpass `noise`
+  // uses. A moving resonant band is what a pass-by actually sounds like; a
+  // falling lowpass ceiling only ever sounds like something getting duller.
+  sweep: [
+    layerNum('duration', 'Length', 0.02, 4, 0.01, 'medium'),
+    layerNum('startFreq', 'Band start (Hz)', 60, 11000, 10, 'medium'),
+    layerNum('endFreq', 'Band end (Hz)', 60, 11000, 10, 'medium'),
+    // High Q is the difference between "wind" and "a whistle".
+    layerNum('q', 'Resonance', 0.3, 24, 0.1, 'medium'),
+    layerNum('attack', 'Attack', 0.001, 0.5, 0.001, 'advanced'),
+    layerNum('gain', 'Level', 0, 1, 0.01, 'medium'),
+    layerNum('startTime', 'Delay in', 0, 4, 0.01, 'advanced'),
+  ],
+
+  // A tone gated by an LFO on its own gain. Alarms, klaxons, geiger ticks,
+  // radio squelch — anything whose identity is a *rhythm* rather than a
+  // timbre, which no amount of envelope shaping on a single tone can produce.
+  pulse: [
+    layerPick('wave', 'Waveform', ['sine', 'square', 'sawtooth', 'triangle'], 'medium'),
+    layerNum('duration', 'Length', 0.02, 4, 0.01, 'medium'),
+    layerNum('startHz', 'Pitch (Hz)', 20, 6000, 1, 'medium'),
+    layerNum('rateHz', 'Pulses per second', 0.5, 40, 0.5, 'medium'),
+    // 0 = smooth tremolo, 1 = hard on/off gating.
+    layerNum('depth', 'Gate depth', 0, 1, 0.01, 'medium'),
+    layerNum('gain', 'Level', 0, 1, 0.01, 'medium'),
+    layerNum('startTime', 'Delay in', 0, 4, 0.01, 'advanced'),
+  ],
+
+  // N fast pitch ramps in a row. Birds, UI trills, radio blips, data bursts —
+  // built as repeats rather than as N separate layers so a 12-blip chirp
+  // costs one layer of the eight allowed, not twelve.
+  chirp: [
+    layerPick('wave', 'Waveform', ['sine', 'square', 'triangle', 'sawtooth'], 'medium'),
+    layerNum('duration', 'Length', 0.02, 4, 0.01, 'medium'),
+    layerNum('startHz', 'Start pitch (Hz)', 20, 6000, 1, 'medium'),
+    layerNum('endHz', 'End pitch (Hz)', 20, 6000, 1, 'medium'),
+    layerNum('repeats', 'Repeats', 1, 24, 1, 'medium'),
     layerNum('gain', 'Level', 0, 1, 0.01, 'medium'),
     layerNum('startTime', 'Delay in', 0, 4, 0.01, 'advanced'),
   ],

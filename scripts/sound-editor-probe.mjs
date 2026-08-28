@@ -98,7 +98,31 @@ const result = await page.evaluate(async () => {
   out.rmsAfter = rms(await synth.bakeRecipe(b, recipes.recipeDuration(b)));
   out.editChangesBake = Math.abs(out.rmsBefore - out.rmsAfter) > 1e-4;
 
-  // --- 3. the editor ---
+  // --- 3. every layer kind actually renders audio ---
+  //
+  // The unit tests prove a layer of each kind validates; only a real
+  // OfflineAudioContext can prove it *makes a sound*. A kind whose primitive
+  // is misconnected still validates perfectly and bakes pure silence, which
+  // is the specific failure this catches.
+  out.layerRms = {};
+  for (const kind of Object.keys((await import('/src/sound/soundSchema.js')).LAYER_CONTROLS)) {
+    const r = recipes.blankRecipe('probe');
+    r.layers = [recipes.blankLayer(kind)];
+    recipes.syncId(r);
+    out.layerRms[kind] = Number(rms(await synth.bakeRecipe(r, recipes.recipeDuration(r))).toFixed(5));
+  }
+  out.everyLayerAudible = Object.values(out.layerRms).every((v) => v > 0.0001);
+
+  // --- 4. every preset bakes ---
+  const presets = await import('/src/sound/soundPresets.js');
+  out.presetSilent = [];
+  for (const p of presets.SOUND_PRESETS) {
+    const buf = await synth.bakeRecipe(p.recipe, recipes.recipeDuration(p.recipe));
+    if (rms(buf) <= 0.0001) out.presetSilent.push(p.id);
+  }
+  out.presetCount = presets.SOUND_PRESETS.length;
+
+  // --- 5. the editor ---
   const screen = new SoundScreen({ toast: () => {} });
   screen.open();
   await sleep(600);
@@ -123,6 +147,36 @@ const result = await page.evaluate(async () => {
 
   screen.close();
   out.editorClosed = root.classList.contains('hidden');
+
+  // --- 6. the god-mode portal ---
+  const { PortalScreen } = await import('/src/ui/portalScreen.js');
+  const { GOD_MODE_EMAIL } = await import('/src/core/adminAccount.js');
+  const portalRoot = document.getElementById('portal');
+  const opened = [];
+  const portal = new PortalScreen(() => {}, {
+    isConfigured: true,
+    getAccount: () => ({ email: GOD_MODE_EMAIL, displayName: 'probe' }),
+    onGodMode: (app) => opened.push(app),
+  });
+  portal.showGodMode();
+  const apps = [...portalRoot.querySelectorAll('.god-mode-row .god-mode-btn')];
+  out.godModePanelApps = apps.length;
+  out.godModeAppLabels = apps.map((b) => b.textContent);
+  apps[1]?.click();
+  out.godModeOpened = opened;
+  // Back must return to the landing grid, not leave a dead panel.
+  portalRoot.querySelector('.portal-back')?.click();
+  out.godModeBackWorks = !!portalRoot.querySelector('.portal-button-row');
+
+  // A non-admin must not be able to open the panel even by calling it.
+  const denied = new PortalScreen(() => {}, {
+    isConfigured: true,
+    getAccount: () => ({ email: 'nobody@example.com', displayName: 'nobody' }),
+    onGodMode: () => opened.push('LEAKED'),
+  });
+  denied.showGodMode();
+  out.godModeDeniedForOthers = !document.querySelector('.god-mode-row');
+
   return out;
 });
 
@@ -131,6 +185,10 @@ const ok = !result.error
   && result.entriesForOneIntensity === 3
   && result.entriesForEightIntensities === 8
   && result.editChangesBake
+  && result.everyLayerAudible
+  && result.presetSilent?.length === 0
+  && result.godModePanelApps === 2
+  && result.godModeBackWorks
   && result.editorVisible
   && result.columns === 3
   && result.waveformPixels > 0
