@@ -317,3 +317,113 @@ test('variation still separates entries for one sound', () => {
   const b = cacheKey('destroyed', { scale: 1 }, 1);
   assert.notEqual(a, b);
 });
+
+// --- the four layer kinds added after the first release -------------------
+
+/**
+ * `noise` and `tone` between them are two shapes of "one source through a
+ * lowpass", which is why whole families of sound were unmakeable: nothing
+ * inharmonic (a bell), nothing with a moving resonant band (a pass-by),
+ * nothing whose identity is a rhythm (an alarm), and nothing repeating (a
+ * trill). These tests pin that the new kinds are real members of the schema
+ * rather than aliases, and that the bounds and validation reach them exactly
+ * as they reach the original two.
+ */
+const { SOUND_PRESETS } = await import('../src/sound/soundPresets.js');
+const { LAYER_LABELS } = await import('../src/sound/soundSchema.js');
+
+test('every layer kind has controls, bounds and a label', () => {
+  const bounds = deriveLayerBounds();
+  for (const kind of ['noise', 'tone', 'fm', 'sweep', 'pulse', 'chirp']) {
+    assert.ok(LAYER_CONTROLS[kind]?.length, `${kind} has no controls`);
+    assert.ok(Object.keys(bounds[kind] ?? {}).length, `${kind} has no bounds`);
+    assert.ok(LAYER_LABELS[kind], `${kind} has no label`);
+  }
+});
+
+test('a blank layer of every kind produces a valid recipe', () => {
+  for (const kind of Object.keys(LAYER_CONTROLS)) {
+    const recipe = blankRecipe('t');
+    recipe.layers = [blankLayer(kind)];
+    syncId(recipe);
+    assert.deepEqual(validateRecipe(recipe), [], `${kind} did not validate`);
+  }
+});
+
+test('a blank layer carries every field its controls declare', () => {
+  // A field the schema exposes but blankLayer omits is a slider that reads
+  // undefined and writes a value the primitive never had a default for.
+  for (const kind of Object.keys(LAYER_CONTROLS)) {
+    const layer = blankLayer(kind);
+    for (const control of LAYER_CONTROLS[kind]) {
+      const field = control.field;
+      assert.notEqual(layer[field], undefined, `${kind}.${field} is undefined on a blank layer`);
+    }
+  }
+});
+
+test('every layer control is addressed by `field`, never `path`', () => {
+  // The editor's buildLayerControl reads `control.field` for every widget
+  // type. A layer control emitted with `path` instead (as the fixed-path
+  // `pick()` helper does) writes to layer[undefined] — which is exactly how
+  // the waveform dropdown silently did nothing before this was caught.
+  for (const kind of Object.keys(LAYER_CONTROLS)) {
+    for (const control of LAYER_CONTROLS[kind]) {
+      assert.ok(control.field, `${kind} has a control with no field: ${JSON.stringify(control)}`);
+      assert.equal(control.path, undefined, `${kind}.${control.field} uses path, not field`);
+    }
+  }
+});
+
+test('a bad waveform is rejected on every kind that has one', () => {
+  for (const kind of Object.keys(LAYER_CONTROLS)) {
+    const hasWave = LAYER_CONTROLS[kind].some((c) => c.type === 'select' && c.field === 'wave');
+    if (!hasWave) continue;
+    const recipe = blankRecipe('t');
+    recipe.layers = [{ ...blankLayer(kind), wave: 'definitely-not-a-waveform' }];
+    syncId(recipe);
+    assert.ok(
+      validateRecipe(recipe).some((p) => /waveform must be one of/.test(p)),
+      `${kind} accepted a bad waveform`,
+    );
+  }
+});
+
+test('the new kinds are bounded like the old ones', () => {
+  const bounds = deriveLayerBounds();
+  const recipe = blankRecipe('t');
+  recipe.layers = [{ ...blankLayer('fm'), index: bounds.fm.index.max + 1 }];
+  syncId(recipe);
+  assert.ok(validateRecipe(recipe).some((p) => /index must be between/.test(p)));
+});
+
+// --- presets --------------------------------------------------------------
+
+test('every preset is a valid recipe', () => {
+  // A preset that does not validate would be offered as a starting point and
+  // then refuse to save, which is worse than not offering it.
+  for (const preset of SOUND_PRESETS) {
+    assert.deepEqual(validateRecipe(preset.recipe), [], `preset "${preset.id}" is invalid`);
+  }
+});
+
+test('preset ids are unique', () => {
+  const ids = SOUND_PRESETS.map((p) => p.id);
+  assert.equal(new Set(ids).size, ids.length);
+});
+
+test('the presets exercise every layer kind', () => {
+  // The second reason presets exist: a slider called "Modulator ratio" tells
+  // you nothing until you have heard one. A layer kind with no preset is a
+  // feature nobody can discover.
+  const used = new Set(SOUND_PRESETS.flatMap((p) => p.recipe.layers.map((l) => l.kind)));
+  for (const kind of Object.keys(LAYER_CONTROLS)) {
+    assert.ok(used.has(kind), `no preset demonstrates the "${kind}" layer`);
+  }
+});
+
+test('presets carry their own content-addressed id', () => {
+  for (const preset of SOUND_PRESETS) {
+    assert.equal(preset.recipe.id, soundIdFor(preset.recipe), `preset "${preset.id}" id is stale`);
+  }
+});

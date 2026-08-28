@@ -84,9 +84,25 @@ export const cloneRecipe = (recipe) => JSON.parse(JSON.stringify(recipe));
 
 /** A layer with every field the matching primitive reads, so none is undefined. */
 export function blankLayer(kind = 'noise') {
-  return kind === 'tone'
-    ? { kind: 'tone', wave: 'sine', startHz: 440, endHz: 220, duration: 0.3, attack: 0.005, gain: 0.4, startTime: 0 }
-    : { kind: 'noise', duration: 0.3, startFreq: 3000, endFreq: 200, attack: 0.004, gain: 0.5, startTime: 0 };
+  // Each default is a *recognisable example of its kind*, not a neutral zero:
+  // adding an `fm` layer with index 0 would produce a plain sine and look
+  // like the control did nothing. Every field the matching primitive reads is
+  // present, so no layer can arrive at the baker with an undefined parameter.
+  switch (kind) {
+    case 'tone':
+      return { kind: 'tone', wave: 'sine', startHz: 440, endHz: 220, duration: 0.3, attack: 0.005, gain: 0.4, startTime: 0 };
+    case 'fm':
+      // ratio 3.5 is deliberately inharmonic — the point of FM.
+      return { kind: 'fm', wave: 'sine', startHz: 320, endHz: 200, ratio: 3.5, index: 400, duration: 0.6, attack: 0.002, gain: 0.4, startTime: 0 };
+    case 'sweep':
+      return { kind: 'sweep', startFreq: 300, endFreq: 4000, q: 4, duration: 0.5, attack: 0.02, gain: 0.4, startTime: 0 };
+    case 'pulse':
+      return { kind: 'pulse', wave: 'square', startHz: 660, rateHz: 6, depth: 1, duration: 0.8, gain: 0.3, startTime: 0 };
+    case 'chirp':
+      return { kind: 'chirp', wave: 'sine', startHz: 1800, endHz: 3200, repeats: 4, duration: 0.4, gain: 0.35, startTime: 0 };
+    default:
+      return { kind: 'noise', duration: 0.3, startFreq: 3000, endFreq: 200, attack: 0.004, gain: 0.5, startTime: 0 };
+  }
 }
 
 /**
@@ -195,9 +211,13 @@ export function validateRecipe(recipe, { catalog = [] } = {}) {
         problems.push(`Layer ${i + 1} has an unknown kind.`);
         return;
       }
-      if (kind === 'tone') {
-        const waves = ['sine', 'square', 'sawtooth', 'triangle'];
-        if (!waves.includes(layer.wave)) problems.push(`Layer ${i + 1}: waveform must be one of ${waves.join(', ')}.`);
+      // Derived from the schema rather than hardcoded to `tone`: four of the
+      // six layer kinds carry a waveform, and listing them here by hand is
+      // exactly the drift the schema-derived bounds exist to prevent. An
+      // unchecked wave reaches `osc.type =` and throws at bake time.
+      const waveControl = LAYER_CONTROLS[kind].find((c) => c.type === 'select' && c.field === 'wave');
+      if (waveControl && !waveControl.options.includes(layer.wave)) {
+        problems.push(`Layer ${i + 1}: waveform must be one of ${waveControl.options.join(', ')}.`);
       }
       if (!isFinitePositive(layer.duration)) problems.push(`Layer ${i + 1}: length must be a positive number.`);
       for (const [field, { min, max }] of Object.entries(LAYER_BOUNDS[kind])) {

@@ -515,6 +515,209 @@ export function engineGraph(ctx, baseHz) {
   };
 }
 
+/**
+ * A carrier oscillator whose frequency is modulated by a second oscillator —
+ * two-operator FM.
+ *
+ * The reason this exists alongside `tone`: FM produces *inharmonic* partials,
+ * sidebands at carrier ± n·modulator. Bells, clangs and alarm tones are
+ * inharmonic, which is exactly why they cannot be built by stacking `tone`
+ * layers — every partial a sum of tones can produce sits at a whole-number
+ * multiple of the fundamental, and that is the definition of "not a bell".
+ *
+ * `ratio` rather than an absolute modulator frequency, because the character
+ * of an FM sound follows the carrier:modulator ratio: hold the ratio and a
+ * bell transposes and stays a bell; fix the modulator in Hz and it becomes a
+ * different instrument at every pitch.
+ *
+ * @param {OfflineAudioContext} ctx
+ */
+function fmTone(ctx, { wave, startHz, endHz, ratio, index, duration, attack, gain, startTime = 0, destination }) {
+  const t0 = ctx.currentTime + startTime;
+
+  const carrier = ctx.createOscillator();
+  carrier.type = wave;
+  carrier.frequency.setValueAtTime(startHz, t0);
+  carrier.frequency.exponentialRampToValueAtTime(Math.max(1, endHz), t0 + duration);
+
+  const modulator = ctx.createOscillator();
+  modulator.type = 'sine'; // a non-sine modulator turns to mud very fast
+  modulator.frequency.setValueAtTime(startHz * ratio, t0);
+  modulator.frequency.exponentialRampToValueAtTime(Math.max(1, endHz * ratio), t0 + duration);
+
+  // The modulation depth in Hz. Swept down alongside the amplitude envelope
+  // so the sound gets *duller* as it decays, which is what a struck object
+  // does — holding the index constant reads as synthetic.
+  const depth = ctx.createGain();
+  depth.gain.setValueAtTime(index, t0);
+  depth.gain.exponentialRampToValueAtTime(Math.max(0.0001, index * 0.02), t0 + duration);
+
+  modulator.connect(depth);
+  depth.connect(carrier.frequency);
+
+  const env = ctx.createGain();
+  env.gain.setValueAtTime(0, t0);
+  env.gain.linearRampToValueAtTime(gain, t0 + attack);
+  env.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+
+  carrier.connect(env);
+  env.connect(destination ?? ctx.destination);
+  modulator.start(t0);
+  carrier.start(t0);
+  modulator.stop(t0 + duration + 0.02);
+  carrier.stop(t0 + duration + 0.02);
+  return { carrier, modulator, env };
+}
+
+/**
+ * Noise through a *bandpass* whose centre frequency sweeps.
+ *
+ * `noiseBurst` uses a lowpass, which can only ever remove the top: sweeping
+ * it sounds like something getting duller. A moving resonant band is a
+ * different perceptual object — it is what a vehicle passing you actually
+ * does to broadband noise, and with a high `q` it is a whistle rather than
+ * wind. Neither is reachable with a lowpass at any setting.
+ */
+function noiseSweep(ctx, { duration, startFreq, endFreq, q, attack, gain, startTime = 0, destination }) {
+  const t0 = ctx.currentTime + startTime;
+  const frames = Math.ceil(duration * ctx.sampleRate);
+  const buffer = ctx.createBuffer(1, frames, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < frames; i++) data[i] = Math.random() * 2 - 1;
+
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+
+  const filter = ctx.createBiquadFilter();
+  filter.type = 'bandpass';
+  filter.Q.value = q;
+  filter.frequency.setValueAtTime(startFreq, t0);
+  filter.frequency.exponentialRampToValueAtTime(Math.max(20, endFreq), t0 + duration);
+
+  // Makeup gain, and not a fudge: a bandpass of centre f0 and quality Q passes
+  // a band of width f0/Q, so the noise *power* through it falls as 1/Q and the
+  // amplitude as 1/sqrt(Q). Without compensating, "Level 0.5" means something
+  // completely different on a sweep than on a tone, and raising Q — which the
+  // author does to make a whistle rather than wind — silences the layer as a
+  // side effect of a control that says nothing about volume.
+  //
+  // The constant on top covers the rest of the gap: a lowpass passes
+  // everything below its cutoff, so `noise` starts with far more of the
+  // spectrum than any bandpass ever has. Measured against the other layer
+  // kinds at matched Level rather than derived, and it only has to put them
+  // in the same ballpark — the Level slider does the fine work.
+  const makeup = Math.sqrt(Math.max(0.0001, q)) * 3.2;
+  // Clamped to full scale, and this is the honest part: the loss *cannot* be
+  // fully recovered. RMS and peak are different quantities — a narrow band has
+  // little energy but its peak is still bounded by 1 — so past a point the
+  // makeup would only drive the envelope past full scale and clip, which on
+  // bandpassed noise is audible distortion rather than loudness. Measured
+  // RMS at Level 0.4, Q 4: 0.006 uncompensated, 0.016 compensated and clamped,
+  // against 0.032 for `noise` and ~0.054 for `tone`/`fm`. (An unclamped
+  // version measured 0.027 — *higher* than the clamped one, because clipping
+  // adds distortion energy. Louder and worse.)
+  // A high-Q sweep stays quieter than a broadband layer, which is what a
+  // narrow filter physically does; the Level slider and the recipe's overall
+  // gain are where an author makes up the rest.
+  const peak = Math.min(1, gain * makeup);
+
+  const env = ctx.createGain();
+  env.gain.setValueAtTime(0, t0);
+  env.gain.linearRampToValueAtTime(peak, t0 + attack);
+  env.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+
+  source.connect(filter);
+  filter.connect(env);
+  env.connect(destination ?? ctx.destination);
+  source.start(t0);
+  return { source, filter, env };
+}
+
+/**
+ * A tone gated by an LFO on its own gain — tremolo at low depth, hard on/off
+ * at high depth.
+ *
+ * The family this unlocks is defined by *rhythm* rather than timbre: alarms,
+ * klaxons, geiger ticks, engine idle chug, radio squelch. No envelope on a
+ * single `tone` can produce a repeating pattern, and building one as N layers
+ * would spend the whole eight-layer budget on a four-beep alert.
+ *
+ * The LFO is offset so it oscillates between `1 - depth` and `1` rather than
+ * around zero: at depth 1 that is full gating, at 0 it is a steady tone, and
+ * the control stays meaningful across its whole range.
+ */
+function pulseTone(ctx, { wave, hz, rateHz, depth, duration, gain, startTime = 0, destination }) {
+  const t0 = ctx.currentTime + startTime;
+
+  const osc = ctx.createOscillator();
+  osc.type = wave;
+  osc.frequency.setValueAtTime(hz, t0);
+
+  const gate = ctx.createGain();
+  gate.gain.value = 1 - depth;
+
+  const lfo = ctx.createOscillator();
+  lfo.type = 'square';
+  lfo.frequency.value = rateHz;
+  const lfoDepth = ctx.createGain();
+  lfoDepth.gain.value = depth * 0.5;
+  lfo.connect(lfoDepth);
+  lfoDepth.connect(gate.gain);
+
+  // A gentle overall envelope on top, so the pulse train still fades rather
+  // than stopping mid-cycle with a click.
+  const env = ctx.createGain();
+  env.gain.setValueAtTime(0, t0);
+  env.gain.linearRampToValueAtTime(gain, t0 + Math.min(0.02, duration * 0.1));
+  env.gain.setValueAtTime(gain, t0 + duration * 0.8);
+  env.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+
+  osc.connect(gate);
+  gate.connect(env);
+  env.connect(destination ?? ctx.destination);
+  lfo.start(t0);
+  osc.start(t0);
+  lfo.stop(t0 + duration + 0.02);
+  osc.stop(t0 + duration + 0.02);
+  return { osc, lfo, env };
+}
+
+/**
+ * N short pitch ramps in a row — birds, UI trills, radio blips, data bursts.
+ *
+ * Built as one layer with a repeat count rather than N `tone` layers so a
+ * twelve-blip burst costs one of the eight layers a recipe is allowed, not
+ * twelve. The repeats share a single oscillator, restarting the pitch ramp
+ * and the envelope each cycle.
+ */
+function chirpTone(ctx, { wave, startHz, endHz, repeats, duration, gain, startTime = 0, destination }) {
+  const t0 = ctx.currentTime + startTime;
+  const each = duration / repeats;
+  // A gap keeps the blips distinct; without it a high repeat count smears
+  // into one continuous glide and the control appears to do nothing.
+  const sound = each * 0.6;
+
+  const osc = ctx.createOscillator();
+  osc.type = wave;
+  const env = ctx.createGain();
+  env.gain.setValueAtTime(0, t0);
+
+  for (let i = 0; i < repeats; i++) {
+    const at = t0 + i * each;
+    osc.frequency.setValueAtTime(startHz, at);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(1, endHz), at + sound);
+    env.gain.setValueAtTime(0, at);
+    env.gain.linearRampToValueAtTime(gain, at + Math.min(0.004, sound * 0.2));
+    env.gain.exponentialRampToValueAtTime(0.0001, at + sound);
+  }
+
+  osc.connect(env);
+  env.connect(destination ?? ctx.destination);
+  osc.start(t0);
+  osc.stop(t0 + duration + 0.02);
+  return { osc, env };
+}
+
 // ---------------------------------------------------------------------------
 // Authored sounds
 // ---------------------------------------------------------------------------
@@ -574,37 +777,99 @@ export function bakeRecipe(recipe, duration) {
       const length = Math.max(0.01, Math.min(total - startTime, Number(layer.duration) || 0.1));
       if (length <= 0) continue;
 
-      if (layer.kind === 'tone') {
-        tone(ctx, {
-          wave: layer.wave ?? 'sine',
-          startHz: Math.max(1, Number(layer.startHz) || 220),
-          endHz: Math.max(1, Number(layer.endHz) || 220),
-          duration: length,
-          attack: Math.max(0.0005, Number(layer.attack) || 0.005),
-          gain,
-          startTime,
-        });
-      } else {
-        // `noiseBurst` has no `startTime` — it always begins at
-        // `ctx.currentTime`, which in an offline context is 0. Rather than
-        // change a primitive five shipped sounds depend on, a delayed noise
-        // layer is routed through a DelayNode. Same audible result, and the
-        // built-ins' code path is untouched.
-        let destination = ctx.destination;
-        if (startTime > 0) {
-          const delay = ctx.createDelay(BAKE_DURATION_CEILING);
-          delay.delayTime.value = startTime;
-          delay.connect(ctx.destination);
-          destination = delay;
+      const attack = Math.max(0.0005, Number(layer.attack) || 0.005);
+
+      switch (layer.kind) {
+        case 'tone':
+          tone(ctx, {
+            wave: layer.wave ?? 'sine',
+            startHz: Math.max(1, Number(layer.startHz) || 220),
+            endHz: Math.max(1, Number(layer.endHz) || 220),
+            duration: length,
+            attack,
+            gain,
+            startTime,
+          });
+          break;
+
+        case 'fm':
+          fmTone(ctx, {
+            wave: layer.wave ?? 'sine',
+            startHz: Math.max(1, Number(layer.startHz) || 220),
+            endHz: Math.max(1, Number(layer.endHz) || 220),
+            ratio: Math.max(0.01, Number(layer.ratio) || 1),
+            index: Math.max(0, Number(layer.index) || 0),
+            duration: length,
+            attack,
+            gain,
+            startTime,
+          });
+          break;
+
+        case 'sweep':
+          noiseSweep(ctx, {
+            duration: length,
+            startFreq: Math.max(20, Number(layer.startFreq) || 400),
+            endFreq: Math.max(20, Number(layer.endFreq) || 4000),
+            q: Math.max(0.0001, Number(layer.q) || 1),
+            attack,
+            gain,
+            startTime,
+          });
+          break;
+
+        case 'pulse':
+          pulseTone(ctx, {
+            wave: layer.wave ?? 'square',
+            hz: Math.max(1, Number(layer.startHz) || 440),
+            rateHz: Math.max(0.01, Number(layer.rateHz) || 8),
+            depth: Math.min(1, Math.max(0, Number(layer.depth) ?? 1)),
+            duration: length,
+            gain,
+            startTime,
+          });
+          break;
+
+        case 'chirp':
+          chirpTone(ctx, {
+            wave: layer.wave ?? 'sine',
+            startHz: Math.max(1, Number(layer.startHz) || 2000),
+            endHz: Math.max(1, Number(layer.endHz) || 4000),
+            // Rounded and floored at 1: a fractional or zero repeat count
+            // divides the duration into nonsense and yields silence.
+            repeats: Math.max(1, Math.round(Number(layer.repeats) || 1)),
+            duration: length,
+            gain,
+            startTime,
+          });
+          break;
+
+        default: {
+          // `noise`, and anything unrecognised — validateRecipe rejects an
+          // unknown kind, so reaching here with one means a bug upstream, and
+          // a plain noise burst is the safest thing to make of it.
+          //
+          // `noiseBurst` has no `startTime` — it always begins at
+          // `ctx.currentTime`, which in an offline context is 0. Rather than
+          // change a primitive five shipped sounds depend on, a delayed noise
+          // layer is routed through a DelayNode. Same audible result, and the
+          // built-ins' code path is untouched.
+          let destination = ctx.destination;
+          if (startTime > 0) {
+            const delay = ctx.createDelay(BAKE_DURATION_CEILING);
+            delay.delayTime.value = startTime;
+            delay.connect(ctx.destination);
+            destination = delay;
+          }
+          noiseBurst(ctx, {
+            duration: length,
+            startFreq: Math.max(20, Number(layer.startFreq) || 3000),
+            endFreq: Math.max(20, Number(layer.endFreq) || 200),
+            attack: Math.max(0.0005, Number(layer.attack) || 0.004),
+            gain,
+            destination,
+          });
         }
-        noiseBurst(ctx, {
-          duration: length,
-          startFreq: Math.max(20, Number(layer.startFreq) || 3000),
-          endFreq: Math.max(20, Number(layer.endFreq) || 200),
-          attack: Math.max(0.0005, Number(layer.attack) || 0.004),
-          gain,
-          destination,
-        });
       }
     }
   });

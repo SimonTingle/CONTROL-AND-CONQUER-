@@ -96,19 +96,19 @@ export class PortalScreen {
       this.buttonRow.appendChild(btn);
     }
 
-    // God mode is now two apps rather than one, so it offers a choice instead
-    // of launching straight into the vehicle builder. Listed as data so a
-    // third app is one line here and one branch at the callback.
+    // One button, not one per app. God mode now holds more than a single
+    // tool, and listing each of them alongside the three play modes put
+    // developer tooling on the same footing as "how do you want to play" —
+    // and would have grown the row by one every time a tool was added. It
+    // opens its own panel instead; see showGodMode().
     const user = this.account.getAccount?.();
     if (isGodModeAccount(user)) {
-      for (const app of GOD_MODE_APPS) {
-        const godBtn = document.createElement('button');
-        godBtn.type = 'button';
-        godBtn.className = 'portal-mode-btn god-mode-btn';
-        godBtn.textContent = app.label;
-        godBtn.addEventListener('click', () => this.account.onGodMode?.(app.id));
-        this.buttonRow.appendChild(godBtn);
-      }
+      const godBtn = document.createElement('button');
+      godBtn.type = 'button';
+      godBtn.className = 'portal-mode-btn god-mode-btn';
+      godBtn.textContent = 'God Mode';
+      godBtn.addEventListener('click', () => this.showGodMode());
+      this.buttonRow.appendChild(godBtn);
     }
   }
 
@@ -144,6 +144,57 @@ export class PortalScreen {
     this.onChoose?.(modeId);
   }
 
+  /**
+   * The god-mode app chooser — a second portal, one level in.
+   *
+   * Deliberately the same shape as showComingSoon() below: replace the root's
+   * children with a panel that ends in a Back button wired to buildGrid().
+   * That is this screen's established way of going one level deep and coming
+   * back, and reusing it means Back behaves identically wherever it appears.
+   *
+   * Re-checks the account rather than trusting that the button was rendered.
+   * Same reasoning as the guards on `game.openBuilder`/`openSoundCreator` in
+   * main.js (see core/adminAccount.js): a panel reachable only from a gated
+   * button is gated by accident, not by design.
+   */
+  showGodMode() {
+    if (!isGodModeAccount(this.account.getAccount?.())) return;
+
+    const panel = document.createElement('div');
+    panel.className = 'portal-panel';
+
+    const h1 = document.createElement('h1');
+    h1.textContent = 'God Mode';
+    panel.appendChild(h1);
+
+    const hint = document.createElement('p');
+    hint.className = 'hint';
+    hint.textContent = 'Authoring tools. Nothing here affects a match in progress.';
+    panel.appendChild(hint);
+
+    const row = document.createElement('div');
+    row.className = 'god-mode-row';
+    for (const app of GOD_MODE_APPS) {
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'portal-mode-btn god-mode-btn';
+      card.textContent = app.label;
+      if (app.blurb) card.title = app.blurb;
+      card.addEventListener('click', () => this.account.onGodMode?.(app.id));
+      row.appendChild(card);
+    }
+    panel.appendChild(row);
+
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'portal-card portal-back';
+    back.textContent = 'Back';
+    back.addEventListener('click', () => this.buildGrid());
+    panel.appendChild(back);
+
+    this.root.replaceChildren(panel);
+  }
+
   showComingSoon() {
     const panel = document.createElement('div');
     panel.className = 'portal-panel';
@@ -169,11 +220,14 @@ export class PortalScreen {
 }
 
 /**
- * The god-mode apps. `vehicle` is first and keeps the plain "God Mode" label
- * it has always had, so the button someone already knows does not move or
- * rename underneath them.
+ * The god-mode apps, listed as data so adding a third is one entry here and
+ * one branch at main.js's `onGodMode` callback.
+ *
+ * `vehicle` is named for what it is now that it has a sibling — "God Mode"
+ * was only ever an accurate label while it was the sole tool behind that
+ * button, and that button still exists one level up.
  */
 const GOD_MODE_APPS = [
-  { id: 'vehicle', label: 'God Mode' },
-  { id: 'sound', label: 'Sound Creator' },
+  { id: 'vehicle', label: 'Vehicle Creator', blurb: 'Build and edit custom vehicles.' },
+  { id: 'sound', label: 'Sound Creator', blurb: 'Author, audition and bind game sounds.' },
 ];

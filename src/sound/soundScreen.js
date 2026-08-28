@@ -21,11 +21,12 @@
  */
 import { SoundPreview } from './soundPreview.js';
 import {
-  SOUND_GROUPS, LAYER_CONTROLS, LEVELS, MAX_LAYERS,
+  SOUND_GROUPS, LAYER_CONTROLS, LAYER_KINDS, LAYER_LABELS, LEVELS, MAX_LAYERS,
   controlVisible, getPath, setPath,
 } from './soundSchema.js';
+import { SOUND_PRESETS } from './soundPresets.js';
 import {
-  applyMacros, blankLayer, blankRecipe, cloneRecipe, syncId, validateRecipe,
+  applyMacros, blankLayer, blankRecipe, cloneRecipe, forkRecipe, syncId, validateRecipe,
 } from './soundRecipe.js';
 import { loadCustomRecipes, saveCustomSound, deleteCustomSound } from './customSounds.js';
 import { SOUND_EVENTS, silentEvents } from '../audio/soundEvents.js';
@@ -325,7 +326,7 @@ export class SoundScreen {
       const head = document.createElement('div');
       head.className = 'sound-layer-head';
       const name = document.createElement('strong');
-      name.textContent = `${index + 1}. ${layer.kind === 'tone' ? 'Tone' : 'Noise'}`;
+      name.textContent = `${index + 1}. ${LAYER_LABELS[layer.kind] ?? layer.kind}`;
       head.appendChild(name);
       if (this.level === 'advanced' && this.recipe.layers.length > 1) {
         const del = document.createElement('button');
@@ -354,8 +355,8 @@ export class SoundScreen {
     if (this.level === 'advanced' && (this.recipe.layers?.length ?? 0) < MAX_LAYERS) {
       const add = document.createElement('div');
       add.className = 'sound-layer-add';
-      for (const kind of ['noise', 'tone']) {
-        add.appendChild(this.button(`Add ${kind}`, () => {
+      for (const kind of LAYER_KINDS) {
+        add.appendChild(this.button(`+ ${LAYER_LABELS[kind] ?? kind}`, () => {
           this.recipe.layers.push(blankLayer(kind));
           // The macro base has to move with the layer list, or a later macro
           // drag would rebuild the layers from a base that is missing this one
@@ -491,6 +492,26 @@ export class SoundScreen {
 
     this.left.appendChild(this.recipeGroup('My sounds', finished));
     if (drafts.length) this.left.appendChild(this.recipeGroup('Drafts', drafts, true));
+
+    // Presets first: a blank noise+tone is the worst place to start a sound
+    // from, and the distance between it and anything recognisable is most of
+    // the work. See soundPresets.js.
+    const presets = document.createElement('section');
+    presets.className = 'builder-group';
+    const ph = document.createElement('h2');
+    ph.textContent = 'Start from a preset';
+    presets.appendChild(ph);
+    for (const p of SOUND_PRESETS) {
+      const card = this.card(p.name, () => {
+        // Forked, not loaded by reference — otherwise editing a sound would
+        // mutate the preset for the rest of the session and the next author
+        // would get someone else's edits as their starting point.
+        this.loadRecipe(forkRecipe(p.recipe, p.name), null);
+      });
+      card.title = `${p.category} preset`;
+      presets.appendChild(card);
+    }
+    this.left.appendChild(presets);
 
     // The silent moments, first-class. This is the column's whole reason for
     // being driven by the event registry rather than by what has been saved:
