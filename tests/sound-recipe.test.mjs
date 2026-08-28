@@ -265,3 +265,55 @@ test('the save mode is what customSounds writes and stays inside the API’s lim
   // server/src/routes/saves.js: mode is z.string().max(32).nullish()
   assert.ok(SOUND_SAVE_MODE.length <= 32);
 });
+
+// --- the buffer cache key -------------------------------------------------
+
+/**
+ * `cacheKey` is pure, so the bug it fixes can be pinned here rather than by a
+ * browser count — which is the better test in every respect: deterministic,
+ * dependency-free, and it names the actual defect instead of a symptom that
+ * needs a working AudioContext, a running dev server and a rendered page to
+ * observe.
+ *
+ * Imported from audio.js, which pulls in `three` at module scope. That is the
+ * one dependency `npm test` tolerates — it is already a runtime dependency of
+ * the game and needs no browser, database or network to import.
+ */
+const { cacheKey } = await import('../src/audio/audio.js');
+
+test('the cache key distinguishes generator params', () => {
+  // The bug: the key was `${id}:${variation}` with params passed to the
+  // generator but absent from the key. Three variations, so after three plays
+  // every explosion returned whichever buffer was baked first — a 5-damage
+  // plink and a base-station kill made the identical noise.
+  const light = cacheKey('explosionGround', { intensity: 0.3 }, 0);
+  const heavy = cacheKey('explosionGround', { intensity: 3.4 }, 0);
+  assert.notEqual(light, heavy);
+});
+
+test('the cache key still collapses repeats of the same params', () => {
+  // The other half, and the reason params are quantised rather than keyed
+  // raw: `intensity` is a continuous sqrt, so an exact-float key would mean a
+  // fresh offline render for practically every shell — trading a correctness
+  // bug for a performance one.
+  assert.equal(
+    cacheKey('explosionGround', { intensity: 1.0 }, 0),
+    cacheKey('explosionGround', { intensity: 1.001 }, 0),
+  );
+  assert.equal(cacheKey('uiConfirm', null, 2), cacheKey('uiConfirm', null, 2));
+});
+
+test('the cache key is stable regardless of param insertion order', () => {
+  // Keys are built from sorted names, so two call sites that happen to build
+  // the same params object differently still hit one cache entry.
+  assert.equal(
+    cacheKey('weaponFire', { calibre: 20, intensity: 1 }, 1),
+    cacheKey('weaponFire', { intensity: 1, calibre: 20 }, 1),
+  );
+});
+
+test('variation still separates entries for one sound', () => {
+  const a = cacheKey('destroyed', { scale: 1 }, 0);
+  const b = cacheKey('destroyed', { scale: 1 }, 1);
+  assert.notEqual(a, b);
+});

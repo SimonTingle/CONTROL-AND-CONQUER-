@@ -414,7 +414,7 @@ function dropCached(id) {
  * performance one. Two decimal places keeps distinct calibres distinct while
  * still hitting the cache for repeated fire from the same gun.
  */
-function cacheKey(id, params, variation) {
+export function cacheKey(id, params, variation) {
   let suffix = '';
   if (params) {
     for (const name of Object.keys(params).sort()) {

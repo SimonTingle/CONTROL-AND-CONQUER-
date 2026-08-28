@@ -98,12 +98,29 @@ sweep and gain off `intensity`, and `craters.js` feeds it the same
 `sqrt(damage / REFERENCE_DAMAGE)` that decides crater size — so the visual
 still scales and the audio silently stopped.
 
-Measured in the browser (`scripts/sound-editor-probe.mjs`):
+Measured in the browser (`scripts/sound-editor-probe.mjs`), against the fixed
+build:
 
-| | fixed | old key |
-|---|---|---|
-| cache entries after 30 plays at one intensity | 3 | 3 |
-| cache entries after 8 *distinct* intensities | 8 | 0 |
+| | measured |
+|---|---|
+| cache entries after 30 plays at one intensity | 3 (the three variations) |
+| cache entries after 8 *distinct* intensities | 8 |
+
+The negative control for this is a **unit test, not the browser probe**, and
+that is a correction worth recording rather than quietly tidying away. The
+first plan was to revert the key in the browser and watch the second number
+fall to zero. Attempting it produced `"audio never initialised"` — the probe
+failed, but for the wrong reason, and a negative control that fails for the
+wrong reason has demonstrated nothing. (Two earlier runs *did* report 0, but
+they were taken while Vite's HMR was reloading the page under the probe as
+files were edited, so they cannot be trusted either.)
+
+`cacheKey` is a pure function, so exporting it and pinning it in `npm test` is
+the better instrument in every respect: deterministic, dependency-free, and it
+names the actual defect rather than a symptom that needs a working
+`AudioContext`, a dev server and a rendered page to observe. Four tests, three
+negative controls — params dropped from the key, param names left unsorted,
+params keyed raw instead of quantised — each failing its own test.
 
 Params are quantised to two decimal places rather than keyed raw. `intensity`
 is a continuous square root, so keying the exact float would mean a fresh
@@ -258,20 +275,22 @@ reassurance.
 
 ## Verification
 
-- `npm test` — 408 tests, 26 new, dependency-free.
-- **Eight negative controls**, each a surgical edit, each confirmed to fail the
+- `npm test` — 412 tests, 30 new, dependency-free.
+- **Eleven negative controls**, each a surgical edit, each confirmed to fail the
   right test for a behavioural reason: `recipeDuration` ignoring `startTime`;
   `event` removed from the identity keys; macros accumulating instead of
   measured from a base; macro clamping removed; the layer-kind check accepting
   anything; the falloff-inversion check removed; `soundCatalogFor` using a
   `!== 'multiplayer-online'` test instead of allowlists; and drafts/unbound
-  recipes not filtered.
+  recipes not filtered; and three on `cacheKey` — params dropped from the key,
+  param names left unsorted, params keyed raw instead of quantised.
 - **Browser verification** — `scripts/sound-editor-probe.mjs`, run against the
   dev server. Every number it reports is a count or a comparison, not a timing,
   so it means the same in a GPU-less container as on real hardware (the
   property `audio-load-probe.mjs` was built around).
-- A **browser negative control** on the cache key: reverting to
-  `${id}:${variation}` takes the eight-distinct-intensities count from 8 to 0.
+- The cache-key negative control is a **unit test**, not the browser probe —
+  see the correction under finding 2 above. The probe verifies the fixed build
+  reports 3 and 8; the defect itself is pinned by `cacheKey`'s own tests.
 - `npm run build` passes.
 
 ## Deliberately not done
