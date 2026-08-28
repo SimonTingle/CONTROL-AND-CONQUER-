@@ -1491,7 +1491,7 @@ function updateEngineAudio(dt) {
     // already reads to decide how dark a track a vehicle leaves.
     const baseHz = THREE.MathUtils.clamp(260 - v.def.weight * 14, 55, 220);
     const speedFrac = v.def.speed > 0 ? Math.min(1, v.speed / v.def.speed) : 0;
-    audio.updateEngineLoop(v.id, v.group, baseHz, speedFrac, dt);
+    audio.updateEngineLoop(v.id, v.group, baseHz, speedFrac, dt, v.def.id);
   }
   for (const key of audio.activeLoopKeys()) {
     if (!live.has(key)) audio.stopEngineLoop(key);

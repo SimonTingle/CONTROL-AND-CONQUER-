@@ -405,15 +405,51 @@ export const AMBIENCE_SEGMENT_SECONDS = 5;
  *   `render/projectileFx.js`'s shadow-to-glow cross-fade already gives the
  *   visuals.
  */
-export function ambienceSegment(kind) {
-  const night = kind === 'night';
-  // Each call re-rolls its own take — see the header above on why this is
-  // what makes the stream generative rather than a loop with extra steps.
-  const baseFreq = (night ? 500 : 900) * (0.85 + variedSeed() * 0.3);
-  const lfoHz = (night ? 0.07 : 0.13) * (0.7 + variedSeed() * 0.6);
-  const lfoDepth = (night ? 180 : 400) * (0.8 + variedSeed() * 0.4);
-  const gain = night ? 0.32 : 0.5;
-  const duration = AMBIENCE_SEGMENT_SECONDS;
+/**
+ * The two beds exactly as they sounded before ambience was authorable.
+ *
+ * The jitter widths encode what the original expressions did: `0.85 + r*0.3`
+ * is a 30%-wide window centred on 1, so `freqJitter: 0.3`. Writing them this
+ * way rather than as opaque min/max pairs is what lets one schema describe
+ * both beds and lets an author reason about "how much does this wander"
+ * instead of about two numbers that have to stay ordered.
+ *
+ * Pinned by test against the ranges they produce, for the same reason
+ * DEFAULT_ENGINE_SPEC is: authoring must not change what already ships.
+ */
+export const DEFAULT_AMBIENCE_SPEC = {
+  day: {
+    baseFreq: 900, freqJitter: 0.3,
+    lfoHz: 0.13, lfoJitter: 0.6,
+    lfoDepth: 400, depthJitter: 0.4,
+    gain: 0.5, filterQ: 0.4,
+    segmentSeconds: AMBIENCE_SEGMENT_SECONDS,
+  },
+  night: {
+    baseFreq: 500, freqJitter: 0.3,
+    lfoHz: 0.07, lfoJitter: 0.6,
+    lfoDepth: 180, depthJitter: 0.4,
+    gain: 0.32, filterQ: 0.4,
+    segmentSeconds: AMBIENCE_SEGMENT_SECONDS,
+  },
+};
+
+export function ambienceSegment(kind, spec) {
+  const s = { ...(DEFAULT_AMBIENCE_SPEC[kind === 'night' ? 'night' : 'day']), ...(spec ?? {}) };
+  const num = (v, fallback) => (Number.isFinite(Number(v)) ? Number(v) : fallback);
+
+  // Each call re-rolls its own take — see the header above on why this is what
+  // makes the stream generative rather than a loop with extra steps. The
+  // jitter widths are part of the spec rather than hidden constants precisely
+  // so an author can *see* them: setting them all to zero turns the bed back
+  // into a loop, which is a legitimate thing to want and should be a visible
+  // choice rather than an accident.
+  const baseFreq = num(s.baseFreq, 900) * (1 - num(s.freqJitter, 0) / 2 + variedSeed() * num(s.freqJitter, 0));
+  const lfoHz = num(s.lfoHz, 0.13) * (1 - num(s.lfoJitter, 0) / 2 + variedSeed() * num(s.lfoJitter, 0));
+  const lfoDepth = num(s.lfoDepth, 400) * (1 - num(s.depthJitter, 0) / 2 + variedSeed() * num(s.depthJitter, 0));
+  const gain = Math.min(1, Math.max(0, num(s.gain, 0.5)));
+  const duration = Math.min(20, Math.max(1, num(s.segmentSeconds, AMBIENCE_SEGMENT_SECONDS)));
+  const filterQ = num(s.filterQ, 0.4);
 
   return bake(duration, (ctx) => {
     const frames = Math.ceil(duration * ctx.sampleRate);
@@ -426,7 +462,7 @@ export function ambienceSegment(kind) {
 
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
-    filter.Q.value = 0.4;
+    filter.Q.value = filterQ;
 
     const lfo = ctx.createOscillator();
     lfo.frequency.value = lfoHz;
@@ -473,44 +509,175 @@ export function ambienceSegment(kind) {
  *   `speedFrac` is 0 (idle) to 1 (top speed); `output` is what the caller
  *   connects into its `PositionalAudio`'s node source.
  */
-export function engineGraph(ctx, baseHz) {
-  const osc1 = ctx.createOscillator();
-  const osc2 = ctx.createOscillator();
-  osc1.type = 'sawtooth';
-  osc2.type = 'sawtooth';
-  osc1.frequency.value = baseHz;
-  osc2.frequency.value = baseHz * 1.008; // slight detune — two-cylinder beat, not a pure tone
+/**
+ * The engine every vehicle had before engines were authorable.
+ *
+ * These are not defaults in the "reasonable starting value" sense — they are
+ * the *exact* constants `engineGraph` used when its graph was hardcoded, kept
+ * as one object so a vehicle with no recipe sounds byte-identical to how it
+ * sounded before this feature existed. `tests/authorable-engines.test.mjs`
+ * pins each number against the behaviour it produces, so a well-meaning tidy
+ * of this table is a failing test rather than a silent change to every
+ * vehicle in the game.
+ *
+ * Same non-regression rule that kept `GENERATORS` untouched when recipes
+ * arrived: adding the ability to author something must not change what
+ * already ships.
+ */
+export const DEFAULT_ENGINE_SPEC = {
+  oscillators: 2,
+  wave: 'sawtooth',
+  /** Second oscillator's pitch ratio — the beat that stops it being a pure
+   * tone. Small on purpose: past a few cents it stops being one engine. */
+  detune: 1.008,
+  filterType: 'lowpass',
+  filterQ: 0.5,
+  /** Cutoff at idle, as a multiple of pitch. */
+  cutoffRatio: 4,
+  /** How much further the cutoff opens at full speed, in the same units. */
+  cutoffRise: 10,
+  /** Pitch multiplier added at full speed: 0.9 means +90% at top speed. */
+  pitchRise: 0.9,
+  gainIdle: 0.14,
+  gainRise: 0.12,
+  /** Gain the graph is built at, before the first `setSpeed` overwrites it.
+   * Its own field rather than derived from idle/rise: the original hardcoded
+   * graph started at 0.18, which is not any expression of the other two, and
+   * "identical unless authored" has to mean identical. */
+  gainStart: 0.18,
+};
+
+/**
+ * Render a few seconds of an engine held at one speed, as a buffer.
+ *
+ * `engineGraph` builds a *live* graph, which is right for the game and
+ * useless for an editor: there is nothing to draw and nothing to audition
+ * through the ordinary one-shot path. This runs the same construction logic
+ * inside an `OfflineAudioContext` at a fixed speed so an author can hear what
+ * they are editing.
+ *
+ * Deliberately reuses `engineGraph` rather than reimplementing the graph. A
+ * separate "preview engine" would be free to drift from the real one, and an
+ * editor that lies about its output is worse than one with no preview — the
+ * same rule that makes the vehicle builder render with the real
+ * `buildVehicleMesh`.
+ *
+ * @param {object} [spec] see DEFAULT_ENGINE_SPEC
+ * @param {number} [baseHz] idle pitch
+ * @param {number} [speedFrac] 0 idle .. 1 full
+ * @param {number} [seconds]
+ */
+export function bakeEngineSample(spec, baseHz = 150, speedFrac = 0, seconds = 1.2) {
+  const duration = Math.min(4, Math.max(0.2, seconds));
+  return bake(duration, (ctx) => {
+    const engine = engineGraph(ctx, baseHz, spec);
+    // A short fade at both ends, so auditioning does not click. The live graph
+    // does not need this — it is faded by the presence ramp in audio.js — but
+    // a bare buffer starting mid-oscillation would.
+    const env = ctx.createGain();
+    const fade = Math.min(0.08, duration * 0.15);
+    env.gain.setValueAtTime(0, 0);
+    env.gain.linearRampToValueAtTime(1, fade);
+    env.gain.setValueAtTime(1, duration - fade);
+    env.gain.linearRampToValueAtTime(0, duration);
+    engine.output.connect(env);
+    env.connect(ctx.destination);
+    engine.setSpeed(speedFrac);
+  });
+}
+
+/**
+ * A persistent engine tone, built from a spec.
+ *
+ * **Construction happens once per vehicle loop; only `setSpeed` runs per
+ * frame.** That split is what makes authorable engines affordable at all, and
+ * it is deliberately preserved here: every value the spec contributes is read
+ * and folded into a local constant *now*, so `setSpeed` closes over plain
+ * numbers and does no lookups, no branching on the spec, and no allocation.
+ * The per-frame cost is identical to the hardcoded version — same four
+ * `linearRampToValueAtTime` calls, or fewer with one oscillator.
+ *
+ * This matters more than usual: `updateEngineLoop` is the path an FPS
+ * regression was already traced to once (docs/plans/fps-regression.md), and
+ * the fix was removing per-frame automation writes. Reintroducing per-frame
+ * work here would undo it.
+ *
+ * @param {AudioContext} ctx the *real*, non-offline context
+ * @param {number} baseHz idle pitch, from `def.weight` (heavier = lower)
+ * @param {object} [spec] see DEFAULT_ENGINE_SPEC
+ */
+export function engineGraph(ctx, baseHz, spec = DEFAULT_ENGINE_SPEC) {
+  const s = { ...DEFAULT_ENGINE_SPEC, ...(spec ?? {}) };
+  // Bounded here as well as in validateRecipe: a spec can arrive from a saved
+  // recipe written by an older build, and two oscillators per vehicle across
+  // a full loop pool is already the budget this system was tuned for.
+  // `num` rather than `Number(x) || fallback`: `||` would replace a legitimate
+  // zero (a spec with no pitch rise is a perfectly good flat engine), and
+  // `Number(x) ?? fallback` does not work at all — `??` catches null and
+  // undefined, not the NaN that `Number('nonsense')` actually produces.
+  const num = (v, fallback) => (Number.isFinite(Number(v)) ? Number(v) : fallback);
+  const clamp01 = (v) => Math.min(1, Math.max(0, v));
+
+  const count = Math.min(3, Math.max(1, Math.round(num(s.oscillators, 1))));
+  const detune = num(s.detune, 1);
+  const pitchRise = num(s.pitchRise, 0);
+  const cutoffRatio = Math.max(0.1, num(s.cutoffRatio, 1));
+  const cutoffRise = num(s.cutoffRise, 0);
+  const gainIdle = clamp01(num(s.gainIdle, 0));
+  const gainRise = clamp01(num(s.gainRise, 0));
 
   const filter = ctx.createBiquadFilter();
-  filter.type = 'lowpass';
-  filter.Q.value = 0.5;
-  filter.frequency.value = baseHz * 4;
+  filter.type = s.filterType ?? 'lowpass';
+  filter.Q.value = num(s.filterQ, 0.5);
+  filter.frequency.value = baseHz * cutoffRatio;
 
   const gain = ctx.createGain();
-  gain.gain.value = 0.18;
+  gain.gain.value = clamp01(num(s.gainStart, gainIdle));
 
-  osc1.connect(filter);
-  osc2.connect(filter);
+  // Each oscillator's own pitch ratio, resolved once. The first sits at
+  // baseHz; each further one is detuned by another step, so three oscillators
+  // spread rather than stacking two at the same offset.
+  const oscillators = [];
+  const ratios = [];
+  for (let i = 0; i < count; i++) {
+    const ratio = detune ** i;
+    const osc = ctx.createOscillator();
+    osc.type = s.wave ?? 'sawtooth';
+    osc.frequency.value = baseHz * ratio;
+    osc.connect(filter);
+    osc.start();
+    oscillators.push(osc);
+    ratios.push(baseHz * ratio);
+  }
+
   filter.connect(gain);
-  osc1.start();
-  osc2.start();
 
   return {
     output: gain,
     setSpeed(speedFrac) {
-      const f = Math.min(1, Math.max(0, speedFrac));
+      // NaN-safe, and that is not defensive padding: `Math.max(0, NaN)` is
+      // NaN, so a clamp written the obvious way passes NaN straight through
+      // to `linearRampToValueAtTime`, which **throws**. This runs every frame
+      // for every moving vehicle, and the exception would escape into
+      // `updateEngineLoop` and kill that vehicle's engine for the rest of the
+      // match. A speed of NaN is reachable from a custom vehicle def whose
+      // `speed` is zero or missing — the division that produces `speedFrac`
+      // is guarded in main.js today, but nothing makes that guard permanent.
+      const raw = Number(speedFrac);
+      const f = Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 0;
       const t = ctx.currentTime + 0.05;
       // Pitch and filter cutoff both rise with speed/load — the two cues
       // that actually read as "engine working harder" together; either one
       // alone reads as a pitch-shifted sample rather than a real engine.
-      osc1.frequency.linearRampToValueAtTime(baseHz * (1 + f * 0.9), t);
-      osc2.frequency.linearRampToValueAtTime(baseHz * 1.008 * (1 + f * 0.9), t);
-      filter.frequency.linearRampToValueAtTime(baseHz * (4 + f * 10), t);
-      gain.gain.linearRampToValueAtTime(0.14 + f * 0.12, t);
+      const rise = 1 + f * pitchRise;
+      for (let i = 0; i < oscillators.length; i++) {
+        oscillators[i].frequency.linearRampToValueAtTime(ratios[i] * rise, t);
+      }
+      filter.frequency.linearRampToValueAtTime(baseHz * (cutoffRatio + f * cutoffRise), t);
+      gain.gain.linearRampToValueAtTime(gainIdle + f * gainRise, t);
     },
     stop() {
-      osc1.stop();
-      osc2.stop();
+      for (const osc of oscillators) osc.stop();
     },
   };
 }

@@ -195,6 +195,14 @@ export const MAX_DURATION = 6;
  * ship with anything else — so a recipe that never touches this group sounds
  * positioned exactly like an unedited built-in.
  */
+export const RECIPE_KINDS = ['sfx', 'engine', 'ambience'];
+
+export const KIND_LABELS = {
+  sfx: 'Sound effect',
+  engine: 'Engine',
+  ambience: 'Ambience',
+};
+
 export const SOUND_GROUPS = [
   {
     title: 'Identity',
@@ -236,6 +244,88 @@ export const SOUND_GROUPS = [
 ];
 
 /**
+ * An engine is a *live graph*, not a baked buffer, so it has no layers and no
+ * envelope — its parameters are the shape of a continuously running sound and
+ * how that shape responds to speed. Different vocabulary, same machinery.
+ *
+ * The speed response is a handful of scalars rather than an editable curve.
+ * That is a deliberate limit: a curve editor is a much bigger UI than this
+ * earns, and these scalars span the range the existing graph actually covers.
+ */
+export const ENGINE_GROUPS = [
+  {
+    title: 'Identity',
+    controls: [{ type: 'text', path: 'name', label: 'Name', level: 'low' }],
+  },
+  {
+    title: 'Timbre',
+    controls: [
+      num('engine.oscillators', 'Oscillators', 1, 3, 1, 'medium'),
+      pick('engine.wave', 'Waveform', ['sawtooth', 'square', 'triangle', 'sine'], 'low'),
+      // Cents, not a raw ratio: 1.008 means nothing to read, "a few cents
+      // apart" is the thing an author is actually setting. Past a small
+      // offset the two oscillators stop being one engine and become two.
+      num('engine.detune', 'Detune', 1, 1.05, 0.001, 'medium'),
+      pick('engine.filterType', 'Filter', ['lowpass', 'bandpass', 'highpass'], 'advanced'),
+      num('engine.filterQ', 'Resonance', 0.1, 12, 0.1, 'advanced'),
+    ],
+  },
+  {
+    title: 'Response to speed',
+    controls: [
+      num('engine.cutoffRatio', 'Brightness at idle', 0.5, 20, 0.1, 'low'),
+      num('engine.cutoffRise', 'Brightness at speed', 0, 40, 0.5, 'low'),
+      num('engine.pitchRise', 'Pitch rise', 0, 3, 0.05, 'low'),
+      num('engine.gainIdle', 'Level at idle', 0, 1, 0.01, 'medium'),
+      num('engine.gainRise', 'Level at speed', 0, 1, 0.01, 'medium'),
+      num('engine.gainStart', 'Level on start', 0, 1, 0.01, 'advanced'),
+    ],
+  },
+];
+
+/**
+ * A bed is a chain of freshly baked segments, so its parameters are the
+ * segment's shape *and how much it wanders between segments*.
+ *
+ * The jitter widths are exposed rather than hidden because they are what makes
+ * the bed generative instead of a loop. Setting them to zero is a legitimate
+ * choice — it just needs to be a visible one, not something an author does
+ * without realising they have turned the wind into a repeating sample.
+ */
+export const AMBIENCE_GROUPS = [
+  {
+    title: 'Identity',
+    controls: [{ type: 'text', path: 'name', label: 'Name', level: 'low' }],
+  },
+  {
+    title: 'Bed',
+    controls: [
+      num('ambience.baseFreq', 'Tone (Hz)', 80, 4000, 10, 'low'),
+      num('ambience.gain', 'Level', 0, 1, 0.01, 'low'),
+      num('ambience.lfoHz', 'Wander rate (Hz)', 0.01, 2, 0.01, 'medium'),
+      num('ambience.lfoDepth', 'Wander depth (Hz)', 0, 2000, 10, 'medium'),
+      num('ambience.filterQ', 'Resonance', 0.1, 12, 0.1, 'advanced'),
+      num('ambience.segmentSeconds', 'Segment length', 1, 20, 0.5, 'advanced'),
+    ],
+  },
+  {
+    title: 'Variation between segments',
+    controls: [
+      num('ambience.freqJitter', 'Tone wander', 0, 1, 0.01, 'medium'),
+      num('ambience.lfoJitter', 'Rate wander', 0, 1, 0.01, 'medium'),
+      num('ambience.depthJitter', 'Depth wander', 0, 1, 0.01, 'medium'),
+    ],
+  },
+];
+
+/** The control groups for a recipe kind. */
+export function groupsFor(kind) {
+  if (kind === 'engine') return ENGINE_GROUPS;
+  if (kind === 'ambience') return AMBIENCE_GROUPS;
+  return SOUND_GROUPS;
+}
+
+/**
  * Every fixed-path slider's range, as `{ 'dotted.path': { min, max } }`.
  *
  * Derived rather than restated for the reason `deriveBounds` exists in the
@@ -243,7 +333,7 @@ export const SOUND_GROUPS = [
  * validator, so they cannot drift apart. Here it also binds the *server*, via
  * the same recipe validation, which is what stops a hostile recipe.
  */
-export function deriveBounds(groups = SOUND_GROUPS) {
+export function deriveBounds(groups = [...SOUND_GROUPS, ...ENGINE_GROUPS, ...AMBIENCE_GROUPS]) {
   const bounds = {};
   for (const group of groups) {
     for (const control of group.controls) {

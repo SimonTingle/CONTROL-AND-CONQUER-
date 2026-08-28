@@ -21,12 +21,14 @@
  */
 import { SoundPreview } from './soundPreview.js';
 import {
-  SOUND_GROUPS, LAYER_CONTROLS, LAYER_KINDS, LAYER_LABELS, LEVELS, MAX_LAYERS,
-  controlVisible, getPath, setPath,
+  LAYER_CONTROLS, LAYER_KINDS, LAYER_LABELS, LEVELS, MAX_LAYERS,
+  controlVisible, getPath, setPath, groupsFor,
 } from './soundSchema.js';
+import { VEHICLE_CATALOG } from '../vehicles/catalog.js';
 import { SOUND_PRESETS } from './soundPresets.js';
 import {
-  applyMacros, blankLayer, blankRecipe, cloneRecipe, forkRecipe, syncId, validateRecipe,
+  applyMacros, blankLayer, blankRecipe, blankEngineRecipe, blankAmbienceRecipe,
+  cloneRecipe, forkRecipe, kindOf, syncId, validateRecipe,
 } from './soundRecipe.js';
 import { loadCustomRecipes, saveCustomSound, deleteCustomSound } from './customSounds.js';
 import { SOUND_EVENTS, silentEvents } from '../audio/soundEvents.js';
@@ -171,7 +173,7 @@ export class SoundScreen {
       this.levelButtons[level].classList.toggle('sound-level-on', level === this.level);
     }
 
-    for (const group of SOUND_GROUPS) {
+    for (const group of groupsFor(kindOf(this.recipe))) {
       const controls = group.controls.filter((c) => controlVisible(c, this.level));
       if (!controls.length) continue;
       const section = document.createElement('section');
@@ -191,8 +193,11 @@ export class SoundScreen {
 
     // Layers are a list, so they cannot be described by fixed dotted paths.
     // Only `advanced` gets to add and remove them; `medium` still edits the
-    // layers a sound already has.
-    if (this.level !== 'low') this.right.appendChild(this.buildLayers());
+    // layers a sound already has. An engine is a live graph and a bed is a
+    // single segment shape — neither has layers at all.
+    if (kindOf(this.recipe) === 'sfx' && this.level !== 'low') {
+      this.right.appendChild(this.buildLayers());
+    }
 
     this.syncParams();
   }
@@ -200,14 +205,15 @@ export class SoundScreen {
   buildBinding() {
     const section = document.createElement('section');
     section.className = 'builder-group';
+    const kind = kindOf(this.recipe);
     const h = document.createElement('h2');
-    h.textContent = 'Plays when';
+    h.textContent = kind === 'sfx' ? 'Plays when' : 'Replaces';
     section.appendChild(h);
 
     const row = document.createElement('div');
     row.className = 'builder-row';
     const label = document.createElement('label');
-    label.textContent = 'Game moment';
+    label.textContent = { engine: 'Vehicle', ambience: 'Bed' }[kind] ?? 'Game moment';
     row.appendChild(label);
 
     const select = document.createElement('select');
@@ -215,10 +221,13 @@ export class SoundScreen {
     none.value = '';
     none.textContent = 'Not bound yet';
     select.appendChild(none);
-    for (const event of SOUND_EVENTS) {
+    // What a recipe can bind to depends entirely on its kind: a sound effect
+    // replaces a game moment, an engine replaces a vehicle's engine, a bed
+    // replaces one of the two ambience beds. One dropdown, three vocabularies.
+    for (const option of this.bindingOptions()) {
       const o = document.createElement('option');
-      o.value = event.id;
-      o.textContent = event.wired ? event.label : `${event.label} (silent today)`;
+      o.value = option.value;
+      o.textContent = option.label;
       select.appendChild(o);
     }
     select.addEventListener('change', () => {
@@ -237,12 +246,41 @@ export class SoundScreen {
     this.bindNote.className = 'builder-empty';
     section.appendChild(this.bindNote);
     this.syncers.push(() => {
+      const kind = kindOf(this.recipe);
+      if (kind === 'engine') {
+        this.bindNote.textContent = this.recipe.event === '*'
+          ? 'Replaces the engine on every vehicle that has no engine of its own.'
+          : '';
+        return;
+      }
+      if (kind === 'ambience') {
+        this.bindNote.textContent = '';
+        return;
+      }
       const event = SOUND_EVENTS.find((e) => e.id === this.recipe.event);
       this.bindNote.textContent = event?.wired === false
         ? 'This moment has no sound in the game yet — a call site still has to be added in code before it can be heard.'
         : '';
     });
     return section;
+  }
+
+  /** The binding dropdown's options, by kind. */
+  bindingOptions() {
+    const kind = kindOf(this.recipe);
+    if (kind === 'engine') {
+      return [
+        { value: '*', label: 'All vehicles' },
+        ...VEHICLE_CATALOG.map((d) => ({ value: d.id, label: d.name })),
+      ];
+    }
+    if (kind === 'ambience') {
+      return [{ value: 'day', label: 'Day bed' }, { value: 'night', label: 'Night bed' }];
+    }
+    return SOUND_EVENTS.map((e) => ({
+      value: e.id,
+      label: e.wired ? e.label : `${e.label} (silent today)`,
+    }));
   }
 
   buildControl(control) {
@@ -492,6 +530,43 @@ export class SoundScreen {
 
     this.left.appendChild(this.recipeGroup('My sounds', finished));
     if (drafts.length) this.left.appendChild(this.recipeGroup('Drafts', drafts, true));
+
+    // Engines and beds. Listed by what they replace rather than by what has
+    // been saved, for the same reason the silent moments are: the useful
+    // question is "what can I retune", and a vehicle with no engine recipe is
+    // exactly the one an author is most likely to be looking for.
+    const engines = document.createElement('section');
+    engines.className = 'builder-group';
+    const eh = document.createElement('h2');
+    eh.textContent = 'Engines';
+    engines.appendChild(eh);
+    const allCard = this.card('All vehicles', () => {
+      const recipe = blankEngineRecipe('All vehicles');
+      recipe.event = '*';
+      this.loadRecipe(syncId(recipe), null);
+    });
+    allCard.title = 'One engine for every vehicle without its own.';
+    engines.appendChild(allCard);
+    for (const def of VEHICLE_CATALOG) {
+      engines.appendChild(this.card(def.name, () => {
+        const recipe = blankEngineRecipe(`${def.name} engine`);
+        recipe.event = def.id;
+        this.loadRecipe(syncId(recipe), null);
+      }));
+    }
+    this.left.appendChild(engines);
+
+    const beds = document.createElement('section');
+    beds.className = 'builder-group';
+    const bh = document.createElement('h2');
+    bh.textContent = 'Ambience';
+    beds.appendChild(bh);
+    for (const which of ['day', 'night']) {
+      beds.appendChild(this.card(`${which[0].toUpperCase()}${which.slice(1)} bed`, () => {
+        this.loadRecipe(blankAmbienceRecipe(`${which} bed`, which), null);
+      }));
+    }
+    this.left.appendChild(beds);
 
     // Presets first: a blank noise+tone is the worst place to start a sound
     // from, and the distance between it and anything recognisable is most of
