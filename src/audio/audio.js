@@ -96,6 +96,12 @@ const GENERATORS = {
   victory: () => synth.victory(),
   defeat: () => synth.defeat(),
   notification: () => synth.notification(),
+  // The team radio's artifacts. See synth.js on why these are built in rather
+  // than shipped as editor recipes: the radio needs a sound out of the box,
+  // and a recipe bound to these ids still overrides them like any other.
+  radioOpen: () => synth.radioOpen(),
+  radioStatic: () => synth.radioStatic(),
+  radioClose: () => synth.radioClose(),
 };
 
 /**

@@ -719,6 +719,80 @@ function chirpTone(ctx, { wave, startHz, endHz, repeats, duration, gain, startTi
 }
 
 // ---------------------------------------------------------------------------
+// Radio
+// ---------------------------------------------------------------------------
+
+/**
+ * The three artifacts the team radio plays around each spoken line.
+ *
+ * These carry more weight than a normal cue. The voice itself is browser TTS,
+ * which **cannot be routed into Web Audio at all** — no filter, no position,
+ * no mixer (see audio/radio.js). So these three are the only part of the radio
+ * that can actually be shaped, and they are what make a dry system voice read
+ * as a transmission rather than as a screen reader.
+ *
+ * Band-limited to roughly a voice channel on purpose: 300Hz-3kHz is the range
+ * a real radio passes, and it is that restriction — not the noise — that the
+ * ear identifies as "radio".
+ *
+ * Built-in generators rather than recipes shipped in the editor, so the radio
+ * has a sound out of the box. A recipe bound to `radioOpen`/`radioStatic`/
+ * `radioClose` still overrides them, exactly as it does for every other
+ * built-in.
+ */
+export function radioOpen() {
+  return bake(0.14, (ctx) => {
+    // The click of a carrier appearing: a short burst with a hard attack.
+    noiseBurst(ctx, { duration: 0.07, startFreq: 3000, endFreq: 900, attack: 0.001, gain: 0.5 });
+    tone(ctx, { wave: 'square', startHz: 1800, endHz: 900, duration: 0.04, attack: 0.001, gain: 0.22 });
+  });
+}
+
+/**
+ * The bed that runs under a line. Deliberately quiet and deliberately short —
+ * it is played once per utterance rather than looped, because a loop would
+ * need stopping and the one thing this system cannot rely on is being told
+ * when an utterance ended (`onend` never fires when there is no voice).
+ */
+export function radioStatic() {
+  return bake(1.6, (ctx) => {
+    const frames = Math.ceil(1.6 * ctx.sampleRate);
+    const buffer = ctx.createBuffer(1, frames, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < frames; i++) data[i] = Math.random() * 2 - 1;
+
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+
+    // Bandpass, not lowpass: the narrow passband is the whole cue. A lowpassed
+    // hiss sounds like wind; a bandpassed one sounds like a channel.
+    const band = ctx.createBiquadFilter();
+    band.type = 'bandpass';
+    band.frequency.value = 1400;
+    band.Q.value = 0.9;
+
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0, ctx.currentTime);
+    env.gain.linearRampToValueAtTime(0.16, ctx.currentTime + 0.05);
+    env.gain.setValueAtTime(0.16, ctx.currentTime + 1.4);
+    env.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 1.6);
+
+    source.connect(band);
+    band.connect(env);
+    env.connect(ctx.destination);
+    source.start();
+  });
+}
+
+/** The channel closing — shorter and duller than the open, as a real squelch
+ * tail is: the carrier drops before the noise gate does. */
+export function radioClose() {
+  return bake(0.12, (ctx) => {
+    noiseBurst(ctx, { duration: 0.05, startFreq: 1800, endFreq: 400, attack: 0.001, gain: 0.34 });
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Authored sounds
 // ---------------------------------------------------------------------------
 
