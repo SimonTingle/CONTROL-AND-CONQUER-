@@ -1,0 +1,145 @@
+/**
+ * Browser verification for the Sound Creator.
+ *
+ * Three things `npm test` cannot reach, because all three need a real Web
+ * Audio implementation and a real DOM:
+ *
+ *  1. **The buffer cache distinguishes generator params.** This is the check
+ *     the pre-existing cache bug fails. The key was `${id}:${variation}` with
+ *     `params` passed to the generator but absent from the key, so once three
+ *     variations had been cached every subsequent play — at any intensity —
+ *     returned a buffer baked for whichever intensity arrived first. The probe
+ *     plays one intensity thirty times (expect exactly the three variations)
+ *     and then eight distinct intensities (expect eight more entries). Under
+ *     the old key the second number is 0.
+ *
+ *     It matters beyond the game sounding wrong: it is the editor's entire
+ *     feedback loop. An author drags a slider, re-auditions, and hears the
+ *     stale bake.
+ *
+ *  2. **A recipe edit changes the rendered buffer**, through the real
+ *     `bakeRecipe` and the real `OfflineAudioContext`.
+ *
+ *  3. **The editor opens, draws, and filters by ability level** — including
+ *     that the waveform canvas has actual pixels in it, which is the only way
+ *     to tell "drew a waveform" from "drew nothing without throwing".
+ *
+ * Hardware-independent: every number here is a count or a comparison, not a
+ * timing, so it means the same in this container as on a workstation. See
+ * scripts/audio-load-probe.mjs's header for why that property is worth
+ * insisting on in a sandbox with no GPU.
+ *
+ * Usage:
+ *   npx vite --port 5199 --strictPort &
+ *   node scripts/sound-editor-probe.mjs [--port 5199]
+ */
+import { chromium } from '/opt/node22/lib/node_modules/playwright/index.mjs';
+
+const portArg = process.argv.indexOf('--port');
+const port = portArg >= 0 ? process.argv[portArg + 1] : '5199';
+const url = `http://localhost:${port}/`;
+
+const browser = await chromium.launch({
+  executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
+  args: ['--no-sandbox', '--autoplay-policy=no-user-gesture-required'],
+});
+const page = await browser.newPage();
+const errors = [];
+page.on('pageerror', (e) => errors.push(e.message));
+await page.goto(url, { waitUntil: 'load' });
+
+const result = await page.evaluate(async () => {
+  const audio = await import('/src/audio/audio.js');
+  const synth = await import('/src/audio/synth.js');
+  const recipes = await import('/src/sound/soundRecipe.js');
+  const { SoundScreen } = await import('/src/sound/soundScreen.js');
+  const THREE = await import('/node_modules/three/build/three.module.js');
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // `playAt` is a no-op unless the context is running, and the autoplay policy
+  // leaves it suspended until a gesture, which nothing here makes.
+  const ctx = THREE.AudioContext.getContext();
+  if (ctx.state !== 'running') await ctx.resume();
+  // main.js calls initAudio at module scope, but its import graph is large and
+  // can still be executing when the load event fires — so wait for the pool
+  // rather than assuming it is there.
+  for (let i = 0; i < 100 && audio.debugState().voiceCount === 0; i++) await sleep(100);
+  if (audio.debugState().voiceCount === 0) return { error: 'audio never initialised' };
+  if (ctx.state !== 'running') return { error: `audio context is ${ctx.state}` };
+
+  const out = {};
+
+  // --- 1. the cache key ---
+  let mark = audio.debugState().cachedBuffers;
+  for (let i = 0; i < 30; i++) audio.playAt('explosionGround', 0, 0, 0, { intensity: 1 });
+  await sleep(1000);
+  out.entriesForOneIntensity = audio.debugState().cachedBuffers - mark;
+
+  mark = audio.debugState().cachedBuffers;
+  for (const intensity of [0.3, 0.5, 0.8, 1.4, 1.9, 2.3, 2.8, 3.4]) {
+    audio.playAt('explosionHull', 0, 0, 0, { intensity });
+  }
+  await sleep(1500);
+  out.entriesForEightIntensities = audio.debugState().cachedBuffers - mark;
+
+  // --- 2. an edit changes the bake ---
+  const rms = (buf) => {
+    const d = buf.getChannelData(0);
+    let s = 0;
+    for (let i = 0; i < d.length; i++) s += d[i] * d[i];
+    return Math.sqrt(s / d.length);
+  };
+  const a = recipes.blankRecipe();
+  const b = recipes.cloneRecipe(a);
+  b.layers[0].startFreq = 800;
+  recipes.syncId(b);
+  out.rmsBefore = rms(await synth.bakeRecipe(a, recipes.recipeDuration(a)));
+  out.rmsAfter = rms(await synth.bakeRecipe(b, recipes.recipeDuration(b)));
+  out.editChangesBake = Math.abs(out.rmsBefore - out.rmsAfter) > 1e-4;
+
+  // --- 3. the editor ---
+  const screen = new SoundScreen({ toast: () => {} });
+  screen.open();
+  await sleep(600);
+  const root = document.getElementById('sound-builder');
+  out.editorVisible = !root.classList.contains('hidden');
+  out.columns = root.querySelectorAll('.builder-left, .builder-centre, .builder-right').length;
+
+  const canvas = root.querySelector('.sound-canvas-wave');
+  const g = canvas.getContext('2d');
+  const px = g.getImageData(0, 0, canvas.width, canvas.height).data;
+  let lit = 0;
+  for (let i = 3; i < px.length; i += 4) if (px[i] > 0) lit++;
+  out.waveformPixels = lit;
+
+  const sliders = () => root.querySelectorAll('.builder-right input[type=range]').length;
+  screen.setLevel('low');
+  out.slidersLow = sliders();
+  screen.setLevel('medium');
+  out.slidersMedium = sliders();
+  screen.setLevel('advanced');
+  out.slidersAdvanced = sliders();
+
+  screen.close();
+  out.editorClosed = root.classList.contains('hidden');
+  return out;
+});
+
+result.pageErrors = errors;
+const ok = !result.error
+  && result.entriesForOneIntensity === 3
+  && result.entriesForEightIntensities === 8
+  && result.editChangesBake
+  && result.editorVisible
+  && result.columns === 3
+  && result.waveformPixels > 0
+  && result.slidersLow < result.slidersMedium
+  && result.slidersMedium < result.slidersAdvanced
+  && result.editorClosed
+  && errors.length === 0;
+
+console.log(JSON.stringify(result, null, 2));
+console.log(ok ? 'PASS' : 'FAIL');
+await browser.close();
+process.exit(ok ? 0 : 1);

@@ -514,3 +514,98 @@ export function engineGraph(ctx, baseHz) {
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Authored sounds
+// ---------------------------------------------------------------------------
+
+/**
+ * Last-ditch ceilings, matching `MAX_DURATION` / `MAX_LAYERS` in
+ * `src/sound/soundSchema.js`. Restated here rather than imported so this file
+ * keeps its one useful property — pure DSP with no dependency on the editor —
+ * and so a bad recipe that somehow slipped past validation still cannot ask
+ * for an unbounded allocation.
+ */
+const BAKE_DURATION_CEILING = 6;
+const BAKE_LAYER_CEILING = 8;
+
+/**
+ * Render a sound *recipe* — the data model in `src/sound/soundRecipe.js` —
+ * into a buffer, through the exact same `bake()` / `noiseBurst()` / `tone()`
+ * the sixteen built-in generators above use.
+ *
+ * This is deliberately a thin interpreter and nothing more. Every layer field
+ * is passed straight through to a primitive, so a sound the editor emits is
+ * playable by construction and the editor's preview cannot disagree with what
+ * the match plays: there is one synthesis path, not a preview one and a real
+ * one. It is also why adding a new layer type is a change in exactly two
+ * places — the `SOUND_GROUPS` schema and the switch below.
+ *
+ * The one thing this does that the built-ins don't is *not* vary: no
+ * `variedSeed()` jitter. An author dragging a slider needs the change they
+ * hear to be the change they made, and per-play variation would mask small
+ * edits behind noise. Variation for authored sounds is a per-play concern
+ * `audio.js` can add later on top of a stable bake, which is the right place
+ * for it anyway.
+ *
+ * Bounds are the caller's job — `validateRecipe` runs on the editor's output
+ * *and* on the server, because `duration * SAMPLE_RATE` is an allocation and a
+ * recipe can arrive from another player. This function assumes it has been
+ * checked, and clamps only as a last-ditch guard so a bug upstream degrades
+ * into a short sound rather than an out-of-memory.
+ *
+ * @param {object} recipe a validated recipe
+ * @param {number} duration total render length in seconds, from `recipeDuration()`
+ * @returns {Promise<AudioBuffer>}
+ */
+export function bakeRecipe(recipe, duration) {
+  const total = Math.min(BAKE_DURATION_CEILING, Math.max(0.02, Number(duration) || 0.5));
+  const master = Math.min(1, Math.max(0, Number(recipe?.gain) ?? 1));
+  const layers = (recipe?.layers ?? []).slice(0, BAKE_LAYER_CEILING);
+
+  return bake(total, (ctx) => {
+    for (const layer of layers) {
+      // Gains multiply rather than replace: the recipe's overall level is a
+      // trim over the mix the author balanced, so moving it keeps the
+      // relative weight of the layers intact.
+      const gain = Math.min(1, Math.max(0, (Number(layer.gain) || 0) * master));
+      if (gain <= 0) continue;
+      const startTime = Math.max(0, Number(layer.startTime) || 0);
+      const length = Math.max(0.01, Math.min(total - startTime, Number(layer.duration) || 0.1));
+      if (length <= 0) continue;
+
+      if (layer.kind === 'tone') {
+        tone(ctx, {
+          wave: layer.wave ?? 'sine',
+          startHz: Math.max(1, Number(layer.startHz) || 220),
+          endHz: Math.max(1, Number(layer.endHz) || 220),
+          duration: length,
+          attack: Math.max(0.0005, Number(layer.attack) || 0.005),
+          gain,
+          startTime,
+        });
+      } else {
+        // `noiseBurst` has no `startTime` — it always begins at
+        // `ctx.currentTime`, which in an offline context is 0. Rather than
+        // change a primitive five shipped sounds depend on, a delayed noise
+        // layer is routed through a DelayNode. Same audible result, and the
+        // built-ins' code path is untouched.
+        let destination = ctx.destination;
+        if (startTime > 0) {
+          const delay = ctx.createDelay(BAKE_DURATION_CEILING);
+          delay.delayTime.value = startTime;
+          delay.connect(ctx.destination);
+          destination = delay;
+        }
+        noiseBurst(ctx, {
+          duration: length,
+          startFreq: Math.max(20, Number(layer.startFreq) || 3000),
+          endFreq: Math.max(20, Number(layer.endFreq) || 200),
+          attack: Math.max(0.0005, Number(layer.attack) || 0.004),
+          gain,
+          destination,
+        });
+      }
+    }
+  });
+}
