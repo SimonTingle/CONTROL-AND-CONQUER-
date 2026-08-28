@@ -90,13 +90,33 @@ Two details that are not obvious:
   Left uncompensated, "Level 0.5" would mean something completely different on
   a sweep than on a tone, and raising Q — which the author does to turn wind
   into a whistle — would silence the layer as a side effect of a control that
-  says nothing about volume. Compensated by `sqrt(Q)` plus a measured constant
-  for the lowpass-versus-bandpass gap.
+  says nothing about volume. Compensated by `sqrt(Q)` plus a measured constant.
+
+  **The compensation is partial, and has to be.** The first attempt multiplied
+  the envelope peak and measured 0.027 — but `gain 0.4 × makeup 6.4 = 2.56`,
+  well past full scale, so it was *clipping*. It measured louder precisely
+  because clipping adds distortion energy; on bandpassed noise that is audible
+  grit, not loudness. Clamped to full scale it measures 0.016: quieter than the
+  clipped version and correct.
+
+  Full recovery is impossible in principle, which is worth stating rather than
+  hiding. RMS and peak are different quantities — a narrow band carries little
+  energy while its peak is still bounded by 1 — so past a point makeup gain
+  buys distortion and nothing else. A high-Q sweep stays quieter than a
+  broadband layer because that is what a narrow filter physically does. The
+  Level slider and the recipe's overall gain are where an author makes up the
+  rest.
+
+  | | noise | tone | fm | sweep | pulse | chirp |
+  |---|---|---|---|---|---|---|
+  | before | 0.032 | 0.054 | 0.055 | **0.006** | 0.073 | 0.041 |
+  | shipped | 0.032 | 0.054 | 0.055 | **0.016** | 0.073 | 0.041 |
 
   Worth noting *how* this was found: not by ear, which is impossible here, but
   because the probe printed a number per layer kind. A test that only asserted
   "sweep is audible" would have passed at 0.006 and shipped a layer type
-  nobody could use.
+  nobody could use — and would have passed again at 0.027 while it was
+  clipping.
 
 ## 3. A pre-existing bug the work surfaced
 
@@ -154,6 +174,15 @@ design working on its author, which is the best evidence it works at all.
   wave validation hardcoded back to `tone` only; `blankLayer('fm')` omitting
   `ratio`/`index`; a preset's `fm` layer swapped for a `tone` (undiscoverable
   layer kind); a preset pushed outside the schema's bounds.
+- **The probe was restructured mid-run**, and the reason generalises. It gated
+  every check on the live voice pool being up — which only the cache-key check
+  needs, and which fails intermittently because `initAudio` runs at main.js's
+  module scope behind a large import graph. So an unrelated flake reported
+  FAIL for the layer, preset and portal checks, none of which touch the pool;
+  they need an `OfflineAudioContext` and a DOM, both always present. A check
+  that cannot run should stand aside and say so, not veto its neighbours. It
+  now reports `poolReady: false` and prints an explicit NOTE, and the cache
+  assertions apply only when the pool actually came up.
 - **Browser probe** (`scripts/sound-editor-probe.mjs`) extended to check what
   unit tests structurally cannot: that each layer kind *renders audible audio*
   (a misconnected primitive validates perfectly and bakes silence), that every

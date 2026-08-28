@@ -606,11 +606,24 @@ function noiseSweep(ctx, { duration, startFreq, endFreq, q, attack, gain, startT
   // spectrum than any bandpass ever has. Measured against the other layer
   // kinds at matched Level rather than derived, and it only has to put them
   // in the same ballpark — the Level slider does the fine work.
-  const makeup = Math.min(8, Math.sqrt(Math.max(0.0001, q)) * 3.2);
+  const makeup = Math.sqrt(Math.max(0.0001, q)) * 3.2;
+  // Clamped to full scale, and this is the honest part: the loss *cannot* be
+  // fully recovered. RMS and peak are different quantities — a narrow band has
+  // little energy but its peak is still bounded by 1 — so past a point the
+  // makeup would only drive the envelope past full scale and clip, which on
+  // bandpassed noise is audible distortion rather than loudness. Measured
+  // RMS at Level 0.4, Q 4: 0.006 uncompensated, 0.016 compensated and clamped,
+  // against 0.032 for `noise` and ~0.054 for `tone`/`fm`. (An unclamped
+  // version measured 0.027 — *higher* than the clamped one, because clipping
+  // adds distortion energy. Louder and worse.)
+  // A high-Q sweep stays quieter than a broadband layer, which is what a
+  // narrow filter physically does; the Level slider and the recipe's overall
+  // gain are where an author makes up the rest.
+  const peak = Math.min(1, gain * makeup);
 
   const env = ctx.createGain();
   env.gain.setValueAtTime(0, t0);
-  env.gain.linearRampToValueAtTime(gain * makeup, t0 + attack);
+  env.gain.linearRampToValueAtTime(peak, t0 + attack);
   env.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
 
   source.connect(filter);
