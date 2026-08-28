@@ -25,7 +25,7 @@ import {
   controlVisible, getPath, setPath,
 } from './soundSchema.js';
 import {
-  applyMacros, blankLayer, blankRecipe, cloneRecipe, forkRecipe, syncId, validateRecipe,
+  applyMacros, blankLayer, blankRecipe, cloneRecipe, syncId, validateRecipe,
 } from './soundRecipe.js';
 import { loadCustomRecipes, saveCustomSound, deleteCustomSound } from './customSounds.js';
 import { SOUND_EVENTS, silentEvents } from '../audio/soundEvents.js';
@@ -512,22 +512,27 @@ export class SoundScreen {
     }
     this.left.appendChild(section);
 
-    // Built-ins are offered as something to fork, not to edit in place —
-    // editing one would change a sound every existing save and every peer
-    // already agrees on. A fork *approximates* the built-in: `GENERATORS` is
-    // JS, not data, so this is a starting point rather than a decompile, and
-    // the heading says so rather than implying otherwise.
+    // Built-ins are never edited in place — that would change a sound every
+    // existing save and every peer already agrees on. Instead each one can be
+    // *replaced*, and the heading says exactly that rather than "copy to
+    // edit", because there is nothing to copy: `GENERATORS` is JavaScript,
+    // not data, so a starting point cannot be derived from it. Picking one
+    // here opens a fresh sound already bound to that moment; the original
+    // keeps playing until this is saved, and comes back if it is deleted.
     const forks = document.createElement('section');
     forks.className = 'builder-group';
     const fh = document.createElement('h2');
-    fh.textContent = 'Built-in (copy to approximate)';
+    fh.textContent = 'Built-in (start a replacement)';
     forks.appendChild(fh);
     for (const event of SOUND_EVENTS.filter((e) => e.builtin)) {
-      forks.appendChild(this.card(event.label, () => {
-        const recipe = forkRecipe(blankRecipe(event.label));
+      const card = this.card(event.label, () => {
+        const recipe = blankRecipe(event.label);
         recipe.event = event.id;
         this.loadRecipe(syncId(recipe), null);
-      }));
+      });
+      card.title = 'Starts a new sound bound to this moment. The built-in is not copied — '
+        + 'it is code, not data — and keeps playing until this replacement is saved.';
+      forks.appendChild(card);
     }
     this.left.appendChild(forks);
   }

@@ -147,9 +147,17 @@ moment does not mint a new id and orphan the buffer already baked for it.
 **Built-ins are never rewritten.** `GENERATORS` is untouched; a recipe
 *overrides* an event id. So the sixteen shipped sounds cannot regress as a side
 effect of this feature existing, and deleting a custom sound restores the
-original rather than leaving a hole. "Copy to edit" is labelled *copy to
-approximate* in the UI, because `GENERATORS` is JavaScript and this is a
-starting point, not a decompile.
+original rather than leaving a hole.
+
+The vehicle builder's "copy to edit" has **no honest equivalent here**, and the
+UI says so. `GENERATORS` is JavaScript, so there is nothing to copy — a
+built-in cannot be decompiled into layers. The dashboard offers *start a
+replacement* instead: a fresh sound already bound to that moment, with the
+original still playing until the replacement is saved and returning if it is
+deleted. Seeding a hand-written "approximation" of each of the sixteen was
+considered and rejected: nothing in this environment can judge by ear whether
+an approximation is close, so shipping sixteen of them would be sixteen
+unverifiable claims.
 
 ### The baker — `bakeRecipe()` in `synth.js`
 
