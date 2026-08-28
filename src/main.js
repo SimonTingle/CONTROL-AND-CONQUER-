@@ -17,6 +17,9 @@ import { PortalScreen } from './ui/portalScreen.js';
 import { AuthScreen } from './ui/authScreen.js';
 import { BuilderScreen } from './builder/builderScreen.js';
 import { SoundScreen } from './sound/soundScreen.js';
+import * as radio from './audio/radio.js';
+import { Chatter } from './audio/chatter.js';
+import { pushRadioLine, clearRadioFeed } from './ui/radioFeed.js';
 import { isGodModeAccount } from './core/adminAccount.js';
 import { loadCustomRecipes } from './sound/customSounds.js';
 import { soundCatalogFor } from './sound/soundCatalog.js';
@@ -578,6 +581,10 @@ canvas.addEventListener('pointerdown', (e) => {
   // press on the canvas, whatever it turns out to mean for the game itself.
   // Cheap to call every press: resume() is a no-op once already running.
   audio.resume();
+  // Speech needs the same user activation the AudioContext does, and Chrome's
+  // getVoices() is async and returns [] until its list has loaded — so this
+  // rides the identical gesture rather than adding a second hook of its own.
+  radio.primeSpeech();
   dragged = false;
   dragButton = e.button;
   lastX = e.clientX;
@@ -1201,6 +1208,18 @@ const game = {
 // The drawer's second page. Passed in rather than built inside Menu because it
 // reads live simulation collections, which the schema-driven control list has
 // no business knowing about.
+/**
+ * The team radio. Presentation only — it observes the sim and writes nothing,
+ * which is why it is constructed here rather than owned by anything simulated.
+ * See audio/chatter.js on why it never hooks a sim callback.
+ */
+/** How close a danger zone has to be to home before it is "base under attack"
+ * rather than a skirmish somewhere on the island. Roughly the base block's own
+ * footprint plus a margin. */
+const BASE_ALERT_RADIUS = 70;
+
+const chatter = new Chatter({ onCaption: (line) => pushRadioLine(line) });
+
 const statisticsScreen = new StatisticsScreen({ game, vehicles, structures });
 const menu = new Menu(() => buildSchema(world, view, game), statisticsScreen);
 
@@ -2298,6 +2317,12 @@ function beginMatch(difficulty) {
   // even if a sandbox session just added to it.
   applyCustomCatalog();
   applyCustomSounds();
+  // A new match is a new net: drop any queued traffic, forget the observed
+  // baseline (or the first tick would announce the starting units as newly
+  // built), and stop a line still being spoken from the last match.
+  chatter.reset();
+  radio.cancelSpeech();
+  clearRadioFeed();
   // A match is the unit of simulated time — tick 0 is its first step. Every
   // ban, threat memory and (later) lockstep turn number is relative to this.
   resetSimClock(0);
@@ -3089,6 +3114,27 @@ function renderTick(dt) {
       // during the scouting game is just noise.
       economyActive: game.playerTeam.credits > 0 || structures.instances.length > 0,
       load: harvesterAI.stateOf(vehicles.active)?.load ?? 0,
+    });
+
+    // The radio, on the same half-second cadence and for the same reason as
+    // everything else in this block: chatter reacts to things that change at
+    // human pace, and polling it per frame would be pure waste. It diffs the
+    // world rather than being called back into — see audio/chatter.js.
+    const localTeamId = game.localTeamId;
+    const zones = harvesterAI.dangerZonesFor(localTeamId) ?? [];
+    const home = game.playerTeam?.homePoint;
+    chatter.observe({
+      localTeamId,
+      units: vehicles.instances.filter((v) => !v.dead && v.teamId === localTeamId).length,
+      structures: structures.instances.filter((i) => !i.dead && i.teamId === localTeamId).length,
+      dangerZones: zones.length,
+      // "Near base" is what separates a raid on the home block from a
+      // skirmish at a crystal field on the far side of the island.
+      dangerNearBase: !!home && zones.some((z) => Math.hypot(z.x - home.x, z.z - home.z) <= z.radius + BASE_ALERT_RADIUS),
+      harvestersInDanger: vehicles.instances.filter(
+        (v) => !v.dead && v.teamId === localTeamId && v.def?.tags?.includes('economy')
+          && zones.some((z) => Math.hypot(z.x - v.group.position.x, z.z - v.group.position.z) <= z.radius),
+      ).length,
     });
 
     const info = renderer.info.render;

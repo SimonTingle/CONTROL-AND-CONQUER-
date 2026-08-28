@@ -159,6 +159,45 @@ const result = await page.evaluate(async () => {
   screen.close();
   out.editorClosed = root.classList.contains('hidden');
 
+  // --- 5b. the radio with no TTS voices ---
+  //
+  // This container has zero voices installed, which is also true of plenty of
+  // real systems — so this is the *primary* path, not an edge case. What must
+  // hold: both artifacts play, a caption is emitted, onDone fires exactly
+  // once, and nothing throws or hangs. If onDone did not fire the whole net
+  // would wedge after one line.
+  const radio = await import('/src/audio/radio.js');
+  const { Chatter } = await import('/src/audio/chatter.js');
+  out.ttsVoiceCount = radio.availableVoices().length;
+
+  let doneCalls = 0;
+  radio.setRadioVolume(0.8);
+  out.radioOpened = radio.speak('Radio check, over.', {
+    voiceClass: 'recon',
+    onDone: () => { doneCalls++; },
+  });
+  await sleep(2600); // longer than the fallback close timer for a short line
+  out.radioOnDoneCalls = doneCalls;
+  out.radioClosedChannel = !radio.isSpeaking();
+
+  // Muted must resolve the line rather than queue it, or turning the radio
+  // back on would deliver a backlog of stale traffic.
+  radio.setRadioVolume(0);
+  let mutedDone = 0;
+  out.mutedOpened = radio.speak('Should not be heard.', { onDone: () => { mutedDone++; } });
+  out.mutedResolved = mutedDone === 1;
+  radio.setRadioVolume(0.8);
+
+  // The caption path, end to end through the real feed element.
+  const captions = [];
+  const chat = new Chatter({ onCaption: (l) => captions.push(l) });
+  chat.report('baseUnderAttack', { teamId: 0, localTeamId: 0 });
+  chat.pump();
+  out.captionsEmitted = captions.length;
+  const { pushRadioLine } = await import('/src/ui/radioFeed.js');
+  pushRadioLine({ speaker: 'Command', text: 'Radio check.' });
+  out.radioFeedRendered = !!document.querySelector('.radio-feed .radio-line');
+
   // --- 6. the god-mode portal ---
   const { PortalScreen } = await import('/src/ui/portalScreen.js');
   const { GOD_MODE_EMAIL } = await import('/src/core/adminAccount.js');
@@ -204,6 +243,15 @@ const ok = !result.error
   && result.presetSilent?.length === 0
   && result.godModePanelApps === 2
   && result.godModeBackWorks
+  // The radio must close its channel and resolve exactly once even with no
+  // voice — anything else wedges the net after a single line.
+  && result.radioOpened
+  && result.radioOnDoneCalls === 1
+  && result.radioClosedChannel
+  && result.mutedOpened === false
+  && result.mutedResolved
+  && result.captionsEmitted > 0
+  && result.radioFeedRendered
   && result.editorVisible
   && result.columns === 3
   && result.waveformPixels > 0

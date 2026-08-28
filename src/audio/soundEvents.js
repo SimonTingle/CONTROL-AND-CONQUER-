@@ -89,6 +89,16 @@ export const SOUND_EVENTS = [
     id: 'deploy', label: 'Deploy / undeploy', category: 'structure', builtin: false, wired: false,
   },
 
+  // --- radio ---------------------------------------------------------------
+  // The three artifacts the team radio plays around each spoken line. They are
+  // listed here, rather than living privately inside radio.js, so they are
+  // editable in the Sound Creator like any other cue — which matters more than
+  // usual here: the voice itself cannot be processed at all (the Web Speech
+  // API exposes no audio node), so these three ARE the radio's sound.
+  { id: 'radioOpen', label: 'Radio squelch (open)', category: 'ui', builtin: true, wired: true },
+  { id: 'radioStatic', label: 'Radio static bed', category: 'ui', builtin: true, wired: true },
+  { id: 'radioClose', label: 'Radio squelch (close)', category: 'ui', builtin: true, wired: true },
+
   // --- match --------------------------------------------------------------
   { id: 'matchStart', label: 'Match start', category: 'match', builtin: true, wired: true },
   { id: 'victory', label: 'Victory', category: 'match', builtin: true, wired: true },
