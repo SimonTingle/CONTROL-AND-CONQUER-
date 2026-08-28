@@ -1871,3 +1871,45 @@ button.panel-back {
 }
 
 .sound-layer-add { display: flex; gap: 6px; }
+
+/* ---- radio caption feed ---- */
+
+/* Bottom-left, above the HUD block rather than inside it — see radioFeed.js on
+   why it cannot live in #hud, which hides itself when nothing is selected. */
+.radio-feed {
+  position: fixed;
+  left: 12px;
+  bottom: 190px;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: min(52vw, 420px);
+  pointer-events: none; /* never intercept a click meant for the world */
+}
+
+.radio-line {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text);
+  background: rgba(5, 8, 12, 0.62);
+  border-left: 2px solid var(--accent);
+  border-radius: 0 4px 4px 0;
+  padding: 3px 8px;
+  opacity: 1;
+  transition: opacity 0.5s ease;
+}
+
+.radio-line-out { opacity: 0; }
+
+.radio-speaker {
+  color: var(--accent);
+  font-weight: 600;
+  margin-right: 6px;
+}
+
+.radio-text { opacity: 0.92; }
+
+@media (max-width: 620px) {
+  .radio-feed { bottom: 150px; max-width: 70vw; }
+}

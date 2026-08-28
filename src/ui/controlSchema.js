@@ -11,6 +11,7 @@
  */
 import { api } from '../net/api.js';
 import * as audio from '../audio/audio.js';
+import * as radio from '../audio/radio.js';
 
 export function buildSchema(world, view, game) {
   const atmo = world.atmosphere;
@@ -292,6 +293,12 @@ export function buildSchema(world, view, game) {
         slider('Effects', 0, 1, 0.01, audio.getEffectsVolume, audio.setEffectsVolume),
         slider('Engines', 0, 1, 0.01, audio.getEngineVolume, audio.setEngineVolume),
         slider('Ambience (wind)', 0, 1, 0.01, audio.getAmbienceVolume, audio.setAmbienceVolume),
+        // Zero is a real off switch, not just quiet: `speak()` refuses the
+        // line rather than queueing it, so turning the radio back on does not
+        // deliver a backlog of stale traffic. It also sets the TTS
+        // utterance's own volume, which is the only level control the Web
+        // Speech API offers — see audio/radio.js.
+        slider('Radio chatter', 0, 1, 0.01, radio.getRadioVolume, radio.setRadioVolume),
       ],
     },
     {
