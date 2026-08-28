@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import * as synth from './synth.js';
+import { recipeDuration } from '../sound/soundRecipe.js';
 
 /**
  * The spatial audio engine: one `AudioListener` on the camera, a pooled set
@@ -113,6 +114,10 @@ const FALLOFF = {
 };
 
 function falloffFor(id) {
+  // An authored recipe carries its own reach, so a sound designed to carry
+  // across the map does so without needing an entry added to the table above.
+  const authored = recipes.get(id)?.falloff;
+  if (authored) return authored;
   return FALLOFF[id] ?? FALLOFF.default;
 }
 
@@ -344,18 +349,104 @@ function loopPoolSize() {
   return lowPower ? LOOP_POOL_SIZE_LOW : LOOP_POOL_SIZE;
 }
 
+/**
+ * Authored recipes, by the event id each one overrides.
+ *
+ * An override, never a rewrite: `GENERATORS` above is untouched, so the
+ * sixteen shipped sounds cannot regress because the editor exists, and
+ * clearing a recipe restores the original rather than leaving a hole. A
+ * recipe bound to an id with no generator — one of the silent events in
+ * `soundEvents.js` — simply gives that id a sound for the first time.
+ */
+const recipes = new Map();
+
+/**
+ * Install (or with a null recipe, remove) the sound bound to an event id.
+ *
+ * Callers must have validated the recipe first: `validateRecipe` bounds the
+ * render allocation, and a recipe can arrive from another player. Any buffers
+ * baked from the previous binding are dropped, or the editor would keep
+ * auditioning the sound the author just replaced.
+ */
+export function setRecipe(id, recipe) {
+  if (recipe) recipes.set(id, recipe);
+  else recipes.delete(id);
+  dropCached(id);
+}
+
+/** Replace the whole set at once — what match start and mode changes use. */
+export function setRecipes(list = []) {
+  for (const id of recipes.keys()) dropCached(id);
+  recipes.clear();
+  for (const recipe of list) {
+    if (recipe?.event) recipes.set(recipe.event, recipe);
+  }
+  for (const id of recipes.keys()) dropCached(id);
+}
+
+/** Forget every baked buffer for one event id, across all cache keys. */
+function dropCached(id) {
+  for (const key of [...bufferCache.keys()]) {
+    if (key.startsWith(`${id}:`)) bufferCache.delete(key);
+  }
+  for (const key of [...bakingPromises.keys()]) {
+    if (key.startsWith(`${id}:`)) bakingPromises.delete(key);
+  }
+}
+
+/**
+ * A stable cache key for one bake.
+ *
+ * The bug this fixes: the key used to be `${id}:${variation}`, with `params`
+ * passed to the generator but *absent from the key*. Since there are three
+ * variations, the first three plays of a sound populated the whole cache —
+ * and every play after that returned a buffer baked with whatever intensity,
+ * calibre or scale happened to come first. A 5-damage plink and a
+ * base-station kill have made the identical noise since the cache was added.
+ *
+ * It is merely wrong for the game and fatal for an editor: without this, an
+ * author drags a slider, re-auditions, and hears the stale bake — so the one
+ * feedback loop the whole editor is built around silently does not work.
+ *
+ * Params are quantised rather than used raw. `intensity` is a continuous
+ * `sqrt(damage / REFERENCE)`, so keying on the exact float would mean a fresh
+ * offline render for practically every shot — trading a correctness bug for a
+ * performance one. Two decimal places keeps distinct calibres distinct while
+ * still hitting the cache for repeated fire from the same gun.
+ */
+function cacheKey(id, params, variation) {
+  let suffix = '';
+  if (params) {
+    for (const name of Object.keys(params).sort()) {
+      const value = params[name];
+      if (value === undefined || value === null) continue;
+      suffix += `:${name}=${typeof value === 'number' ? value.toFixed(2) : value}`;
+    }
+  }
+  return `${id}:${variation}${suffix}`;
+}
+
 async function bufferFor(id, params) {
+  const recipe = recipes.get(id);
   const generator = GENERATORS[id];
-  if (!generator) return null;
+  if (!recipe && !generator) return null;
+
   // A handful of baked variants per id, picked at random on each play — see
   // synth.js's header on why a repeated cue needs this to avoid sounding like
-  // a looped sample. Cached forever once rendered.
-  const variation = Math.floor(synth.variedSeed() * 3);
-  const key = `${id}:${variation}`;
+  // a looped sample. Authored recipes do not vary (bakeRecipe is
+  // deterministic by design, so an edit is audible as itself), so they use a
+  // single slot and their content-addressed id as the key: two different
+  // recipes can never share a cache entry, and re-binding the same recipe
+  // re-uses the buffer already baked for it.
+  const variation = recipe ? recipe.id : Math.floor(synth.variedSeed() * 3);
+  const key = cacheKey(id, recipe ? null : params, variation);
   if (bufferCache.has(key)) return bufferCache.get(key);
   if (bakingPromises.has(key)) return bakingPromises.get(key);
 
-  const promise = generator(params).then((buffer) => {
+  const bake = recipe
+    ? synth.bakeRecipe(recipe, recipeDuration(recipe))
+    : generator(params);
+  const promise = bake.then((buffer) => {
     bufferCache.set(key, buffer);
     bakingPromises.delete(key);
     return buffer;
