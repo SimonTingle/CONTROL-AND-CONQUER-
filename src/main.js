@@ -17,6 +17,7 @@ import { PortalScreen } from './ui/portalScreen.js';
 import { AuthScreen } from './ui/authScreen.js';
 import { BuilderScreen } from './builder/builderScreen.js';
 import { SoundScreen } from './sound/soundScreen.js';
+import { isGodModeAccount } from './core/adminAccount.js';
 import { loadCustomRecipes } from './sound/customSounds.js';
 import { soundCatalogFor } from './sound/soundCatalog.js';
 import { loadCustomDefs } from './builder/customVehicles.js';
@@ -2585,6 +2586,10 @@ async function refreshCustomDefs() {
 }
 
 game.openBuilder = () => {
+  // Re-verified here rather than trusted from the button's render: the
+  // button is the only caller today, but this guard is what actually makes
+  // that true rather than merely currently true. See adminAccount.js.
+  if (!isGodModeAccount(game.account)) return;
   if (!game.builderScreen) {
     game.builderScreen = new BuilderScreen({
       toast: (m) => showToast(m),
@@ -2597,6 +2602,7 @@ game.openBuilder = () => {
 };
 
 game.openSoundCreator = () => {
+  if (!isGodModeAccount(game.account)) return;
   if (!game.soundScreen) {
     game.soundScreen = new SoundScreen({
       toast: (m) => showToast(m),

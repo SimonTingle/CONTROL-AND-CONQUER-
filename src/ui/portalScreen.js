@@ -4,6 +4,7 @@
  * routes to the lobby, which handles "no backend" and "not signed in" itself
  * rather than the portal having to know about either.
  */
+import { isGodModeAccount } from '../core/adminAccount.js';
 export const PORTAL_MODES = [
   {
     id: 'sandbox',
@@ -99,7 +100,7 @@ export class PortalScreen {
     // of launching straight into the vehicle builder. Listed as data so a
     // third app is one line here and one branch at the callback.
     const user = this.account.getAccount?.();
-    if (user?.email === 'tingleteaching@gmail.com') {
+    if (isGodModeAccount(user)) {
       for (const app of GOD_MODE_APPS) {
         const godBtn = document.createElement('button');
         godBtn.type = 'button';
