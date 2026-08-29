@@ -109,11 +109,9 @@ export class CombatController {
     this.game = game;
     this.projectiles = projectiles;
     this.onShot = onShot;
-    this._tick = 0;
   }
 
   update(dt) {
-    this._tick++;
     // Structures were always valid *targets* (see _candidates) but never
     // shooters — the loop below read only vehicles, so a defensive emplacement
     // would have sat there aiming at nothing. Concatenated rather than given
@@ -123,8 +121,10 @@ export class CombatController {
     // code with a different array in front of it.
     const shooters = this._shooters();
 
-    for (let i = 0; i < shooters.length; i++) {
-      const inst = shooters[i];
+    // for..of, not an index loop: the index used to stagger reacquisition and
+    // that was the bug (see reacquiresThisTick). Nothing here should be able
+    // to reach for a unit's array position again by accident.
+    for (const inst of shooters) {
       if (inst.dead || !inst.def.turret?.damage) continue;
 
       // Arming stays a deliberate act, exactly as it was before weapons
@@ -145,7 +145,16 @@ export class CombatController {
       if (!this._validTarget(inst, inst.combatTarget, RANGE_HYSTERESIS)) {
         inst.combatTarget = null;
       }
-      if (!inst.combatTarget && (this._tick + i) % Math.max(1, Math.round(REACQUIRE_INTERVAL * 60)) === 0) {
+      // Staggered by the unit's own id against the *simulation* clock, not by
+      // its index in `_shooters()` against a private counter. Both halves of
+      // that were desync surfaces: array position is spawn/removal history,
+      // which stateHash.js's header says is explicitly not state clients must
+      // agree on, and the private `_tick` was never serialized or reset by
+      // `deserialize`, so a client that resynced kept a phase offset from
+      // everyone else forever. Which tick a unit reacquires on decides the
+      // tick fed to `shotRoll`, so both made the same shot roll differently on
+      // different clients.
+      if (!inst.combatTarget && reacquiresThisTick(inst)) {
         inst.combatTarget = this._acquire(inst);
       }
 
@@ -292,7 +301,13 @@ export class CombatController {
     // shooter and target ids are in it so two units firing on the same tick
     // don't share a fate.
     const chance = hitChance(inst, team, dist);
-    const willHit = shotRoll(inst.id, target.id, simClock.tick, 'hit') < chance;
+    // Kinds are in the key, not just ids: vehicle and structure ids are
+    // separate counters that both start at 1, so a turret and a vehicle that
+    // happen to share a number, firing at the same target on the same tick,
+    // would otherwise draw the identical roll.
+    const shooterKey = `${inst.kind ?? 'vehicle'}${inst.id}`;
+    const targetKey = `${target.kind ?? 'vehicle'}${target.id}`;
+    const willHit = shotRoll(shooterKey, targetKey, simClock.tick, 'hit') < chance;
 
     let aimX = to.x;
     let aimZ = to.z;
@@ -303,7 +318,7 @@ export class CombatController {
       // goes, so the direction is uncorrelated with the hit decision — reusing
       // the same number would make every miss from a given shooter fall on the
       // same side.
-      const angle = shotRoll(inst.id, target.id, simClock.tick, 'dir') * Math.PI * 2;
+      const angle = shotRoll(shooterKey, targetKey, simClock.tick, 'dir') * Math.PI * 2;
       const spread = Math.max(MIN_MISS_OFFSET, dist * MISS_SPREAD);
       aimX = to.x + Math.cos(angle) * spread;
       aimZ = to.z + Math.sin(angle) * spread;
@@ -337,6 +352,21 @@ export class CombatController {
       inst.def.turret
     );
   }
+}
+
+/**
+ * Does this unit run its (expensive) target search on this tick?
+ *
+ * Reacquisition is throttled to REACQUIRE_INTERVAL and staggered so the whole
+ * fleet never pays for it on one tick. The stagger key is the unit's own id —
+ * a stable, replicated fact — so every client independently agrees on which
+ * tick a given unit searches. Exported and pure so a test can assert the
+ * stagger without constructing a controller.
+ */
+export function reacquiresThisTick(inst, tick = simClock.tick) {
+  const period = Math.max(1, Math.round(REACQUIRE_INTERVAL * 60));
+  const kindOffset = inst.kind === 'structure' ? 1 : 0;
+  return (tick + inst.id * 2 + kindOffset) % period === 0;
 }
 
 /**

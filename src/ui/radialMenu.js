@@ -28,9 +28,19 @@ const MOBILE_RING_SCALE = 0.72;
 const _anchor = new THREE.Vector3();
 
 export class RadialMenu {
-  constructor(camera, { onCommand } = {}) {
+  constructor(camera, { onCommand, onHold } = {}) {
     this.camera = camera;
     this.onCommand = onCommand;
+    /**
+     * Called with (instance, held) when a menu opens or closes on a unit.
+     *
+     * This class does **not** set `instance.menuOpen` itself, though it used
+     * to. Autonomous drivers read that flag and stop for it, so it is
+     * simulation state, and writing it from a DOM handler set it on one
+     * client only — the peer's copy of the same harvester kept driving. The
+     * owner turns this callback into an intent instead.
+     */
+    this.onHold = onHold;
     this.root = document.getElementById('radial-menu');
     this.instance = null;
     this.items = [];
@@ -51,9 +61,10 @@ export class RadialMenu {
   openFor(instance, commands, subtitle = '') {
     this.instance = instance;
     this.items = commands;
-    // Autonomous drivers watch this to hold position while the player decides —
-    // without it the harvester's AI drives it away and update() shuts the menu.
-    instance.menuOpen = true;
+    // Autonomous drivers watch `menuOpen` to hold position while the player
+    // decides — without it the harvester's AI drives it away and update()
+    // shuts the menu. Reported rather than written: see `onHold`.
+    this.onHold?.(instance, true);
 
     const ring = el('div', 'rm-ring');
     const title = el('div', 'rm-title');
@@ -141,7 +152,7 @@ export class RadialMenu {
 
   close() {
     if (!this.isOpen) return;
-    this.instance.menuOpen = false;
+    this.onHold?.(this.instance, false);
     this.instance = null;
     this.items = [];
     this.root.classList.add('hidden');
