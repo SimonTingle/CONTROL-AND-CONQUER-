@@ -3104,6 +3104,9 @@ function renderTick(dt) {
 
   autoQuality.record(dt);
   autoQuality.update({
+    // Drives the dwell timer and the fog ramp — see autoQuality.js's header on
+    // why this controller has to be damped in time, not just hysteresed.
+    dt,
     userForcedPixelRatio: renderQuality.userForced,
     setPixelRatio: (ratio) => renderer.setPixelRatio(ratio),
     basePixelRatio: BASE_PIXEL_RATIO,
