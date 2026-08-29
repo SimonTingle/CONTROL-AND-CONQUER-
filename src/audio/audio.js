@@ -178,7 +178,11 @@ class AmbienceBed {
   _playSegment(index) {
     if (this.stopped) return;
     const voice = this.voices[index];
-    synth.ambienceSegment(this.kind).then((buffer) => {
+    // The spec is read per segment rather than held from construction. Unlike
+    // an engine — a live graph that would have to be rebuilt — a bed re-bakes
+    // a fresh segment every few seconds by design, so an edit simply lands on
+    // the next one and no restart plumbing is needed.
+    synth.ambienceSegment(this.kind, ambienceSpecFor(this.kind)).then((buffer) => {
       if (this.stopped) return;
       ambienceSegmentsPlayed++;
       voice.setBuffer(buffer);
@@ -378,6 +382,8 @@ export function setRecipe(id, recipe) {
   if (recipe) recipes.set(id, recipe);
   else recipes.delete(id);
   dropCached(id);
+  if (id.startsWith('engine:')) rebuildEngineLoops();
+  if (id.startsWith('ambience:')) restartAmbience();
 }
 
 /** Replace the whole set at once — what match start and mode changes use. */
@@ -385,9 +391,74 @@ export function setRecipes(list = []) {
   for (const id of recipes.keys()) dropCached(id);
   recipes.clear();
   for (const recipe of list) {
-    if (recipe?.event) recipes.set(recipe.event, recipe);
+    if (!recipe?.event) continue;
+    // Engine and ambience recipes are namespaced so a vehicle called
+    // `weaponFire` could never collide with the sound event of that name.
+    const kind = recipe.kind ?? 'sfx';
+    recipes.set(kind === 'sfx' ? recipe.event : `${kind}:${recipe.event}`, recipe);
   }
   for (const id of recipes.keys()) dropCached(id);
+  // Live graphs hold their spec from construction, so a changed set has to
+  // reach them explicitly. Both are cheap: engines rebuild lazily on the next
+  // moving frame, and a bed is two voices.
+  rebuildEngineLoops();
+  restartAmbience();
+}
+
+/**
+ * The engine spec for a vehicle def, resolved **once, at loop creation**.
+ *
+ * Most specific first: a recipe bound to this def id, then one bound to `*`
+ * (every vehicle), then the built-in default. The `*` tier exists so an author
+ * can retune the whole fleet without binding eight recipes, which is what
+ * anyone tuning "engines are too whiny" actually wants to do first.
+ *
+ * **This is deliberately not called per frame.** `updateEngineLoop` runs for
+ * every moving vehicle every frame, and an FPS regression has already been
+ * traced to that path once (docs/plans/fps-regression.md). The spec is read
+ * here, folded into local constants inside `engineGraph`, and never consulted
+ * again for the life of the loop.
+ */
+export function engineSpecFor(defId) {
+  const bound = (defId !== undefined && defId !== null && recipes.get(`engine:${defId}`))
+    || recipes.get('engine:*');
+  return bound?.engine ?? null;
+}
+
+/** The bed spec for `day` or `night`, or null for the built-in. */
+export function ambienceSpecFor(kind) {
+  return recipes.get(`ambience:${kind}`)?.ambience ?? null;
+}
+
+/**
+ * Tear down every live engine loop so the next frame rebuilds them.
+ *
+ * An engine's spec is baked into its graph at construction, which is what
+ * keeps the per-frame path free — the cost is that an edit cannot reach a loop
+ * that already exists. Rather than adding a per-frame staleness check to the
+ * hot path (exactly the kind of thing that caused the regression this design
+ * avoids), the loops are simply dropped: `updateEngineLoop` rebuilds each one
+ * on the next frame its vehicle is moving, from the new spec.
+ */
+export function rebuildEngineLoops() {
+  for (const key of [...loops.keys()]) stopEngineLoop(key);
+}
+
+/**
+ * Nudge the beds onto a new spec without waiting for the current segment.
+ *
+ * Ambience already picks up an edit on its own at the next segment boundary
+ * (`_playSegment` reads the spec each time), so this only shortens the wait —
+ * up to `AMBIENCE_SEGMENT_SECONDS` of it, which is long enough that an author
+ * dragging a slider would think nothing had happened.
+ */
+function restartAmbience() {
+  if (!dayBed || !nightBed) return;
+  dayBed.stop();
+  nightBed.stop();
+  dayBed = new AmbienceBed('day');
+  nightBed = new AmbienceBed('night');
+  updateAmbience(lastNightFactor);
 }
 
 /** Forget every baked buffer for one event id, across all cache keys. */
@@ -644,8 +715,11 @@ export function shouldReleaseIdleLoop(presence, speedFrac, idleSeconds) {
  *   is render-only presentation, so it follows the same rule
  *   `render/projectileFx.js`'s effects do and uses wall-clock frame time,
  *   never simulated time.
+ * @param {string} [defId] the vehicle def this engine belongs to, used once at
+ *   construction to pick an authored engine spec. Read only on the frame the
+ *   loop is built; every later frame ignores it.
  */
-export function updateEngineLoop(key, anchor, baseHz, speedFrac, dt) {
+export function updateEngineLoop(key, anchor, baseHz, speedFrac, dt, defId) {
   if (!ctx || ctx.state !== 'running') return;
   let loop = loops.get(key);
 
@@ -671,7 +745,9 @@ export function updateEngineLoop(key, anchor, baseHz, speedFrac, dt) {
     audio.panner.panningModel = lowPower ? 'equalpower' : 'HRTF';
     scene.add(audio);
 
-    const engine = synth.engineGraph(ctx, baseHz);
+    // Resolved exactly here — once per loop, not once per frame. See
+    // engineSpecFor's note on why that distinction is the whole design.
+    const engine = synth.engineGraph(ctx, baseHz, engineSpecFor(defId) ?? undefined);
     audio.setNodeSource(engine.output);
 
     // `last` holds the values most recently *written* to the audio graph, so
@@ -789,6 +865,25 @@ export function auditionRecipe(recipe, distance = 10) {
   const right = new THREE.Vector3(1, 0, 0).applyQuaternion(listener.getWorldQuaternion(new THREE.Quaternion()));
   const at = origin.addScaledVector(right, Math.max(0, distance));
   playAt(AUDITION_ID, at.x, at.y, at.z);
+}
+
+/**
+ * Play an already-baked buffer through the non-positional pool.
+ *
+ * The editor's escape hatch for things that are not one-shot cues: an engine
+ * sample rendered offline by `bakeEngineSample`, or a bed segment. Both are
+ * real buffers with nowhere to be positioned, and neither belongs in the
+ * recipe registry — auditioning one must not install anything or evict a
+ * cached sound.
+ */
+export function auditionBuffer(buffer, gain = 1) {
+  if (!ctx || ctx.state !== 'running' || !buffer || globalVoices.length === 0) return;
+  const a = globalVoices[nextGlobalVoice];
+  nextGlobalVoice = (nextGlobalVoice + 1) % globalVoices.length;
+  if (a.isPlaying) a.stop();
+  a.setBuffer(buffer);
+  a.setVolume(Math.min(1, gain * effectsVolume));
+  a.play();
 }
 
 /** Stop auditioning and forget the buffer, so a stale bake can't be reused. */

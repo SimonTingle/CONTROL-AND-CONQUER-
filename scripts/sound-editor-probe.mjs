@@ -159,6 +159,42 @@ const result = await page.evaluate(async () => {
   screen.close();
   out.editorClosed = root.classList.contains('hidden');
 
+  // --- 4b. engines and ambience beds ---
+  //
+  // An engine is a live graph, so the unit tests can only check its spec.
+  // Only a real audio context can prove the graph is wired up and produces
+  // sound — a misconnected oscillator has a perfectly valid spec.
+  const recipeMod = recipes;
+  out.engineRms = {};
+  for (const [label, spec] of [
+    ['default', undefined],
+    ['authored', { ...synth.DEFAULT_ENGINE_SPEC, oscillators: 3, wave: 'square', pitchRise: 1.8, cutoffRatio: 8 }],
+  ]) {
+    const buf = await synth.bakeEngineSample(spec, 150, 0.6, 0.6);
+    out.engineRms[label] = Number(rms(buf).toFixed(5));
+  }
+  // The whole point of authoring: a different spec must sound different.
+  out.engineSpecChangesSound = Math.abs(out.engineRms.default - out.engineRms.authored) > 1e-4;
+
+  // setSpeed across the full range must not throw — it runs every frame for
+  // every moving vehicle, so an exception here would be catastrophic.
+  out.engineSweepOk = true;
+  try {
+    await synth.bakeEngineSample(undefined, 150, 0, 0.2);
+    for (const f of [0, 0.25, 0.5, 0.75, 1, 1.5, -1, NaN]) {
+      await synth.bakeEngineSample(undefined, 150, f, 0.15);
+    }
+  } catch {
+    out.engineSweepOk = false;
+  }
+
+  out.ambienceRms = {};
+  for (const which of ['day', 'night']) {
+    const buf = await synth.ambienceSegment(which, recipeMod.blankAmbienceRecipe('t', which).ambience);
+    out.ambienceRms[which] = Number(rms(buf).toFixed(5));
+  }
+  out.ambienceAudible = Object.values(out.ambienceRms).every((v) => v > 0.0001);
+
   // --- 5b. the radio with no TTS voices ---
   //
   // This container has zero voices installed, which is also true of plenty of
@@ -241,6 +277,9 @@ const ok = !result.error
   && result.editChangesBake
   && result.everyLayerAudible
   && result.presetSilent?.length === 0
+  && result.engineSpecChangesSound
+  && result.engineSweepOk
+  && result.ambienceAudible
   && result.godModePanelApps === 2
   && result.godModeBackWorks
   // The radio must close its channel and resolve exactly once even with no

@@ -27,9 +27,9 @@
  * formula restated here, so the graph cannot drift away from what the panner
  * actually does — the usual way a visualisation starts quietly lying.
  */
-import { linearGainAt, propagationDelay, auditionRecipe } from '../audio/audio.js';
-import { bakeRecipe } from '../audio/synth.js';
-import { recipeDuration, validateRecipe } from './soundRecipe.js';
+import { linearGainAt, propagationDelay, auditionRecipe, auditionBuffer } from '../audio/audio.js';
+import { bakeRecipe, ambienceSegment, bakeEngineSample, DEFAULT_ENGINE_SPEC } from '../audio/synth.js';
+import { recipeDuration, validateRecipe, kindOf } from './soundRecipe.js';
 
 /** Milliseconds of quiet before a bake is worth doing. One frame is 16ms; a
  * slider drag emits far faster than that, and a bake is not free. */
@@ -88,12 +88,15 @@ export class SoundPreview {
 
     // Fixed audition distances, so "near / mid / far" can be compared without
     // hunting for the same slider position twice.
+    this.auditionButtons = [];
     for (const d of [10, 60, 200]) {
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'builder-btn';
       b.textContent = `Hear at ${d}m`;
       b.addEventListener('click', () => this.audition(d));
+      b.dataset.distance = String(d);
+      this.auditionButtons.push(b);
       bar.appendChild(b);
     }
     this.host.appendChild(bar);
@@ -123,9 +126,22 @@ export class SoundPreview {
    */
   setRecipe(recipe) {
     this.recipe = recipe;
+    this.relabelAuditionButtons();
     this.invalidate();
     clearTimeout(this._bakeTimer);
     this._bakeTimer = setTimeout(() => this.rebake(), BAKE_DEBOUNCE_MS);
+  }
+
+  /** The same three buttons mean distance for a sound and speed for an
+   * engine, so they say which. */
+  relabelAuditionButtons() {
+    const engine = kindOf(this.recipe) === 'engine';
+    const speedLabel = { 10: 'idle', 60: 'half', 200: 'full' };
+    for (const b of this.auditionButtons ?? []) {
+      const d = b.dataset.distance;
+      b.textContent = engine ? `Hear at ${speedLabel[d]}` : `Hear at ${d}m`;
+    }
+    if (this.distanceSlider) this.distanceSlider.disabled = engine;
   }
 
   /** Schedule exactly one redraw. Idempotent within a frame. */
@@ -152,9 +168,22 @@ export class SoundPreview {
       this.invalidate();
       return;
     }
+    const kind = kindOf(recipe);
+    if (kind === 'engine') {
+      // An engine is a live graph, not a buffer — there is nothing to bake and
+      // nothing to draw a waveform of. Its picture is the speed response,
+      // drawn straight from the spec in drawEngine().
+      this.buffer = null;
+      this.invalidate();
+      return;
+    }
+
     const token = ++this._bakeToken;
     try {
-      const buffer = await bakeRecipe(recipe, recipeDuration(recipe));
+      // A bed segment IS a baked buffer, so it gets the ordinary waveform.
+      const buffer = kind === 'ambience'
+        ? await ambienceSegment(recipe.event === 'night' ? 'night' : 'day', recipe.ambience)
+        : await bakeRecipe(recipe, recipeDuration(recipe));
       if (token !== this._bakeToken) return; // a newer edit already superseded this
       this.buffer = buffer;
     } catch {
@@ -163,9 +192,34 @@ export class SoundPreview {
     this.invalidate();
   }
 
-  audition(distance = this.distance) {
+  /**
+   * Hear the current recipe.
+   *
+   * For a sound effect the `distance` argument is the point — that is what the
+   * rig is for. An engine has no distance to audition at; what varies is
+   * *speed*, so the same buttons mean idle / half / full instead, and the
+   * engine is rendered offline at that speed through the real `engineGraph`.
+   */
+  audition(arg = this.distance) {
     if (!this.recipe || validateRecipe(this.recipe).length) return;
-    auditionRecipe(this.recipe, distance);
+    if (kindOf(this.recipe) !== 'engine') {
+      auditionRecipe(this.recipe, arg);
+      return;
+    }
+    // `arg` arrives as a distance from the shared buttons; map the three
+    // fixed positions onto three speeds rather than adding a second row of
+    // controls that only one kind would ever use.
+    const speed = this.engineSpeedFor(arg);
+    bakeEngineSample(this.recipe.engine, 150, speed, 1.2)
+      .then((buffer) => auditionBuffer(buffer))
+      .catch(() => {});
+  }
+
+  /** Map the three shared audition buttons onto idle / half / full. */
+  engineSpeedFor(distance) {
+    if (distance >= 200) return 1;
+    if (distance >= 60) return 0.5;
+    return 0;
   }
 
   // ---- drawing ----
@@ -184,8 +238,92 @@ export class SoundPreview {
   }
 
   draw() {
+    const kind = kindOf(this.recipe);
+    if (kind === 'engine') {
+      this.drawEngine();
+      // Otherwise the distance rig keeps whatever the last sound effect left
+      // there, which reads as a live graph belonging to this engine.
+      this.clearRig('An engine is heard from its vehicle — reach is fixed.');
+      return;
+    }
     this.drawWave();
-    this.drawRig();
+    // Only a positioned one-shot has a distance falloff to show. A bed is
+    // non-positional and an engine's rig is its speed response, so drawing
+    // the gain curve for either would be a graph of something inert — the
+    // exact failure the acoustics curves were left out for.
+    if (kind === 'sfx') this.drawRig();
+    else this.clearRig();
+  }
+
+  clearRig(message = 'Ambience is non-positional — no distance falloff.') {
+    const { g, height } = this.fit(this.rigCanvas, 40);
+    g.fillStyle = 'rgba(255,255,255,0.35)';
+    g.font = '12px system-ui, sans-serif';
+    g.fillText(message, 10, height / 2 + 4);
+    this.readout.textContent = '';
+  }
+
+  /**
+   * An engine's picture: pitch and filter cutoff against speed.
+   *
+   * This is the actual thing being authored. A waveform would be meaningless
+   * even if one existed — the graph runs continuously and its whole character
+   * is *how it changes with speed*, which is exactly what a still frame of it
+   * cannot show.
+   */
+  drawEngine() {
+    const { g, width, height } = this.fit(this.waveCanvas, 180);
+    const spec = { ...DEFAULT_ENGINE_SPEC, ...(this.recipe?.engine ?? {}) };
+    const pad = 38;
+    const plotW = width - pad * 2;
+    const plotH = height - pad - 26;
+    // A representative idle pitch. The real one comes from vehicle weight at
+    // runtime (260 - weight*14 in main.js); the shape of the response is what
+    // this shows, and that shape is the same at any base pitch.
+    const baseHz = 150;
+    const maxHz = baseHz * (1 + spec.pitchRise) * 1.05;
+    const maxCut = baseHz * (spec.cutoffRatio + spec.cutoffRise) * 1.05;
+
+    g.strokeStyle = 'rgba(255,255,255,0.18)';
+    g.beginPath();
+    g.moveTo(pad, pad);
+    g.lineTo(pad, pad + plotH);
+    g.lineTo(pad + plotW, pad + plotH);
+    g.stroke();
+
+    g.fillStyle = 'rgba(255,255,255,0.45)';
+    g.font = '11px system-ui, sans-serif';
+    g.fillText('idle', pad - 8, pad + plotH + 16);
+    g.fillText('full speed', pad + plotW - 50, pad + plotH + 16);
+
+    const line = (valueAt, max, colour, label, labelY) => {
+      g.strokeStyle = colour;
+      g.lineWidth = 2;
+      g.beginPath();
+      for (let x = 0; x <= plotW; x++) {
+        const f = x / plotW;
+        const y = pad + (1 - valueAt(f) / max) * plotH;
+        if (x === 0) g.moveTo(pad + x, y);
+        else g.lineTo(pad + x, y);
+      }
+      g.stroke();
+      g.lineWidth = 1;
+      g.fillStyle = colour;
+      g.fillText(label, pad + 6, labelY);
+    };
+
+    // Two curves on two scales, which is honest here rather than sloppy: they
+    // are different quantities (both Hz, but an octave of pitch and a filter
+    // sweep are not comparable magnitudes), and what an author reads off this
+    // is each curve's *shape*, not one against the other.
+    line((f) => baseHz * (1 + f * spec.pitchRise), maxHz, '#7fd4ff', 'pitch', pad + 14);
+    line((f) => baseHz * (spec.cutoffRatio + f * spec.cutoffRise), maxCut, '#ffd479', 'brightness', pad + 30);
+
+    g.fillStyle = 'rgba(255,255,255,0.55)';
+    g.fillText(
+      `${spec.oscillators}\u00d7 ${spec.wave}, detune ${Number(spec.detune).toFixed(3)}`,
+      pad + 6, pad + plotH - 8,
+    );
   }
 
   /**

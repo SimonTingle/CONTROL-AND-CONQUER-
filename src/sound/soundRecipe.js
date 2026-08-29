@@ -34,9 +34,10 @@
 import { fnv1a64 } from '../core/fnv1a.js';
 import { canonicalJson, CUSTOM_ID_PREFIX, isCustomId } from '../builder/vehicleDraft.js';
 import {
-  LAYER_CONTROLS, LEVELS, MAX_DURATION, MAX_LAYERS,
-  deriveBounds, deriveLayerBounds, getPath,
+  LAYER_CONTROLS, LEVELS, MAX_DURATION, MAX_LAYERS, RECIPE_KINDS,
+  deriveBounds, deriveLayerBounds, getPath, groupsFor,
 } from './soundSchema.js';
+import { DEFAULT_ENGINE_SPEC, DEFAULT_AMBIENCE_SPEC } from '../audio/synth.js';
 
 const BOUNDS = deriveBounds();
 const LAYER_BOUNDS = deriveLayerBounds();
@@ -103,6 +104,56 @@ export function blankLayer(kind = 'noise') {
     default:
       return { kind: 'noise', duration: 0.3, startFreq: 3000, endFreq: 200, attack: 0.004, gain: 0.5, startTime: 0 };
   }
+}
+
+/**
+ * A recipe's kind, treating an absent one as `sfx`.
+ *
+ * Absent rather than defaulted-on-write, deliberately: every recipe saved
+ * before kinds existed has no `kind` field, and they are all sound effects.
+ * Reading the default here means those saves keep working untouched, and
+ * `loadCustomRecipes` re-deriving their id on load (which it already does,
+ * for exactly this class of reason) completes the migration with no
+ * migration code.
+ */
+export const kindOf = (recipe) => recipe?.kind ?? 'sfx';
+
+/**
+ * A blank engine — the built-in spec, so a new engine recipe starts as an
+ * exact copy of how every vehicle already sounds and the author edits away
+ * from a known point rather than toward one.
+ */
+export function blankEngineRecipe(name = 'New Engine') {
+  return syncId({
+    id: '',
+    name,
+    description: 'Built in the sound editor.',
+    kind: 'engine',
+    // A vehicle def id, or '*' for the whole fleet.
+    event: null,
+    editorLevel: 'medium',
+    engine: { ...DEFAULT_ENGINE_SPEC },
+  });
+}
+
+/** A blank bed, seeded from whichever built-in it is going to replace. */
+export function blankAmbienceRecipe(name = 'New Ambience', which = 'day') {
+  return syncId({
+    id: '',
+    name,
+    description: 'Built in the sound editor.',
+    kind: 'ambience',
+    event: which,
+    editorLevel: 'medium',
+    ambience: { ...(DEFAULT_AMBIENCE_SPEC[which] ?? DEFAULT_AMBIENCE_SPEC.day) },
+  });
+}
+
+/** A blank recipe of any kind. */
+export function blankOfKind(kind, name) {
+  if (kind === 'engine') return blankEngineRecipe(name);
+  if (kind === 'ambience') return blankAmbienceRecipe(name);
+  return blankRecipe(name);
 }
 
 /**
@@ -198,7 +249,32 @@ export function validateRecipe(recipe, { catalog = [] } = {}) {
     problems.push('event must be a sound id, or none.');
   }
 
-  if (!Array.isArray(recipe.layers) || recipe.layers.length === 0) {
+  const kind = kindOf(recipe);
+  if (!RECIPE_KINDS.includes(kind)) problems.push(`kind must be one of: ${RECIPE_KINDS.join(', ')}.`);
+
+  // Each kind carries exactly one body. A recipe with the wrong one is not
+  // merely odd: `bakeRecipe` would find no layers and render silence, or
+  // `engineGraph` would find no spec and quietly use the default — both of
+  // which look like the editor ignoring the author rather than like an error.
+  if (kind !== 'sfx' && Array.isArray(recipe.layers)) {
+    problems.push(`An ${kind} recipe has no layers.`);
+  }
+  if (kind !== 'engine' && recipe.engine) problems.push('Only an engine recipe has an engine spec.');
+  if (kind !== 'ambience' && recipe.ambience) problems.push('Only an ambience recipe has a bed spec.');
+
+  if (kind === 'engine') {
+    if (!recipe.engine || typeof recipe.engine !== 'object') problems.push('Needs an engine spec.');
+    // The bed binds to one of two named beds; an engine binds to a vehicle id
+    // or the '*' wildcard, and there is no catalog here to check it against —
+    // an unresolvable id simply never matches a vehicle, which is a harmless
+    // no-op rather than a fault.
+  } else if (kind === 'ambience') {
+    if (!recipe.ambience || typeof recipe.ambience !== 'object') problems.push('Needs a bed spec.');
+    if (recipe.event !== null && recipe.event !== undefined
+      && recipe.event !== 'day' && recipe.event !== 'night') {
+      problems.push("An ambience recipe must replace 'day' or 'night'.");
+    }
+  } else if (!Array.isArray(recipe.layers) || recipe.layers.length === 0) {
     problems.push('Needs at least one layer.');
   } else if (recipe.layers.length > MAX_LAYERS) {
     // Not taste: every layer is an oscillator or a noise buffer in the same
@@ -229,7 +305,11 @@ export function validateRecipe(recipe, { catalog = [] } = {}) {
     });
   }
 
-  const duration = recipeDuration(recipe);
+  // Only a baked sound has a render length to bound. An engine is a live
+  // graph that runs until its vehicle stops, and a bed's length is its own
+  // bounded `segmentSeconds` — neither is an OfflineAudioContext allocation,
+  // which is the thing MAX_DURATION exists to cap.
+  const duration = kind === 'sfx' ? recipeDuration(recipe) : 1;
   if (!Number.isFinite(duration) || duration <= 0) {
     problems.push('The sound has no length.');
   } else if (duration > MAX_DURATION) {
@@ -238,7 +318,7 @@ export function validateRecipe(recipe, { catalog = [] } = {}) {
     problems.push(`The whole sound must be under ${MAX_DURATION} seconds (this one is ${duration.toFixed(2)}s).`);
   }
 
-  if (recipe.falloff) {
+  if (kind === 'sfx' && recipe.falloff) {
     const { refDistance, maxDistance } = recipe.falloff;
     if (Number.isFinite(refDistance) && Number.isFinite(maxDistance) && maxDistance <= refDistance) {
       // `distanceModel: 'linear'` divides by (max - ref); equal values are a
