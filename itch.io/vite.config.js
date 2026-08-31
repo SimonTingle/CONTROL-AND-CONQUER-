@@ -48,6 +48,23 @@ export default defineConfig(({ mode }) => {
       __API_URL__: JSON.stringify(
         env.VITE_API_URL ?? 'https://control-conquer-api.apps.simontingle.com',
       ),
+
+      // On here, off in the root config — the one behavioural difference
+      // between the two builds beyond `base` and the API URL above.
+      //
+      // itch.io serves an HTML5 game from html-classic.itch.zone, inside an
+      // iframe on itch.io, talking to an API on a third registrable domain.
+      // That makes the session cookie third-party, and Safari's ITP blocks
+      // those outright while Chrome is phasing them out the same way —
+      // `SameSite=None` is not an exemption. The cookie is silently dropped,
+      // so every request after sign-in looks anonymous and online multiplayer
+      // reports "sign in to play online" to a player who just did.
+      //
+      // A token the page holds itself is the only credential that survives
+      // that. It lives in localStorage and is therefore readable by page JS,
+      // unlike the httpOnly cookie the main site keeps — a real trade, made
+      // only here, where the alternative is no online play at all.
+      __USE_BEARER_AUTH__: JSON.stringify(env.VITE_USE_BEARER_AUTH !== 'false'),
     },
   };
 });

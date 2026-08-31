@@ -7,6 +7,8 @@
  * be reasoned about (and tested) without a socket in the picture.
  */
 
+import { getSessionToken } from './api.js';
+
 /** Same origin the REST client uses; baked in at build time by Vite. */
 const API_BASE = typeof __API_URL__ === 'string' ? __API_URL__ : '';
 
@@ -61,6 +63,23 @@ export function socketUrl(matchId) {
 }
 
 /**
+ * Subprotocols for the upgrade: none normally, `['ptg-bearer', <token>]` when
+ * this build carries its session as a token rather than a cookie.
+ *
+ * The browser WebSocket API has no way to set an Authorization header, and the
+ * alternative — the token as a query parameter — would write a live credential
+ * into every access log the request passes through. The subprotocol list is
+ * the one client-settable handshake header, so the token goes there.
+ *
+ * Exported for the same reason `socketUrl` is: so the handshake can be checked
+ * without a browser WebSocket.
+ */
+export function socketProtocols() {
+  const token = getSessionToken();
+  return token ? ['ptg-bearer', token] : undefined;
+}
+
+/**
  * Turn a `welcome`/`error` frame's version fields into a message worth
  * showing a player. Exported so the wording can be checked directly, without
  * a real socket (matchClient.js otherwise needs a browser WebSocket to do
@@ -95,7 +114,7 @@ export class MatchClient {
   connect() {
     return new Promise((resolve, reject) => {
       let settled = false;
-      const ws = new WebSocket(socketUrl(this.matchId));
+      const ws = new WebSocket(socketUrl(this.matchId), socketProtocols());
       this.socket = ws;
 
       ws.addEventListener('open', () => {

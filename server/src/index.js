@@ -135,7 +135,24 @@ export async function build() {
   await app.register(matchRoutes);
   // Websocket last: matchSocket's route needs authPlugin's onRequest hook to
   // have already run on the upgrade request.
-  await app.register(websocket);
+  await app.register(websocket, {
+    options: {
+      /**
+       * A cross-site client carries its session token as a WebSocket
+       * subprotocol, because the browser WebSocket API cannot set an
+       * Authorization header (see ws/match.js's subprotocolToken).
+       *
+       * This must select and echo one back: RFC 6455 requires a client that
+       * offered subprotocols to fail the connection if the server's response
+       * names none of them, so without this the token-carrying handshake would
+       * be rejected by the browser before any frame was read. Echo only the
+       * marker, never the token itself — the response header is as loggable as
+       * a URL. A client offering nothing (the same-site cookie path) gets
+       * `false`, which is the "no subprotocol" answer and leaves it untouched.
+       */
+      handleProtocols: (protocols) => (protocols.has('ptg-bearer') ? 'ptg-bearer' : false),
+    },
+  });
   await app.register(matchSocket);
 
   return app;

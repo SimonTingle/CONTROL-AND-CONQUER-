@@ -93,7 +93,7 @@ export async function matchRoutes(app) {
   const auth = { onRequest: app.requireAuth };
   // State-changing routes also need the CSRF check — a cookie-authenticated
   // POST is exactly what CSRF forges, a GET is not.
-  const authWrite = { onRequest: [app.requireAuth, app.csrfProtection] };
+  const authWrite = { onRequest: [app.requireAuth, app.csrfUnlessBearer] };
 
   /** Open lobbies, newest first. */
   app.get('/matches', auth, async () => {
