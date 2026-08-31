@@ -135,6 +135,10 @@ export class BountyFx {
       s.haloMat.opacity = 0.18 + 0.34 * night;
 
       s.ground.position.set(c.x, groundY + 0.09, c.z);
+      // Same as projectileFx: only `blending` needs a program refresh, so
+      // remember it and flag `needsUpdate` on the frame it actually changes
+      // rather than every frame for every visible coin.
+      const prevBlending = s.groundMat.blending;
       if (night < 0.5) {
         const dayness = 1 - night * 2;
         s.groundMat.blending = THREE.NormalBlending;
@@ -148,7 +152,7 @@ export class BountyFx {
         s.groundMat.opacity = 0.34 * nightness;
         s.ground.scale.setScalar(scale * 6);
       }
-      s.groundMat.needsUpdate = true;
+      if (s.groundMat.blending !== prevBlending) s.groundMat.needsUpdate = true;
     }
 
     for (const [id, index] of this._slotFor) {

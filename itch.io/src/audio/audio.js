@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import * as synth from './synth.js';
+import { recipeDuration } from '../sound/soundRecipe.js';
 
 /**
  * The spatial audio engine: one `AudioListener` on the camera, a pooled set
@@ -95,6 +96,12 @@ const GENERATORS = {
   victory: () => synth.victory(),
   defeat: () => synth.defeat(),
   notification: () => synth.notification(),
+  // The team radio's artifacts. See synth.js on why these are built in rather
+  // than shipped as editor recipes: the radio needs a sound out of the box,
+  // and a recipe bound to these ids still overrides them like any other.
+  radioOpen: () => synth.radioOpen(),
+  radioStatic: () => synth.radioStatic(),
+  radioClose: () => synth.radioClose(),
 };
 
 /**
@@ -113,6 +120,10 @@ const FALLOFF = {
 };
 
 function falloffFor(id) {
+  // An authored recipe carries its own reach, so a sound designed to carry
+  // across the map does so without needing an entry added to the table above.
+  const authored = recipes.get(id)?.falloff;
+  if (authored) return authored;
   return FALLOFF[id] ?? FALLOFF.default;
 }
 
@@ -167,7 +178,11 @@ class AmbienceBed {
   _playSegment(index) {
     if (this.stopped) return;
     const voice = this.voices[index];
-    synth.ambienceSegment(this.kind).then((buffer) => {
+    // The spec is read per segment rather than held from construction. Unlike
+    // an engine — a live graph that would have to be rebuilt — a bed re-bakes
+    // a fresh segment every few seconds by design, so an edit simply lands on
+    // the next one and no restart plumbing is needed.
+    synth.ambienceSegment(this.kind, ambienceSpecFor(this.kind)).then((buffer) => {
       if (this.stopped) return;
       ambienceSegmentsPlayed++;
       voice.setBuffer(buffer);
@@ -219,6 +234,16 @@ export function initAudio(camera, worldScene) {
   for (let i = 0; i < VOICE_POOL_SIZE; i++) {
     const audio = new THREE.PositionalAudio(listener);
     audio.setVolume(1);
+    // The default distanceModel is 'inverse', which never actually reaches
+    // zero gain at any distance and — this is the part that broke "distant
+    // vehicles should not be audible" — ignores `maxDistance` entirely (it
+    // only applies to 'linear'). Every refDistance/rolloffFactor/maxDistance
+    // in FALLOFF below was configured under the assumption that maxDistance
+    // was a real cutoff; under the actual default it was inert, and a sound
+    // 1000 units away still carried ~1% of its near-field amplitude. Set once
+    // here because the property lives on the panner and survives this voice
+    // being reused across many plays.
+    audio.panner.distanceModel = 'linear';
     scene.add(audio);
     voices.push({ audio, busyUntil: 0 });
   }
@@ -334,18 +359,171 @@ function loopPoolSize() {
   return lowPower ? LOOP_POOL_SIZE_LOW : LOOP_POOL_SIZE;
 }
 
+/**
+ * Authored recipes, by the event id each one overrides.
+ *
+ * An override, never a rewrite: `GENERATORS` above is untouched, so the
+ * sixteen shipped sounds cannot regress because the editor exists, and
+ * clearing a recipe restores the original rather than leaving a hole. A
+ * recipe bound to an id with no generator — one of the silent events in
+ * `soundEvents.js` — simply gives that id a sound for the first time.
+ */
+const recipes = new Map();
+
+/**
+ * Install (or with a null recipe, remove) the sound bound to an event id.
+ *
+ * Callers must have validated the recipe first: `validateRecipe` bounds the
+ * render allocation, and a recipe can arrive from another player. Any buffers
+ * baked from the previous binding are dropped, or the editor would keep
+ * auditioning the sound the author just replaced.
+ */
+export function setRecipe(id, recipe) {
+  if (recipe) recipes.set(id, recipe);
+  else recipes.delete(id);
+  dropCached(id);
+  if (id.startsWith('engine:')) rebuildEngineLoops();
+  if (id.startsWith('ambience:')) restartAmbience();
+}
+
+/** Replace the whole set at once — what match start and mode changes use. */
+export function setRecipes(list = []) {
+  for (const id of recipes.keys()) dropCached(id);
+  recipes.clear();
+  for (const recipe of list) {
+    if (!recipe?.event) continue;
+    // Engine and ambience recipes are namespaced so a vehicle called
+    // `weaponFire` could never collide with the sound event of that name.
+    const kind = recipe.kind ?? 'sfx';
+    recipes.set(kind === 'sfx' ? recipe.event : `${kind}:${recipe.event}`, recipe);
+  }
+  for (const id of recipes.keys()) dropCached(id);
+  // Live graphs hold their spec from construction, so a changed set has to
+  // reach them explicitly. Both are cheap: engines rebuild lazily on the next
+  // moving frame, and a bed is two voices.
+  rebuildEngineLoops();
+  restartAmbience();
+}
+
+/**
+ * The engine spec for a vehicle def, resolved **once, at loop creation**.
+ *
+ * Most specific first: a recipe bound to this def id, then one bound to `*`
+ * (every vehicle), then the built-in default. The `*` tier exists so an author
+ * can retune the whole fleet without binding eight recipes, which is what
+ * anyone tuning "engines are too whiny" actually wants to do first.
+ *
+ * **This is deliberately not called per frame.** `updateEngineLoop` runs for
+ * every moving vehicle every frame, and an FPS regression has already been
+ * traced to that path once (docs/plans/fps-regression.md). The spec is read
+ * here, folded into local constants inside `engineGraph`, and never consulted
+ * again for the life of the loop.
+ */
+export function engineSpecFor(defId) {
+  const bound = (defId !== undefined && defId !== null && recipes.get(`engine:${defId}`))
+    || recipes.get('engine:*');
+  return bound?.engine ?? null;
+}
+
+/** The bed spec for `day` or `night`, or null for the built-in. */
+export function ambienceSpecFor(kind) {
+  return recipes.get(`ambience:${kind}`)?.ambience ?? null;
+}
+
+/**
+ * Tear down every live engine loop so the next frame rebuilds them.
+ *
+ * An engine's spec is baked into its graph at construction, which is what
+ * keeps the per-frame path free — the cost is that an edit cannot reach a loop
+ * that already exists. Rather than adding a per-frame staleness check to the
+ * hot path (exactly the kind of thing that caused the regression this design
+ * avoids), the loops are simply dropped: `updateEngineLoop` rebuilds each one
+ * on the next frame its vehicle is moving, from the new spec.
+ */
+export function rebuildEngineLoops() {
+  for (const key of [...loops.keys()]) stopEngineLoop(key);
+}
+
+/**
+ * Nudge the beds onto a new spec without waiting for the current segment.
+ *
+ * Ambience already picks up an edit on its own at the next segment boundary
+ * (`_playSegment` reads the spec each time), so this only shortens the wait —
+ * up to `AMBIENCE_SEGMENT_SECONDS` of it, which is long enough that an author
+ * dragging a slider would think nothing had happened.
+ */
+function restartAmbience() {
+  if (!dayBed || !nightBed) return;
+  dayBed.stop();
+  nightBed.stop();
+  dayBed = new AmbienceBed('day');
+  nightBed = new AmbienceBed('night');
+  updateAmbience(lastNightFactor);
+}
+
+/** Forget every baked buffer for one event id, across all cache keys. */
+function dropCached(id) {
+  for (const key of [...bufferCache.keys()]) {
+    if (key.startsWith(`${id}:`)) bufferCache.delete(key);
+  }
+  for (const key of [...bakingPromises.keys()]) {
+    if (key.startsWith(`${id}:`)) bakingPromises.delete(key);
+  }
+}
+
+/**
+ * A stable cache key for one bake.
+ *
+ * The bug this fixes: the key used to be `${id}:${variation}`, with `params`
+ * passed to the generator but *absent from the key*. Since there are three
+ * variations, the first three plays of a sound populated the whole cache —
+ * and every play after that returned a buffer baked with whatever intensity,
+ * calibre or scale happened to come first. A 5-damage plink and a
+ * base-station kill have made the identical noise since the cache was added.
+ *
+ * It is merely wrong for the game and fatal for an editor: without this, an
+ * author drags a slider, re-auditions, and hears the stale bake — so the one
+ * feedback loop the whole editor is built around silently does not work.
+ *
+ * Params are quantised rather than used raw. `intensity` is a continuous
+ * `sqrt(damage / REFERENCE)`, so keying on the exact float would mean a fresh
+ * offline render for practically every shot — trading a correctness bug for a
+ * performance one. Two decimal places keeps distinct calibres distinct while
+ * still hitting the cache for repeated fire from the same gun.
+ */
+export function cacheKey(id, params, variation) {
+  let suffix = '';
+  if (params) {
+    for (const name of Object.keys(params).sort()) {
+      const value = params[name];
+      if (value === undefined || value === null) continue;
+      suffix += `:${name}=${typeof value === 'number' ? value.toFixed(2) : value}`;
+    }
+  }
+  return `${id}:${variation}${suffix}`;
+}
+
 async function bufferFor(id, params) {
+  const recipe = recipes.get(id);
   const generator = GENERATORS[id];
-  if (!generator) return null;
+  if (!recipe && !generator) return null;
+
   // A handful of baked variants per id, picked at random on each play — see
   // synth.js's header on why a repeated cue needs this to avoid sounding like
-  // a looped sample. Cached forever once rendered.
-  const variation = Math.floor(synth.variedSeed() * 3);
-  const key = `${id}:${variation}`;
+  // a looped sample. Authored recipes do not vary (bakeRecipe is
+  // deterministic by design, so an edit is audible as itself), so they use a
+  // single slot and their content-addressed id as the key: two different
+  // recipes can never share a cache entry, and re-binding the same recipe
+  // re-uses the buffer already baked for it.
+  const variation = recipe ? recipe.id : Math.floor(synth.variedSeed() * 3);
+  const key = cacheKey(id, recipe ? null : params, variation);
   if (bufferCache.has(key)) return bufferCache.get(key);
   if (bakingPromises.has(key)) return bakingPromises.get(key);
 
-  const promise = generator(params).then((buffer) => {
+  const bake = recipe
+    ? synth.bakeRecipe(recipe, recipeDuration(recipe))
+    : generator(params);
+  const promise = bake.then((buffer) => {
     bufferCache.set(key, buffer);
     bakingPromises.delete(key);
     return buffer;
@@ -441,6 +619,77 @@ export function stepEnginePresence(presence, speedFrac, dt) {
 }
 
 /**
+ * How much a value must move before it is worth scheduling an automation event
+ * for it.
+ *
+ * `updateEngineLoop` used to write volume, position and speed unconditionally
+ * on every frame for every loop. Each of those writes schedules AudioParam
+ * automation — `setVolume` one event, `setSpeed` four — and three.js schedules
+ * six more per loop from inside `renderer.render()` when it updates the
+ * panner. Measured on a 40-vehicle benchmark scene with every vehicle parked
+ * and silent: **229.7 AudioParam events per frame, 14.4 per engine loop**,
+ * ~13,800/second at 60fps, to describe a fleet that was not moving and could
+ * not be heard. See docs/plans/fps-regression.md.
+ *
+ * The thresholds are chosen to be inaudible rather than merely small: a
+ * volume step of 1e-3 is roughly -60dB of change, and 1cm of position is far
+ * below what the panner can resolve at this scale.
+ */
+const ENGINE_VOLUME_EPS = 1e-3;
+const ENGINE_SPEED_EPS = 1e-3;
+const ENGINE_POSITION_EPS_SQ = 1e-4; // (1cm)^2
+
+/**
+ * Which of an engine loop's three parameters actually need writing this frame.
+ *
+ * Pure and exported for the same reason `stepEnginePresence` is: this is the
+ * arithmetic worth testing, and `node --test` cannot construct a
+ * `PositionalAudio` to test it through. `last` is null on a loop's first
+ * update, where everything must be written to establish a baseline.
+ *
+ * Each field is compared against the last value *actually written*, not the
+ * last value seen. That matters: comparing against the last seen value would
+ * let a slow drift — a vehicle creeping at a hundredth of the threshold per
+ * frame — never accumulate enough to trigger a write, and the voice would
+ * silently detach from the thing it is supposed to be following.
+ */
+export function engineWritesNeeded(last, next) {
+  if (!last) return { volume: true, speed: true, position: true };
+  const dx = next.x - last.x;
+  const dy = next.y - last.y;
+  const dz = next.z - last.z;
+  return {
+    volume: Math.abs(next.volume - last.volume) > ENGINE_VOLUME_EPS,
+    speed: Math.abs(next.speedFrac - last.speedFrac) > ENGINE_SPEED_EPS,
+    position: dx * dx + dy * dy + dz * dz > ENGINE_POSITION_EPS_SQ,
+  };
+}
+
+/**
+ * Seconds a loop must sit fully silent before its nodes are released.
+ *
+ * Not zero, because a vehicle that stops for a moment at a waypoint and drives
+ * on would otherwise tear down and rebuild five audio nodes on consecutive
+ * frames. Long enough to cover that; short enough that a parked fleet stops
+ * costing anything well inside a normal match.
+ */
+const ENGINE_IDLE_RELEASE_SECONDS = 2;
+
+/**
+ * Whether a silent loop has been silent long enough to release outright.
+ *
+ * Muting a loop is not the same as stopping it. A loop at presence 0 still has
+ * two sawtooth oscillators running through a biquad and an HRTF panner —
+ * convolving, every audio quantum, to produce silence — and still takes six
+ * panner automation events per frame from three.js because it is still in the
+ * scene. Releasing it is what actually reclaims that; `updateEngineLoop`
+ * rebuilds it the moment the vehicle moves again.
+ */
+export function shouldReleaseIdleLoop(presence, speedFrac, idleSeconds) {
+  return presence <= 0 && speedFrac <= ENGINE_STOP_EPS && idleSeconds >= ENGINE_IDLE_RELEASE_SECONDS;
+}
+
+/**
  * Start (or update) a continuous looped sound anchored to a moving object —
  * an engine. `key` identifies the loop across calls (a vehicle's id); calling
  * again with the same key updates its position and speed rather than
@@ -466,32 +715,80 @@ export function stepEnginePresence(presence, speedFrac, dt) {
  *   is render-only presentation, so it follows the same rule
  *   `render/projectileFx.js`'s effects do and uses wall-clock frame time,
  *   never simulated time.
+ * @param {string} [defId] the vehicle def this engine belongs to, used once at
+ *   construction to pick an authored engine spec. Read only on the frame the
+ *   loop is built; every later frame ignores it.
  */
-export function updateEngineLoop(key, anchor, baseHz, speedFrac, dt) {
+export function updateEngineLoop(key, anchor, baseHz, speedFrac, dt, defId) {
   if (!ctx || ctx.state !== 'running') return;
   let loop = loops.get(key);
 
   if (!loop) {
+    // A stationary vehicle gets no voice at all. `stepEnginePresence` already
+    // ramps a stopped engine to silence (that was the point of "silence engine
+    // when parked"), so building the graph here would spend a pool slot, two
+    // running oscillators, an HRTF panner and ~14 automation events a frame to
+    // render nothing audible. Deferring creation until something actually moves
+    // is also what stops the idle release below from thrashing: without this
+    // guard a released loop would be rebuilt on the very next frame.
+    if (speedFrac <= ENGINE_STOP_EPS) return;
     if (loops.size >= loopPoolSize()) return; // budget exhausted; silently skip
     const audio = new THREE.PositionalAudio(listener);
     const f = falloffFor('default');
     audio.setRefDistance(14);
     audio.setRolloffFactor(1.5);
     audio.setMaxDistance(180);
+    // See initAudio's voice pool for why this line matters: without it,
+    // maxDistance is silently ignored and a distant engine never truly goes
+    // quiet. Same fix, same reason.
+    audio.panner.distanceModel = 'linear';
     audio.panner.panningModel = lowPower ? 'equalpower' : 'HRTF';
     scene.add(audio);
 
-    const engine = synth.engineGraph(ctx, baseHz);
+    // Resolved exactly here — once per loop, not once per frame. See
+    // engineSpecFor's note on why that distinction is the whole design.
+    const engine = synth.engineGraph(ctx, baseHz, engineSpecFor(defId) ?? undefined);
     audio.setNodeSource(engine.output);
 
-    loop = { audio, engine, presence: 0 };
+    // `last` holds the values most recently *written* to the audio graph, so
+    // the dirty check below has a baseline. `idleSeconds` accrues only while
+    // fully silent and stopped.
+    loop = { audio, engine, presence: 0, last: null, idleSeconds: 0 };
     loops.set(key, loop);
   }
 
   loop.presence = stepEnginePresence(loop.presence, speedFrac, dt);
-  loop.audio.setVolume(engineVolume * loop.presence);
-  loop.audio.position.copy(anchor.position);
-  loop.engine.setSpeed(speedFrac);
+
+  const stopped = speedFrac <= ENGINE_STOP_EPS;
+  loop.idleSeconds = loop.presence <= 0 && stopped ? loop.idleSeconds + dt : 0;
+  if (shouldReleaseIdleLoop(loop.presence, speedFrac, loop.idleSeconds)) {
+    stopEngineLoop(key);
+    return;
+  }
+
+  const pos = anchor.position;
+  const volume = engineVolume * loop.presence;
+  const next = { volume, speedFrac, x: pos.x, y: pos.y, z: pos.z };
+  const writes = engineWritesNeeded(loop.last, next);
+
+  // Each baseline advances only when that parameter was actually written — see
+  // engineWritesNeeded's note on why comparing against the last *seen* value
+  // would let a slow drift go unnoticed forever.
+  if (!loop.last) loop.last = { volume: 0, speedFrac: 0, x: 0, y: 0, z: 0 };
+  if (writes.volume) {
+    loop.audio.setVolume(volume);
+    loop.last.volume = volume;
+  }
+  if (writes.position) {
+    loop.audio.position.copy(pos);
+    loop.last.x = pos.x;
+    loop.last.y = pos.y;
+    loop.last.z = pos.z;
+  }
+  if (writes.speed) {
+    loop.engine.setSpeed(speedFrac);
+    loop.last.speedFrac = speedFrac;
+  }
 }
 
 /** Stop and release a loop voice — call when its vehicle is destroyed/removed. */
@@ -535,3 +832,83 @@ export function debugState() {
     enginePresence: Object.fromEntries([...loops].map(([key, loop]) => [key, loop.presence])),
   };
 }
+
+/**
+ * Audition a recipe the author is editing, at a chosen distance.
+ *
+ * Deliberately routed through the *real* voice pool, the real panner and the
+ * real falloff — the same discipline `BuilderPreview` follows in using the
+ * actual `buildVehicleMesh` rather than an editor-only renderer. A preview
+ * with its own audio path could disagree with what a match plays, and the
+ * disagreement would be invisible until someone noticed the game sounded
+ * wrong. There is one path.
+ *
+ * The recipe is installed under a reserved id rather than its own event, so
+ * auditioning an unsaved edit never changes what the game around the editor is
+ * playing, and does not need the sound to be bound to an event at all.
+ *
+ * Placed to the listener's right rather than in front: with `panningModel`
+ * 'HRTF' a source directly ahead is the least informative position there is,
+ * and off to one side makes the distance cue legible.
+ *
+ * @param {object} recipe a validated recipe
+ * @param {number} distance metres from the listener
+ */
+export const AUDITION_ID = '__audition';
+
+export function auditionRecipe(recipe, distance = 10) {
+  if (!ctx || ctx.state !== 'running' || !listener) return;
+  setRecipe(AUDITION_ID, recipe);
+
+  const origin = new THREE.Vector3();
+  listener.getWorldPosition(origin);
+  const right = new THREE.Vector3(1, 0, 0).applyQuaternion(listener.getWorldQuaternion(new THREE.Quaternion()));
+  const at = origin.addScaledVector(right, Math.max(0, distance));
+  playAt(AUDITION_ID, at.x, at.y, at.z);
+}
+
+/**
+ * Play an already-baked buffer through the non-positional pool.
+ *
+ * The editor's escape hatch for things that are not one-shot cues: an engine
+ * sample rendered offline by `bakeEngineSample`, or a bed segment. Both are
+ * real buffers with nowhere to be positioned, and neither belongs in the
+ * recipe registry — auditioning one must not install anything or evict a
+ * cached sound.
+ */
+export function auditionBuffer(buffer, gain = 1) {
+  if (!ctx || ctx.state !== 'running' || !buffer || globalVoices.length === 0) return;
+  const a = globalVoices[nextGlobalVoice];
+  nextGlobalVoice = (nextGlobalVoice + 1) % globalVoices.length;
+  if (a.isPlaying) a.stop();
+  a.setBuffer(buffer);
+  a.setVolume(Math.min(1, gain * effectsVolume));
+  a.play();
+}
+
+/** Stop auditioning and forget the buffer, so a stale bake can't be reused. */
+export function clearAudition() {
+  setRecipe(AUDITION_ID, null);
+}
+
+/**
+ * The gain a source at `distance` gets from `falloff`, as the panner computes
+ * it — `distanceModel: 'linear'`, per the Web Audio spec.
+ *
+ * Exported so the editor's distance graph can draw the curve the engine will
+ * actually apply rather than an artist's impression of it. Restating the
+ * formula in the preview would be the usual way for a graph to start lying
+ * about the thing it depicts.
+ */
+export function linearGainAt(distance, falloff) {
+  const ref = falloff?.refDistance ?? FALLOFF.default.refDistance;
+  const max = falloff?.maxDistance ?? FALLOFF.default.maxDistance;
+  const rolloff = falloff?.rolloffFactor ?? FALLOFF.default.rolloffFactor;
+  if (max <= ref) return 0;
+  const d = Math.min(Math.max(distance, ref), max);
+  return Math.max(0, 1 - rolloff * ((d - ref) / (max - ref)));
+}
+
+/** Seconds for sound to travel `distance` metres. Dry air, 20°C. */
+export const SPEED_OF_SOUND = 343;
+export const propagationDelay = (distance) => Math.max(0, distance) / SPEED_OF_SOUND;

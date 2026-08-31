@@ -1073,6 +1073,21 @@ body.settings-open #hud { transform: translateX(calc(var(--panel-width) + 8px));
    own look later without touching the shared .portal-mode-btn rule. */
 .god-mode-btn {}
 
+/* The app chooser's own row. Deliberately NOT .portal-button-row: that one is
+   absolutely positioned against the screen's lower third to sit on the
+   backdrop image, which is right for the landing screen and wrong inside a
+   panel — it would pull the buttons out of the panel they belong to. */
+.god-mode-row {
+  display: flex;
+  gap: 12px;
+  width: 100%;
+  margin: 8px 0 4px;
+}
+
+@media (max-width: 620px) {
+  .god-mode-row { flex-wrap: wrap; }
+}
+
 @media (max-width: 620px) {
   .portal-button-row { flex-wrap: wrap; bottom: 4%; }
   .portal-mode-btn { flex: 1 1 40%; }
@@ -1361,8 +1376,10 @@ body.settings-open #hud { transform: translateX(calc(var(--panel-width) + 8px));
 
 /* ---- vehicle builder (God Mode) ---- */
 
-/* Above every setup screen: it is a tool, not a step in starting a match. */
-#builder {
+/* Above every setup screen: it is a tool, not a step in starting a match.
+ * The sound editor shares the shell — same bar, columns, groups and cards —
+ * so it is listed alongside rather than given a duplicate ruleset. */
+#builder, #sound-builder {
   position: fixed;
   inset: 0;
   z-index: 34;
@@ -1371,7 +1388,7 @@ body.settings-open #hud { transform: translateX(calc(var(--panel-width) + 8px));
   background: rgba(5, 8, 12, 0.97);
 }
 
-#builder.hidden { display: none; }
+#builder.hidden, #sound-builder.hidden { display: none; }
 
 .builder-bar {
   display: flex;
@@ -1789,4 +1806,110 @@ button.panel-back {
   0%   { color: #f0c65a; text-shadow: 0 0 10px rgba(240, 198, 90, 0.35); }
   25%  { color: #fff6d8; text-shadow: 0 0 22px rgba(255, 236, 176, 0.95); transform: scale(1.14); }
   100% { color: #f0c65a; text-shadow: 0 0 10px rgba(240, 198, 90, 0.35); transform: scale(1); }
+}
+
+/* ---- sound creator (God Mode) ---- */
+
+/* The centre column here is two canvases and a control strip rather than one
+ * elastic WebGL viewport, so it scrolls instead of stretching: a waveform has
+ * a natural height and gains nothing from being pulled taller. */
+.sound-stage {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sound-canvas {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.sound-rigbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.sound-rigbar input[type='range'] { flex: 1; min-width: 140px; }
+.sound-readout { min-width: 200px; }
+
+.sound-levels { display: flex; gap: 4px; margin-right: 10px; }
+.sound-level { text-transform: capitalize; }
+
+/* The selected ability level, marked the same way the primary action button
+ * is — it is the one control that changes what the rest of the editor is. */
+.sound-level-on {
+  color: #04231f;
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.sound-layer {
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.sound-layer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+
+.sound-layer-add { display: flex; gap: 6px; }
+
+/* ---- radio caption feed ---- */
+
+/* Bottom-left, above the HUD block rather than inside it — see radioFeed.js on
+   why it cannot live in #hud, which hides itself when nothing is selected. */
+.radio-feed {
+  position: fixed;
+  left: 12px;
+  bottom: 190px;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: min(52vw, 420px);
+  pointer-events: none; /* never intercept a click meant for the world */
+}
+
+.radio-line {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text);
+  background: rgba(5, 8, 12, 0.62);
+  border-left: 2px solid var(--accent);
+  border-radius: 0 4px 4px 0;
+  padding: 3px 8px;
+  opacity: 1;
+  transition: opacity 0.5s ease;
+}
+
+.radio-line-out { opacity: 0; }
+
+.radio-speaker {
+  color: var(--accent);
+  font-weight: 600;
+  margin-right: 6px;
+}
+
+.radio-text { opacity: 0.92; }
+
+@media (max-width: 620px) {
+  .radio-feed { bottom: 150px; max-width: 70vw; }
 }

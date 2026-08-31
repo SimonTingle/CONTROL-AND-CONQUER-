@@ -16,13 +16,6 @@ import { DifficultyScreen, DIFFICULTIES } from './ui/difficultyScreen.js';
 import { PortalScreen } from './ui/portalScreen.js';
 import { AuthScreen } from './ui/authScreen.js';
 import { BuilderScreen } from './builder/builderScreen.js';
-import { SoundScreen } from './sound/soundScreen.js';
-import * as radio from './audio/radio.js';
-import { Chatter } from './audio/chatter.js';
-import { pushRadioLine, clearRadioFeed } from './ui/radioFeed.js';
-import { isGodModeAccount } from './core/adminAccount.js';
-import { loadCustomRecipes } from './sound/customSounds.js';
-import { soundCatalogFor } from './sound/soundCatalog.js';
 import { loadCustomDefs } from './builder/customVehicles.js';
 import { catalogFor } from './builder/customCatalog.js';
 import { validateDef } from './builder/vehicleDraft.js';
@@ -581,10 +574,6 @@ canvas.addEventListener('pointerdown', (e) => {
   // press on the canvas, whatever it turns out to mean for the game itself.
   // Cheap to call every press: resume() is a no-op once already running.
   audio.resume();
-  // Speech needs the same user activation the AudioContext does, and Chrome's
-  // getVoices() is async and returns [] until its list has loaded — so this
-  // rides the identical gesture rather than adding a second hook of its own.
-  radio.primeSpeech();
   dragged = false;
   dragButton = e.button;
   lastX = e.clientX;
@@ -902,18 +891,10 @@ addEventListener('keydown', (e) => {
   }
   if (e.key === 'Escape' && commandContext.buildPlacementMode) cancelPlacementMode();
   if (e.key === 'Escape' && commandContext.targetSelectMode) commandContext.targetSelectMode = null;
-  // Debug: destroy whatever's under the cursor. This writes simulation state
-  // directly — `queueDestroy` marks the instance dead synchronously — which
-  // is exactly what CLAUDE.md says has silently desynced matches before, so
-  // it is gated to local play. Press it online and only your client would
-  // lose the unit; the peer keeps simulating it, and there is no recovery
-  // from that.
-  //
-  // It is not routed through an intent instead because it should not be a
-  // player action at all: it exists so the destroy pipeline can be triggered
-  // by hand, and combat now triggers it constantly, so the original reason
-  // for it ("combat is 2D, this is its only way to run") no longer holds.
-  if (k === 'k' && !isTextInputFocused() && !overlayOpen && game.mode !== 'multiplayer-online') {
+  // Debug: destroy whatever's under the cursor — 2B's destroy pipeline has
+  // nothing to trigger it yet (combat is 2D), so this is its only way to run
+  // until then.
+  if (k === 'k' && !isTextInputFocused() && !overlayOpen) {
     const target = pickSelectable(lastX, lastY);
     if (target) entities.queueDestroy(target);
   }
@@ -1216,18 +1197,6 @@ const game = {
 // The drawer's second page. Passed in rather than built inside Menu because it
 // reads live simulation collections, which the schema-driven control list has
 // no business knowing about.
-/**
- * The team radio. Presentation only — it observes the sim and writes nothing,
- * which is why it is constructed here rather than owned by anything simulated.
- * See audio/chatter.js on why it never hooks a sim callback.
- */
-/** How close a danger zone has to be to home before it is "base under attack"
- * rather than a skirmish somewhere on the island. Roughly the base block's own
- * footprint plus a margin. */
-const BASE_ALERT_RADIUS = 70;
-
-const chatter = new Chatter({ onCaption: (line) => pushRadioLine(line) });
-
 const statisticsScreen = new StatisticsScreen({ game, vehicles, structures });
 const menu = new Menu(() => buildSchema(world, view, game), statisticsScreen);
 
@@ -1287,29 +1256,7 @@ function cameraGroundQuad() {
  * opened on, so it serialises without touching the command table itself.
  */
 const radialMenu = new RadialMenu(camera, {
-  /**
-   * A menu opened or closed on a unit. `menuOpen` is read by the autonomous
-   * drivers, so this is simulation state and goes through the intent stream
-   * like every other player action — not written onto the instance from the
-   * DOM handler, which held the unit on this client only.
-   *
-   * The crystal-field wrapper (`fieldMenuTarget`) is skipped: it is a
-   * throwaway object built per open, it has no presence in the simulation,
-   * and there is nothing about a field that can be held still.
-   */
-  onHold(instance, held) {
-    if (!instance || instance.kind === 'field') return;
-    submitIntent(Intent.menuHold(instance.id, instance.kind, held));
-  },
   onCommand(cmd, instance) {
-    // Commands that only put *this* client into a UI mode ("now click a
-    // target", "now click where to build") never travel as intents —
-    // applyIntent runs execute() on every peer, so submitting one put
-    // everybody into the mode. See commands.js's `local: true`.
-    if (cmd.local) {
-      cmd.execute?.(instance, commandContext);
-      return;
-    }
     if (instance.kind === 'field') {
       submitIntent(Intent.blockField(instance.id, game.localTeamId, cmd.blocked));
       const p = instance.group.position;
@@ -1521,7 +1468,7 @@ function updateEngineAudio(dt) {
     // already reads to decide how dark a track a vehicle leaves.
     const baseHz = THREE.MathUtils.clamp(260 - v.def.weight * 14, 55, 220);
     const speedFrac = v.def.speed > 0 ? Math.min(1, v.speed / v.def.speed) : 0;
-    audio.updateEngineLoop(v.id, v.group, baseHz, speedFrac, dt, v.def.id);
+    audio.updateEngineLoop(v.id, v.group, baseHz, speedFrac, dt);
   }
   for (const key of audio.activeLoopKeys()) {
     if (!live.has(key)) audio.stopEngineLoop(key);
@@ -1588,21 +1535,12 @@ function leaveWreckage(inst) {
   world.scene.add(group);
 }
 
-// Built once and reused for the whole match — see navGrid.js's own header for
-// why one coarse flow-field cache can serve an entire army, and now every
-// harvester too. Moved up here (it used to live much further down, built
-// after harvesterAI) specifically so harvesterAI can take it as a
-// constructor dependency the same way aiCommander already does via
-// commandContext, rather than reaching for a module-level binding that
-// didn't exist yet at its own construction time.
-const navGrid = new NavGrid(heightmap, structures);
-
 // Ground control for every dock. Constructed before its two consumers because
 // both take it as a dependency — it owns the claim bookkeeping they each used
 // to keep their own copy of.
 const facilityControl = new FacilityControl({ vehicles, structures, heightmap });
 const harvesterAI = new HarvesterAI({
-  vehicles, world, heightmap, structures, game, facilityControl, navGrid,
+  vehicles, world, heightmap, structures, game, facilityControl,
 });
 const repairController = new RepairController({
   vehicles, structures, heightmap, game, facilityControl,
@@ -1837,6 +1775,11 @@ function updateRespawns(dt) {
     if (team.isHuman && chase.enabled) chase.reset(inst);
   }
 }
+
+// Built once and reused for the whole match — see navGrid.js's own header
+// for why one coarse flow-field cache can serve an entire army. Only
+// aiCommander queries it; nothing here needs its own reference.
+const navGrid = new NavGrid(heightmap);
 
 /** Everything a command might need, so commands.js imports no game systems. */
 // `entities` is here for the deployDefense intent, which consumes the vehicle
@@ -2281,7 +2224,7 @@ function onMatchTurn(inputs, turn) {
   }
 
   if (turn % HASH_EVERY_TURNS === 0) {
-    const hash = hashState({ vehicles, structures, game, projectiles, bounties, blooms: world.blooms, harvesterAI }, simClock.tick);
+    const hash = hashState({ vehicles, structures, game, projectiles, bounties, blooms: world.blooms }, simClock.tick);
     // Kept as well as sent: the on-screen readout shows this turn-aligned
     // value so two devices are always comparing the same simulated moment.
     match.checkpoint = { turn, hash: hash.split(':')[1] ?? hash };
@@ -2346,13 +2289,6 @@ function beginMatch(difficulty) {
   // time a match actually begins. Online matches get the built-in catalog back
   // even if a sandbox session just added to it.
   applyCustomCatalog();
-  applyCustomSounds();
-  // A new match is a new net: drop any queued traffic, forget the observed
-  // baseline (or the first tick would announce the starting units as newly
-  // built), and stop a line still being spoken from the last match.
-  chatter.reset();
-  radio.cancelSpeech();
-  clearRadioFeed();
   // A match is the unit of simulated time — tick 0 is its first step. Every
   // ban, threat memory and (later) lockstep turn number is relative to this.
   resetSimClock(0);
@@ -2513,7 +2449,6 @@ game.signOut = async () => {
   game.portalScreen?.refreshAccount();
   // Another player's vehicles must not stay in the drawer after a sign-out.
   refreshCustomDefs();
-  refreshCustomSounds();
 };
 
 game.lobbyScreen = new LobbyScreen({
@@ -2548,7 +2483,7 @@ game.portalScreen = new PortalScreen(
     getAccount: () => game.account,
     onSignIn: () => game.signIn(),
     onSignOut: () => game.signOut(),
-    onGodMode: (app) => (app === 'sound' ? game.openSoundCreator() : game.openBuilder()),
+    onGodMode: () => game.openBuilder(),
   }
 );
 
@@ -2569,16 +2504,6 @@ game.customDefs = [];
 game.matchDefs = [];
 
 /**
- * Author-built sounds, and the set an online match supplied — kept apart for
- * exactly the reason `customDefs` and `matchDefs` are. A sound cannot desync a
- * match (audio is presentation-only), but a recipe is still instructions to
- * render a graph on every peer, so online takes its sounds from the match
- * rather than from whatever this machine happens to have. See soundCatalog.js.
- */
-game.customRecipes = [];
-game.matchRecipes = [];
-
-/**
  * Point the picker and the vehicle controller at the catalog this mode is
  * allowed to see.
  *
@@ -2593,34 +2518,6 @@ function applyCustomCatalog() {
   const extras = catalog.filter((d) => !VEHICLE_CATALOG.includes(d));
   vehicles.setExtraDefs(extras);
   vehiclePicker.setCatalog(catalog);
-}
-
-/**
- * Install the sounds this mode is allowed to play.
- *
- * Called from the same places `applyCustomCatalog()` is, and for the same
- * reason: the answer changes when the mode changes, and a stale answer here
- * means the wrong sound plays rather than the wrong vehicle spawning.
- */
-function applyCustomSounds() {
-  audio.setRecipes(soundCatalogFor(game.mode, game.customRecipes, game.matchRecipes));
-}
-
-/** Reload the signed-in author's sounds and make them available. */
-async function refreshCustomSounds() {
-  if (!api.isConfigured || !game.account) {
-    game.customRecipes = [];
-    applyCustomSounds();
-    return;
-  }
-  try {
-    const { recipes } = await loadCustomRecipes();
-    game.customRecipes = recipes;
-  } catch {
-    // A sound editor that cannot reach the backend must not stop the game.
-    game.customRecipes = [];
-  }
-  applyCustomSounds();
 }
 
 /** Reload the signed-in author's vehicles and make them available. */
@@ -2641,10 +2538,6 @@ async function refreshCustomDefs() {
 }
 
 game.openBuilder = () => {
-  // Re-verified here rather than trusted from the button's render: the
-  // button is the only caller today, but this guard is what actually makes
-  // that true rather than merely currently true. See adminAccount.js.
-  if (!isGodModeAccount(game.account)) return;
   if (!game.builderScreen) {
     game.builderScreen = new BuilderScreen({
       toast: (m) => showToast(m),
@@ -2654,19 +2547,6 @@ game.openBuilder = () => {
     });
   }
   game.builderScreen.open();
-};
-
-game.openSoundCreator = () => {
-  if (!isGodModeAccount(game.account)) return;
-  if (!game.soundScreen) {
-    game.soundScreen = new SoundScreen({
-      toast: (m) => showToast(m),
-      // Reloading on close is what makes a sound saved in the editor take
-      // effect without a page refresh — the same rule as the vehicle builder.
-      onClose: () => refreshCustomSounds(),
-    });
-  }
-  game.soundScreen.open();
 };
 
 // Restores an existing session on load. Never throws and never blocks startup:
@@ -2928,6 +2808,16 @@ function simTick(dt) {
     checkMatchEnd();
     updateRespawns(dt);
   });
+  p.time('radialMenu', () => {
+    // A field has no entities.onDestroy hook to close the menu for it (that
+    // pipeline is vehicles/structures only), so the one case radialMenu.update
+    // can't already catch — a base pad poured over the field while its menu
+    // is open — is handled here instead.
+    if (radialMenu.isOpen && radialMenu.instance.kind === 'field' && radialMenu.instance.dead) {
+      radialMenu.close();
+    }
+    radialMenu.update();
+  });
 
   // Before the render-only early return, same reasoning as updateRespawns
   // above: this has to fire correctly under window.__step's headless
@@ -3047,23 +2937,6 @@ function renderTick(dt) {
     updateFlares(dt);
     bountyFx.update(bounties.instances, dt, world.atmosphere.params.elevation);
   });
-  // Presentation, so it runs here rather than in simTick — where it used to.
-  // `_reposition` closes the menu when its anchor goes behind the near plane,
-  // which is a *camera* test, and the camera is not replicated: running it
-  // inside the simulation meant the sim branched on where each client happened
-  // to be looking. The hold it applies to a vehicle now travels as an intent
-  // (see radialMenu's onHold), so the sim state is agreed even though the
-  // trigger is local.
-  p.time('radialMenu', () => {
-    // A field has no entities.onDestroy hook to close its menu (that pipeline
-    // is vehicles/structures only), so the one case radialMenu.update can't
-    // already catch — a base pad poured over the field while its menu is open
-    // — is handled here.
-    if (radialMenu.isOpen && radialMenu.instance.kind === 'field' && radialMenu.instance.dead) {
-      radialMenu.close();
-    }
-    radialMenu.update();
-  });
   p.time('engineAudio', () => updateEngineAudio(dt));
   p.time('ambienceAudio', () => audio.updateAmbience(nightFactor(world.atmosphere.params.elevation)));
   // Per-frame, unlike the rest of the HUD's half-second poll — see
@@ -3104,9 +2977,6 @@ function renderTick(dt) {
 
   autoQuality.record(dt);
   autoQuality.update({
-    // Drives the dwell timer and the fog ramp — see autoQuality.js's header on
-    // why this controller has to be damped in time, not just hysteresed.
-    dt,
     userForcedPixelRatio: renderQuality.userForced,
     setPixelRatio: (ratio) => renderer.setPixelRatio(ratio),
     basePixelRatio: BASE_PIXEL_RATIO,
@@ -3154,27 +3024,6 @@ function renderTick(dt) {
       // during the scouting game is just noise.
       economyActive: game.playerTeam.credits > 0 || structures.instances.length > 0,
       load: harvesterAI.stateOf(vehicles.active)?.load ?? 0,
-    });
-
-    // The radio, on the same half-second cadence and for the same reason as
-    // everything else in this block: chatter reacts to things that change at
-    // human pace, and polling it per frame would be pure waste. It diffs the
-    // world rather than being called back into — see audio/chatter.js.
-    const localTeamId = game.localTeamId;
-    const zones = harvesterAI.dangerZonesFor(localTeamId) ?? [];
-    const home = game.playerTeam?.homePoint;
-    chatter.observe({
-      localTeamId,
-      units: vehicles.instances.filter((v) => !v.dead && v.teamId === localTeamId).length,
-      structures: structures.instances.filter((i) => !i.dead && i.teamId === localTeamId).length,
-      dangerZones: zones.length,
-      // "Near base" is what separates a raid on the home block from a
-      // skirmish at a crystal field on the far side of the island.
-      dangerNearBase: !!home && zones.some((z) => Math.hypot(z.x - home.x, z.z - home.z) <= z.radius + BASE_ALERT_RADIUS),
-      harvestersInDanger: vehicles.instances.filter(
-        (v) => !v.dead && v.teamId === localTeamId && v.def?.tags?.includes('economy')
-          && zones.some((z) => Math.hypot(z.x - v.group.position.x, z.z - v.group.position.z) <= z.radius),
-      ).length,
     });
 
     const info = renderer.info.render;
@@ -3310,7 +3159,7 @@ window.__step = (seconds, dt = SIM_DT) => {
  * disagree, the first question is always "disagree about what" — and being able
  * to read and diff the hash from a console on each side is the cheapest way in.
  */
-window.__hashState = () => hashState({ vehicles, structures, game, projectiles, bounties, blooms: world.blooms, harvesterAI }, simClock.tick);
+window.__hashState = () => hashState({ vehicles, structures, game, projectiles, bounties, blooms: world.blooms }, simClock.tick);
 // Console/e2e debug access to the audio engine — mirrors every other
 // window.__ hook here, and is how a headless smoke test confirms the
 // AudioContext actually reached 'running' rather than staying suspended.
@@ -3365,7 +3214,7 @@ window.__determinismCheck = ({ ticks = 900, sampleEvery = 60 } = {}) => {
   if (!game.teams?.length) return { ok: false, error: 'Start a match first.' };
 
   const baseline = JSON.stringify(serialize(snapshotContext()));
-  const hashCtx = { vehicles, structures, game, projectiles, bounties, blooms: world.blooms, harvesterAI };
+  const hashCtx = { vehicles, structures, game, projectiles, bounties, blooms: world.blooms };
 
   const run = () => {
     deserialize(snapshotContext(), JSON.parse(baseline));

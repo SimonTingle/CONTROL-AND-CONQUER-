@@ -405,15 +405,51 @@ export const AMBIENCE_SEGMENT_SECONDS = 5;
  *   `render/projectileFx.js`'s shadow-to-glow cross-fade already gives the
  *   visuals.
  */
-export function ambienceSegment(kind) {
-  const night = kind === 'night';
-  // Each call re-rolls its own take — see the header above on why this is
-  // what makes the stream generative rather than a loop with extra steps.
-  const baseFreq = (night ? 500 : 900) * (0.85 + variedSeed() * 0.3);
-  const lfoHz = (night ? 0.07 : 0.13) * (0.7 + variedSeed() * 0.6);
-  const lfoDepth = (night ? 180 : 400) * (0.8 + variedSeed() * 0.4);
-  const gain = night ? 0.32 : 0.5;
-  const duration = AMBIENCE_SEGMENT_SECONDS;
+/**
+ * The two beds exactly as they sounded before ambience was authorable.
+ *
+ * The jitter widths encode what the original expressions did: `0.85 + r*0.3`
+ * is a 30%-wide window centred on 1, so `freqJitter: 0.3`. Writing them this
+ * way rather than as opaque min/max pairs is what lets one schema describe
+ * both beds and lets an author reason about "how much does this wander"
+ * instead of about two numbers that have to stay ordered.
+ *
+ * Pinned by test against the ranges they produce, for the same reason
+ * DEFAULT_ENGINE_SPEC is: authoring must not change what already ships.
+ */
+export const DEFAULT_AMBIENCE_SPEC = {
+  day: {
+    baseFreq: 900, freqJitter: 0.3,
+    lfoHz: 0.13, lfoJitter: 0.6,
+    lfoDepth: 400, depthJitter: 0.4,
+    gain: 0.5, filterQ: 0.4,
+    segmentSeconds: AMBIENCE_SEGMENT_SECONDS,
+  },
+  night: {
+    baseFreq: 500, freqJitter: 0.3,
+    lfoHz: 0.07, lfoJitter: 0.6,
+    lfoDepth: 180, depthJitter: 0.4,
+    gain: 0.32, filterQ: 0.4,
+    segmentSeconds: AMBIENCE_SEGMENT_SECONDS,
+  },
+};
+
+export function ambienceSegment(kind, spec) {
+  const s = { ...(DEFAULT_AMBIENCE_SPEC[kind === 'night' ? 'night' : 'day']), ...(spec ?? {}) };
+  const num = (v, fallback) => (Number.isFinite(Number(v)) ? Number(v) : fallback);
+
+  // Each call re-rolls its own take — see the header above on why this is what
+  // makes the stream generative rather than a loop with extra steps. The
+  // jitter widths are part of the spec rather than hidden constants precisely
+  // so an author can *see* them: setting them all to zero turns the bed back
+  // into a loop, which is a legitimate thing to want and should be a visible
+  // choice rather than an accident.
+  const baseFreq = num(s.baseFreq, 900) * (1 - num(s.freqJitter, 0) / 2 + variedSeed() * num(s.freqJitter, 0));
+  const lfoHz = num(s.lfoHz, 0.13) * (1 - num(s.lfoJitter, 0) / 2 + variedSeed() * num(s.lfoJitter, 0));
+  const lfoDepth = num(s.lfoDepth, 400) * (1 - num(s.depthJitter, 0) / 2 + variedSeed() * num(s.depthJitter, 0));
+  const gain = Math.min(1, Math.max(0, num(s.gain, 0.5)));
+  const duration = Math.min(20, Math.max(1, num(s.segmentSeconds, AMBIENCE_SEGMENT_SECONDS)));
+  const filterQ = num(s.filterQ, 0.4);
 
   return bake(duration, (ctx) => {
     const frames = Math.ceil(duration * ctx.sampleRate);
@@ -426,7 +462,7 @@ export function ambienceSegment(kind) {
 
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
-    filter.Q.value = 0.4;
+    filter.Q.value = filterQ;
 
     const lfo = ctx.createOscillator();
     lfo.frequency.value = lfoHz;
@@ -473,44 +509,609 @@ export function ambienceSegment(kind) {
  *   `speedFrac` is 0 (idle) to 1 (top speed); `output` is what the caller
  *   connects into its `PositionalAudio`'s node source.
  */
-export function engineGraph(ctx, baseHz) {
-  const osc1 = ctx.createOscillator();
-  const osc2 = ctx.createOscillator();
-  osc1.type = 'sawtooth';
-  osc2.type = 'sawtooth';
-  osc1.frequency.value = baseHz;
-  osc2.frequency.value = baseHz * 1.008; // slight detune — two-cylinder beat, not a pure tone
+/**
+ * The engine every vehicle had before engines were authorable.
+ *
+ * These are not defaults in the "reasonable starting value" sense — they are
+ * the *exact* constants `engineGraph` used when its graph was hardcoded, kept
+ * as one object so a vehicle with no recipe sounds byte-identical to how it
+ * sounded before this feature existed. `tests/authorable-engines.test.mjs`
+ * pins each number against the behaviour it produces, so a well-meaning tidy
+ * of this table is a failing test rather than a silent change to every
+ * vehicle in the game.
+ *
+ * Same non-regression rule that kept `GENERATORS` untouched when recipes
+ * arrived: adding the ability to author something must not change what
+ * already ships.
+ */
+export const DEFAULT_ENGINE_SPEC = {
+  oscillators: 2,
+  wave: 'sawtooth',
+  /** Second oscillator's pitch ratio — the beat that stops it being a pure
+   * tone. Small on purpose: past a few cents it stops being one engine. */
+  detune: 1.008,
+  filterType: 'lowpass',
+  filterQ: 0.5,
+  /** Cutoff at idle, as a multiple of pitch. */
+  cutoffRatio: 4,
+  /** How much further the cutoff opens at full speed, in the same units. */
+  cutoffRise: 10,
+  /** Pitch multiplier added at full speed: 0.9 means +90% at top speed. */
+  pitchRise: 0.9,
+  gainIdle: 0.14,
+  gainRise: 0.12,
+  /** Gain the graph is built at, before the first `setSpeed` overwrites it.
+   * Its own field rather than derived from idle/rise: the original hardcoded
+   * graph started at 0.18, which is not any expression of the other two, and
+   * "identical unless authored" has to mean identical. */
+  gainStart: 0.18,
+};
+
+/**
+ * Render a few seconds of an engine held at one speed, as a buffer.
+ *
+ * `engineGraph` builds a *live* graph, which is right for the game and
+ * useless for an editor: there is nothing to draw and nothing to audition
+ * through the ordinary one-shot path. This runs the same construction logic
+ * inside an `OfflineAudioContext` at a fixed speed so an author can hear what
+ * they are editing.
+ *
+ * Deliberately reuses `engineGraph` rather than reimplementing the graph. A
+ * separate "preview engine" would be free to drift from the real one, and an
+ * editor that lies about its output is worse than one with no preview — the
+ * same rule that makes the vehicle builder render with the real
+ * `buildVehicleMesh`.
+ *
+ * @param {object} [spec] see DEFAULT_ENGINE_SPEC
+ * @param {number} [baseHz] idle pitch
+ * @param {number} [speedFrac] 0 idle .. 1 full
+ * @param {number} [seconds]
+ */
+export function bakeEngineSample(spec, baseHz = 150, speedFrac = 0, seconds = 1.2) {
+  const duration = Math.min(4, Math.max(0.2, seconds));
+  return bake(duration, (ctx) => {
+    const engine = engineGraph(ctx, baseHz, spec);
+    // A short fade at both ends, so auditioning does not click. The live graph
+    // does not need this — it is faded by the presence ramp in audio.js — but
+    // a bare buffer starting mid-oscillation would.
+    const env = ctx.createGain();
+    const fade = Math.min(0.08, duration * 0.15);
+    env.gain.setValueAtTime(0, 0);
+    env.gain.linearRampToValueAtTime(1, fade);
+    env.gain.setValueAtTime(1, duration - fade);
+    env.gain.linearRampToValueAtTime(0, duration);
+    engine.output.connect(env);
+    env.connect(ctx.destination);
+    engine.setSpeed(speedFrac);
+  });
+}
+
+/**
+ * A persistent engine tone, built from a spec.
+ *
+ * **Construction happens once per vehicle loop; only `setSpeed` runs per
+ * frame.** That split is what makes authorable engines affordable at all, and
+ * it is deliberately preserved here: every value the spec contributes is read
+ * and folded into a local constant *now*, so `setSpeed` closes over plain
+ * numbers and does no lookups, no branching on the spec, and no allocation.
+ * The per-frame cost is identical to the hardcoded version — same four
+ * `linearRampToValueAtTime` calls, or fewer with one oscillator.
+ *
+ * This matters more than usual: `updateEngineLoop` is the path an FPS
+ * regression was already traced to once (docs/plans/fps-regression.md), and
+ * the fix was removing per-frame automation writes. Reintroducing per-frame
+ * work here would undo it.
+ *
+ * @param {AudioContext} ctx the *real*, non-offline context
+ * @param {number} baseHz idle pitch, from `def.weight` (heavier = lower)
+ * @param {object} [spec] see DEFAULT_ENGINE_SPEC
+ */
+export function engineGraph(ctx, baseHz, spec = DEFAULT_ENGINE_SPEC) {
+  const s = { ...DEFAULT_ENGINE_SPEC, ...(spec ?? {}) };
+  // Bounded here as well as in validateRecipe: a spec can arrive from a saved
+  // recipe written by an older build, and two oscillators per vehicle across
+  // a full loop pool is already the budget this system was tuned for.
+  // `num` rather than `Number(x) || fallback`: `||` would replace a legitimate
+  // zero (a spec with no pitch rise is a perfectly good flat engine), and
+  // `Number(x) ?? fallback` does not work at all — `??` catches null and
+  // undefined, not the NaN that `Number('nonsense')` actually produces.
+  const num = (v, fallback) => (Number.isFinite(Number(v)) ? Number(v) : fallback);
+  const clamp01 = (v) => Math.min(1, Math.max(0, v));
+
+  const count = Math.min(3, Math.max(1, Math.round(num(s.oscillators, 1))));
+  const detune = num(s.detune, 1);
+  const pitchRise = num(s.pitchRise, 0);
+  const cutoffRatio = Math.max(0.1, num(s.cutoffRatio, 1));
+  const cutoffRise = num(s.cutoffRise, 0);
+  const gainIdle = clamp01(num(s.gainIdle, 0));
+  const gainRise = clamp01(num(s.gainRise, 0));
 
   const filter = ctx.createBiquadFilter();
-  filter.type = 'lowpass';
-  filter.Q.value = 0.5;
-  filter.frequency.value = baseHz * 4;
+  filter.type = s.filterType ?? 'lowpass';
+  filter.Q.value = num(s.filterQ, 0.5);
+  filter.frequency.value = baseHz * cutoffRatio;
 
   const gain = ctx.createGain();
-  gain.gain.value = 0.18;
+  gain.gain.value = clamp01(num(s.gainStart, gainIdle));
 
-  osc1.connect(filter);
-  osc2.connect(filter);
+  // Each oscillator's own pitch ratio, resolved once. The first sits at
+  // baseHz; each further one is detuned by another step, so three oscillators
+  // spread rather than stacking two at the same offset.
+  const oscillators = [];
+  const ratios = [];
+  for (let i = 0; i < count; i++) {
+    const ratio = detune ** i;
+    const osc = ctx.createOscillator();
+    osc.type = s.wave ?? 'sawtooth';
+    osc.frequency.value = baseHz * ratio;
+    osc.connect(filter);
+    osc.start();
+    oscillators.push(osc);
+    ratios.push(baseHz * ratio);
+  }
+
   filter.connect(gain);
-  osc1.start();
-  osc2.start();
 
   return {
     output: gain,
     setSpeed(speedFrac) {
-      const f = Math.min(1, Math.max(0, speedFrac));
+      // NaN-safe, and that is not defensive padding: `Math.max(0, NaN)` is
+      // NaN, so a clamp written the obvious way passes NaN straight through
+      // to `linearRampToValueAtTime`, which **throws**. This runs every frame
+      // for every moving vehicle, and the exception would escape into
+      // `updateEngineLoop` and kill that vehicle's engine for the rest of the
+      // match. A speed of NaN is reachable from a custom vehicle def whose
+      // `speed` is zero or missing — the division that produces `speedFrac`
+      // is guarded in main.js today, but nothing makes that guard permanent.
+      const raw = Number(speedFrac);
+      const f = Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 0;
       const t = ctx.currentTime + 0.05;
       // Pitch and filter cutoff both rise with speed/load — the two cues
       // that actually read as "engine working harder" together; either one
       // alone reads as a pitch-shifted sample rather than a real engine.
-      osc1.frequency.linearRampToValueAtTime(baseHz * (1 + f * 0.9), t);
-      osc2.frequency.linearRampToValueAtTime(baseHz * 1.008 * (1 + f * 0.9), t);
-      filter.frequency.linearRampToValueAtTime(baseHz * (4 + f * 10), t);
-      gain.gain.linearRampToValueAtTime(0.14 + f * 0.12, t);
+      const rise = 1 + f * pitchRise;
+      for (let i = 0; i < oscillators.length; i++) {
+        oscillators[i].frequency.linearRampToValueAtTime(ratios[i] * rise, t);
+      }
+      filter.frequency.linearRampToValueAtTime(baseHz * (cutoffRatio + f * cutoffRise), t);
+      gain.gain.linearRampToValueAtTime(gainIdle + f * gainRise, t);
     },
     stop() {
-      osc1.stop();
-      osc2.stop();
+      for (const osc of oscillators) osc.stop();
     },
   };
+}
+
+/**
+ * A carrier oscillator whose frequency is modulated by a second oscillator —
+ * two-operator FM.
+ *
+ * The reason this exists alongside `tone`: FM produces *inharmonic* partials,
+ * sidebands at carrier ± n·modulator. Bells, clangs and alarm tones are
+ * inharmonic, which is exactly why they cannot be built by stacking `tone`
+ * layers — every partial a sum of tones can produce sits at a whole-number
+ * multiple of the fundamental, and that is the definition of "not a bell".
+ *
+ * `ratio` rather than an absolute modulator frequency, because the character
+ * of an FM sound follows the carrier:modulator ratio: hold the ratio and a
+ * bell transposes and stays a bell; fix the modulator in Hz and it becomes a
+ * different instrument at every pitch.
+ *
+ * @param {OfflineAudioContext} ctx
+ */
+function fmTone(ctx, { wave, startHz, endHz, ratio, index, duration, attack, gain, startTime = 0, destination }) {
+  const t0 = ctx.currentTime + startTime;
+
+  const carrier = ctx.createOscillator();
+  carrier.type = wave;
+  carrier.frequency.setValueAtTime(startHz, t0);
+  carrier.frequency.exponentialRampToValueAtTime(Math.max(1, endHz), t0 + duration);
+
+  const modulator = ctx.createOscillator();
+  modulator.type = 'sine'; // a non-sine modulator turns to mud very fast
+  modulator.frequency.setValueAtTime(startHz * ratio, t0);
+  modulator.frequency.exponentialRampToValueAtTime(Math.max(1, endHz * ratio), t0 + duration);
+
+  // The modulation depth in Hz. Swept down alongside the amplitude envelope
+  // so the sound gets *duller* as it decays, which is what a struck object
+  // does — holding the index constant reads as synthetic.
+  const depth = ctx.createGain();
+  depth.gain.setValueAtTime(index, t0);
+  depth.gain.exponentialRampToValueAtTime(Math.max(0.0001, index * 0.02), t0 + duration);
+
+  modulator.connect(depth);
+  depth.connect(carrier.frequency);
+
+  const env = ctx.createGain();
+  env.gain.setValueAtTime(0, t0);
+  env.gain.linearRampToValueAtTime(gain, t0 + attack);
+  env.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+
+  carrier.connect(env);
+  env.connect(destination ?? ctx.destination);
+  modulator.start(t0);
+  carrier.start(t0);
+  modulator.stop(t0 + duration + 0.02);
+  carrier.stop(t0 + duration + 0.02);
+  return { carrier, modulator, env };
+}
+
+/**
+ * Noise through a *bandpass* whose centre frequency sweeps.
+ *
+ * `noiseBurst` uses a lowpass, which can only ever remove the top: sweeping
+ * it sounds like something getting duller. A moving resonant band is a
+ * different perceptual object — it is what a vehicle passing you actually
+ * does to broadband noise, and with a high `q` it is a whistle rather than
+ * wind. Neither is reachable with a lowpass at any setting.
+ */
+function noiseSweep(ctx, { duration, startFreq, endFreq, q, attack, gain, startTime = 0, destination }) {
+  const t0 = ctx.currentTime + startTime;
+  const frames = Math.ceil(duration * ctx.sampleRate);
+  const buffer = ctx.createBuffer(1, frames, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < frames; i++) data[i] = Math.random() * 2 - 1;
+
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+
+  const filter = ctx.createBiquadFilter();
+  filter.type = 'bandpass';
+  filter.Q.value = q;
+  filter.frequency.setValueAtTime(startFreq, t0);
+  filter.frequency.exponentialRampToValueAtTime(Math.max(20, endFreq), t0 + duration);
+
+  // Makeup gain, and not a fudge: a bandpass of centre f0 and quality Q passes
+  // a band of width f0/Q, so the noise *power* through it falls as 1/Q and the
+  // amplitude as 1/sqrt(Q). Without compensating, "Level 0.5" means something
+  // completely different on a sweep than on a tone, and raising Q — which the
+  // author does to make a whistle rather than wind — silences the layer as a
+  // side effect of a control that says nothing about volume.
+  //
+  // The constant on top covers the rest of the gap: a lowpass passes
+  // everything below its cutoff, so `noise` starts with far more of the
+  // spectrum than any bandpass ever has. Measured against the other layer
+  // kinds at matched Level rather than derived, and it only has to put them
+  // in the same ballpark — the Level slider does the fine work.
+  const makeup = Math.sqrt(Math.max(0.0001, q)) * 3.2;
+  // Clamped to full scale, and this is the honest part: the loss *cannot* be
+  // fully recovered. RMS and peak are different quantities — a narrow band has
+  // little energy but its peak is still bounded by 1 — so past a point the
+  // makeup would only drive the envelope past full scale and clip, which on
+  // bandpassed noise is audible distortion rather than loudness. Measured
+  // RMS at Level 0.4, Q 4: 0.006 uncompensated, 0.016 compensated and clamped,
+  // against 0.032 for `noise` and ~0.054 for `tone`/`fm`. (An unclamped
+  // version measured 0.027 — *higher* than the clamped one, because clipping
+  // adds distortion energy. Louder and worse.)
+  // A high-Q sweep stays quieter than a broadband layer, which is what a
+  // narrow filter physically does; the Level slider and the recipe's overall
+  // gain are where an author makes up the rest.
+  const peak = Math.min(1, gain * makeup);
+
+  const env = ctx.createGain();
+  env.gain.setValueAtTime(0, t0);
+  env.gain.linearRampToValueAtTime(peak, t0 + attack);
+  env.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+
+  source.connect(filter);
+  filter.connect(env);
+  env.connect(destination ?? ctx.destination);
+  source.start(t0);
+  return { source, filter, env };
+}
+
+/**
+ * A tone gated by an LFO on its own gain — tremolo at low depth, hard on/off
+ * at high depth.
+ *
+ * The family this unlocks is defined by *rhythm* rather than timbre: alarms,
+ * klaxons, geiger ticks, engine idle chug, radio squelch. No envelope on a
+ * single `tone` can produce a repeating pattern, and building one as N layers
+ * would spend the whole eight-layer budget on a four-beep alert.
+ *
+ * The LFO is offset so it oscillates between `1 - depth` and `1` rather than
+ * around zero: at depth 1 that is full gating, at 0 it is a steady tone, and
+ * the control stays meaningful across its whole range.
+ */
+function pulseTone(ctx, { wave, hz, rateHz, depth, duration, gain, startTime = 0, destination }) {
+  const t0 = ctx.currentTime + startTime;
+
+  const osc = ctx.createOscillator();
+  osc.type = wave;
+  osc.frequency.setValueAtTime(hz, t0);
+
+  const gate = ctx.createGain();
+  gate.gain.value = 1 - depth;
+
+  const lfo = ctx.createOscillator();
+  lfo.type = 'square';
+  lfo.frequency.value = rateHz;
+  const lfoDepth = ctx.createGain();
+  lfoDepth.gain.value = depth * 0.5;
+  lfo.connect(lfoDepth);
+  lfoDepth.connect(gate.gain);
+
+  // A gentle overall envelope on top, so the pulse train still fades rather
+  // than stopping mid-cycle with a click.
+  const env = ctx.createGain();
+  env.gain.setValueAtTime(0, t0);
+  env.gain.linearRampToValueAtTime(gain, t0 + Math.min(0.02, duration * 0.1));
+  env.gain.setValueAtTime(gain, t0 + duration * 0.8);
+  env.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+
+  osc.connect(gate);
+  gate.connect(env);
+  env.connect(destination ?? ctx.destination);
+  lfo.start(t0);
+  osc.start(t0);
+  lfo.stop(t0 + duration + 0.02);
+  osc.stop(t0 + duration + 0.02);
+  return { osc, lfo, env };
+}
+
+/**
+ * N short pitch ramps in a row — birds, UI trills, radio blips, data bursts.
+ *
+ * Built as one layer with a repeat count rather than N `tone` layers so a
+ * twelve-blip burst costs one of the eight layers a recipe is allowed, not
+ * twelve. The repeats share a single oscillator, restarting the pitch ramp
+ * and the envelope each cycle.
+ */
+function chirpTone(ctx, { wave, startHz, endHz, repeats, duration, gain, startTime = 0, destination }) {
+  const t0 = ctx.currentTime + startTime;
+  const each = duration / repeats;
+  // A gap keeps the blips distinct; without it a high repeat count smears
+  // into one continuous glide and the control appears to do nothing.
+  const sound = each * 0.6;
+
+  const osc = ctx.createOscillator();
+  osc.type = wave;
+  const env = ctx.createGain();
+  env.gain.setValueAtTime(0, t0);
+
+  for (let i = 0; i < repeats; i++) {
+    const at = t0 + i * each;
+    osc.frequency.setValueAtTime(startHz, at);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(1, endHz), at + sound);
+    env.gain.setValueAtTime(0, at);
+    env.gain.linearRampToValueAtTime(gain, at + Math.min(0.004, sound * 0.2));
+    env.gain.exponentialRampToValueAtTime(0.0001, at + sound);
+  }
+
+  osc.connect(env);
+  env.connect(destination ?? ctx.destination);
+  osc.start(t0);
+  osc.stop(t0 + duration + 0.02);
+  return { osc, env };
+}
+
+// ---------------------------------------------------------------------------
+// Radio
+// ---------------------------------------------------------------------------
+
+/**
+ * The three artifacts the team radio plays around each spoken line.
+ *
+ * These carry more weight than a normal cue. The voice itself is browser TTS,
+ * which **cannot be routed into Web Audio at all** — no filter, no position,
+ * no mixer (see audio/radio.js). So these three are the only part of the radio
+ * that can actually be shaped, and they are what make a dry system voice read
+ * as a transmission rather than as a screen reader.
+ *
+ * Band-limited to roughly a voice channel on purpose: 300Hz-3kHz is the range
+ * a real radio passes, and it is that restriction — not the noise — that the
+ * ear identifies as "radio".
+ *
+ * Built-in generators rather than recipes shipped in the editor, so the radio
+ * has a sound out of the box. A recipe bound to `radioOpen`/`radioStatic`/
+ * `radioClose` still overrides them, exactly as it does for every other
+ * built-in.
+ */
+export function radioOpen() {
+  return bake(0.14, (ctx) => {
+    // The click of a carrier appearing: a short burst with a hard attack.
+    noiseBurst(ctx, { duration: 0.07, startFreq: 3000, endFreq: 900, attack: 0.001, gain: 0.5 });
+    tone(ctx, { wave: 'square', startHz: 1800, endHz: 900, duration: 0.04, attack: 0.001, gain: 0.22 });
+  });
+}
+
+/**
+ * The bed that runs under a line. Deliberately quiet and deliberately short —
+ * it is played once per utterance rather than looped, because a loop would
+ * need stopping and the one thing this system cannot rely on is being told
+ * when an utterance ended (`onend` never fires when there is no voice).
+ */
+export function radioStatic() {
+  return bake(1.6, (ctx) => {
+    const frames = Math.ceil(1.6 * ctx.sampleRate);
+    const buffer = ctx.createBuffer(1, frames, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < frames; i++) data[i] = Math.random() * 2 - 1;
+
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+
+    // Bandpass, not lowpass: the narrow passband is the whole cue. A lowpassed
+    // hiss sounds like wind; a bandpassed one sounds like a channel.
+    const band = ctx.createBiquadFilter();
+    band.type = 'bandpass';
+    band.frequency.value = 1400;
+    band.Q.value = 0.9;
+
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0, ctx.currentTime);
+    env.gain.linearRampToValueAtTime(0.16, ctx.currentTime + 0.05);
+    env.gain.setValueAtTime(0.16, ctx.currentTime + 1.4);
+    env.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 1.6);
+
+    source.connect(band);
+    band.connect(env);
+    env.connect(ctx.destination);
+    source.start();
+  });
+}
+
+/** The channel closing — shorter and duller than the open, as a real squelch
+ * tail is: the carrier drops before the noise gate does. */
+export function radioClose() {
+  return bake(0.12, (ctx) => {
+    noiseBurst(ctx, { duration: 0.05, startFreq: 1800, endFreq: 400, attack: 0.001, gain: 0.34 });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Authored sounds
+// ---------------------------------------------------------------------------
+
+/**
+ * Last-ditch ceilings, matching `MAX_DURATION` / `MAX_LAYERS` in
+ * `src/sound/soundSchema.js`. Restated here rather than imported so this file
+ * keeps its one useful property — pure DSP with no dependency on the editor —
+ * and so a bad recipe that somehow slipped past validation still cannot ask
+ * for an unbounded allocation.
+ */
+const BAKE_DURATION_CEILING = 6;
+const BAKE_LAYER_CEILING = 8;
+
+/**
+ * Render a sound *recipe* — the data model in `src/sound/soundRecipe.js` —
+ * into a buffer, through the exact same `bake()` / `noiseBurst()` / `tone()`
+ * the sixteen built-in generators above use.
+ *
+ * This is deliberately a thin interpreter and nothing more. Every layer field
+ * is passed straight through to a primitive, so a sound the editor emits is
+ * playable by construction and the editor's preview cannot disagree with what
+ * the match plays: there is one synthesis path, not a preview one and a real
+ * one. It is also why adding a new layer type is a change in exactly two
+ * places — the `SOUND_GROUPS` schema and the switch below.
+ *
+ * The one thing this does that the built-ins don't is *not* vary: no
+ * `variedSeed()` jitter. An author dragging a slider needs the change they
+ * hear to be the change they made, and per-play variation would mask small
+ * edits behind noise. Variation for authored sounds is a per-play concern
+ * `audio.js` can add later on top of a stable bake, which is the right place
+ * for it anyway.
+ *
+ * Bounds are the caller's job — `validateRecipe` runs on the editor's output
+ * *and* on the server, because `duration * SAMPLE_RATE` is an allocation and a
+ * recipe can arrive from another player. This function assumes it has been
+ * checked, and clamps only as a last-ditch guard so a bug upstream degrades
+ * into a short sound rather than an out-of-memory.
+ *
+ * @param {object} recipe a validated recipe
+ * @param {number} duration total render length in seconds, from `recipeDuration()`
+ * @returns {Promise<AudioBuffer>}
+ */
+export function bakeRecipe(recipe, duration) {
+  const total = Math.min(BAKE_DURATION_CEILING, Math.max(0.02, Number(duration) || 0.5));
+  const master = Math.min(1, Math.max(0, Number(recipe?.gain) ?? 1));
+  const layers = (recipe?.layers ?? []).slice(0, BAKE_LAYER_CEILING);
+
+  return bake(total, (ctx) => {
+    for (const layer of layers) {
+      // Gains multiply rather than replace: the recipe's overall level is a
+      // trim over the mix the author balanced, so moving it keeps the
+      // relative weight of the layers intact.
+      const gain = Math.min(1, Math.max(0, (Number(layer.gain) || 0) * master));
+      if (gain <= 0) continue;
+      const startTime = Math.max(0, Number(layer.startTime) || 0);
+      const length = Math.max(0.01, Math.min(total - startTime, Number(layer.duration) || 0.1));
+      if (length <= 0) continue;
+
+      const attack = Math.max(0.0005, Number(layer.attack) || 0.005);
+
+      switch (layer.kind) {
+        case 'tone':
+          tone(ctx, {
+            wave: layer.wave ?? 'sine',
+            startHz: Math.max(1, Number(layer.startHz) || 220),
+            endHz: Math.max(1, Number(layer.endHz) || 220),
+            duration: length,
+            attack,
+            gain,
+            startTime,
+          });
+          break;
+
+        case 'fm':
+          fmTone(ctx, {
+            wave: layer.wave ?? 'sine',
+            startHz: Math.max(1, Number(layer.startHz) || 220),
+            endHz: Math.max(1, Number(layer.endHz) || 220),
+            ratio: Math.max(0.01, Number(layer.ratio) || 1),
+            index: Math.max(0, Number(layer.index) || 0),
+            duration: length,
+            attack,
+            gain,
+            startTime,
+          });
+          break;
+
+        case 'sweep':
+          noiseSweep(ctx, {
+            duration: length,
+            startFreq: Math.max(20, Number(layer.startFreq) || 400),
+            endFreq: Math.max(20, Number(layer.endFreq) || 4000),
+            q: Math.max(0.0001, Number(layer.q) || 1),
+            attack,
+            gain,
+            startTime,
+          });
+          break;
+
+        case 'pulse':
+          pulseTone(ctx, {
+            wave: layer.wave ?? 'square',
+            hz: Math.max(1, Number(layer.startHz) || 440),
+            rateHz: Math.max(0.01, Number(layer.rateHz) || 8),
+            depth: Math.min(1, Math.max(0, Number(layer.depth) ?? 1)),
+            duration: length,
+            gain,
+            startTime,
+          });
+          break;
+
+        case 'chirp':
+          chirpTone(ctx, {
+            wave: layer.wave ?? 'sine',
+            startHz: Math.max(1, Number(layer.startHz) || 2000),
+            endHz: Math.max(1, Number(layer.endHz) || 4000),
+            // Rounded and floored at 1: a fractional or zero repeat count
+            // divides the duration into nonsense and yields silence.
+            repeats: Math.max(1, Math.round(Number(layer.repeats) || 1)),
+            duration: length,
+            gain,
+            startTime,
+          });
+          break;
+
+        default: {
+          // `noise`, and anything unrecognised — validateRecipe rejects an
+          // unknown kind, so reaching here with one means a bug upstream, and
+          // a plain noise burst is the safest thing to make of it.
+          //
+          // `noiseBurst` has no `startTime` — it always begins at
+          // `ctx.currentTime`, which in an offline context is 0. Rather than
+          // change a primitive five shipped sounds depend on, a delayed noise
+          // layer is routed through a DelayNode. Same audible result, and the
+          // built-ins' code path is untouched.
+          let destination = ctx.destination;
+          if (startTime > 0) {
+            const delay = ctx.createDelay(BAKE_DURATION_CEILING);
+            delay.delayTime.value = startTime;
+            delay.connect(ctx.destination);
+            destination = delay;
+          }
+          noiseBurst(ctx, {
+            duration: length,
+            startFreq: Math.max(20, Number(layer.startFreq) || 3000),
+            endFreq: Math.max(20, Number(layer.endFreq) || 200),
+            attack: Math.max(0.0005, Number(layer.attack) || 0.004),
+            gain,
+            destination,
+          });
+        }
+      }
+    }
+  });
 }

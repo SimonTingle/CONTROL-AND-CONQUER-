@@ -30,9 +30,23 @@ const SUN_DAY = new THREE.Color('#fff4e0');
  * intensity, ambient fill, and fog. Driving all of them from one elevation value
  * is what makes the time-of-day slider feel like weather instead of a toggle.
  */
+/** Scratch vector for the shadow direction — `apply()` runs every frame while
+ * the cycle is enabled, so this must not allocate. */
+const SHADOW_DIR = new THREE.Vector3();
+
 export class Atmosphere {
   // Sun elevation in degrees at solar noon, when the day/night cycle is running.
   static CYCLE_MAX_ELEVATION = 70;
+
+  /**
+   * Lowest elevation the shadow-casting light is allowed to reach, in degrees.
+   *
+   * Small but strictly positive: high enough to keep the shadow camera off the
+   * ground plane and out of the worst grazing angles (where depth precision
+   * collapses into acne), low enough that shadows still lengthen convincingly
+   * towards dusk rather than stopping short.
+   */
+  static MIN_SHADOW_ELEVATION = 5;
 
   constructor(scene, renderer, { mapSize = 1024 } = {}) {
     this.scene = scene;
@@ -153,8 +167,35 @@ export class Atmosphere {
 
     this.renderer.toneMappingExposure = p.exposure;
 
+    // The *shadow* direction is pinned above the horizon, while the sky above
+    // keeps the true sun position. They are separate on purpose.
+    //
+    // `sunLight.position` is `sunPosition * mapSize * 0.9`, so it tracks the
+    // sun's elevation directly — and the sun spends half of every cycle below
+    // the horizon. At elevation 0 the light sits *exactly* on the ground plane,
+    // which is the degenerate case for an orthographic shadow camera looking
+    // along it; below that it is underground, casting shadows up through the
+    // terrain. Both happen at dusk and dawn.
+    //
+    // Pinning costs nothing visually: by the time the real sun reaches this
+    // elevation the light's intensity is already down at its 0.04 floor, so the
+    // direction it comes from is not readable, and the sky dome is driven by
+    // `u.sunPosition` above rather than by this.
+    //
+    // Deliberately not `castShadow = false` at night, which is the obvious fix
+    // and is the wrong one here: toggling it changes the material defines and
+    // forces three.js to re-link every material in the scene — the same stall
+    // headlightPool.js's header exists to document (measured at 764ms). That
+    // would put a hard hitch at exactly the moment this is trying to smooth.
+    const shadowElevation = Math.max(Atmosphere.MIN_SHADOW_ELEVATION, p.elevation);
+    SHADOW_DIR.setFromSphericalCoords(
+      1,
+      THREE.MathUtils.degToRad(90 - shadowElevation),
+      theta,
+    );
+
     // Distance chosen so the shadow camera still covers the map at low sun.
-    this.sunLight.position.copy(this.sunPosition).multiplyScalar(this.mapSize * 0.9);
+    this.sunLight.position.copy(SHADOW_DIR).multiplyScalar(this.mapSize * 0.9);
     this.sunLight.target.position.set(0, 0, 0);
     this.sunLight.target.updateMatrixWorld();
 
