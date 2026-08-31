@@ -37,6 +37,17 @@ function cookieSameSite() {
 const isProduction = process.env.NODE_ENV === 'production';
 const sameSite = cookieSameSite();
 
+// CORS_ORIGIN is a comma-separated list so a second legitimate frontend (e.g.
+// an itch.io build, served from a fixed but entirely different origin) can be
+// allow-listed alongside the main site. A single origin with no comma still
+// works exactly as before. The password-reset link always uses the first
+// entry — a reset link should point at the canonical site, not whichever
+// origin happens to be listed second.
+const corsOrigins = (process.env.CORS_ORIGIN ?? 'http://localhost:5173')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 // Resend's shared sandbox sender. Needs no DNS setup at all, which makes it the
 // right default for a first run — but it can only ever deliver to the address
 // that owns the Resend account. Every other recipient is refused with a 403
@@ -67,10 +78,10 @@ export const config = {
 
   databaseUrl: required('DATABASE_URL'),
 
-  // Where the built frontend is served from. CORS has to name it explicitly
-  // (not '*') because the session cookie is sent with credentials, and
-  // browsers refuse wildcard origins on credentialed requests.
-  corsOrigin: process.env.CORS_ORIGIN ?? 'http://localhost:5173',
+  // Where the built frontend(s) are served from. CORS has to name each one
+  // explicitly (not '*') because the session cookie is sent with credentials,
+  // and browsers refuse wildcard origins on credentialed requests.
+  corsOrigin: corsOrigins,
 
   // Session cookies are Secure in production, but a plain-HTTP localhost dev
   // server would then never receive them back.
@@ -99,8 +110,9 @@ export const config = {
   // the particular default spelling above.
   usingSandboxSender: emailFrom.includes('resend.dev'),
 
-  // Where the reset link points — the same origin CORS is already locked to,
-  // since that origin *is* the frontend serving the page that reads the
-  // token out of the URL.
-  frontendUrl: process.env.CORS_ORIGIN ?? 'http://localhost:5173',
+  // Where the reset link points — the first CORS origin, since that's the
+  // canonical frontend serving the page that reads the token out of the URL.
+  // A second, alternate-distribution origin (see corsOrigins above) is never
+  // the right target for a password-reset email.
+  frontendUrl: corsOrigins[0],
 };
