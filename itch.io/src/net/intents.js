@@ -56,6 +56,24 @@ export const Intent = {
   harvest: (instanceId, fieldId) => ({ t: 'harvest', instanceId, fieldId }),
   /** Lock sustained fire onto a specific enemy. */
   target: (instanceId, targetId, targetKind) => ({ t: 'target', instanceId, targetId, targetKind }),
+  /**
+   * Block or unblock a crystal field for one team's harvesters. Its own intent
+   * rather than a `cmd` because a field has no catalog def or mode for
+   * `commandsFor` to key off — see intents.js's `applyIntent` for the rest of
+   * the reasoning.
+   */
+  blockField: (fieldId, teamId, blocked) => ({ t: 'blockField', fieldId, teamId, blocked }),
+  /**
+   * Hold a unit still while its command menu is open, and release it again.
+   *
+   * This looks like pure UI and is not: autonomous drivers read `menuOpen`
+   * (harvesterAI, aiCommander) and stop for it, and opening a menu nulls the
+   * unit's order outright. So it is a player action that changes the world,
+   * and it travels like every other one. It used to be written straight onto
+   * the instance from a DOM handler, which held the unit on the opening
+   * client only while the peer's copy drove away.
+   */
+  menuHold: (instanceId, instanceKind, held) => ({ t: 'menuHold', instanceId, instanceKind, held }),
 };
 
 function vehicleById(ctx, id) {
@@ -95,6 +113,12 @@ export function applyIntent(intent, ctx, teamId = null) {
       // so without this a queued command could run after it stopped being
       // affordable or legal — and, worse, could do so on only some clients.
       if (!cmd || cmd.enabledResult !== true || !cmd.execute) return false;
+      // A `local: true` command only enters a UI mode on the client that
+      // chose it (see commands.js). It should never have been submitted, and
+      // running it here would put every peer into that mode. main.js's
+      // onCommand already routes these away from submitIntent; this is the
+      // backstop, so a future call site that forgets cannot resurrect the bug.
+      if (cmd.local) return false;
       cmd.execute(inst, ctx);
       return true;
     }
@@ -130,7 +154,10 @@ export function applyIntent(intent, ctx, teamId = null) {
       const inst = vehicleById(ctx, intent.instanceId);
       if (!owns(inst)) return false;
       const field = (ctx.world.blooms?.fields ?? []).find((f) => f.id === intent.fieldId) ?? null;
-      if (!field) return false;
+      // A field blocked for this team refuses the order the same way a stale
+      // one does — silently, per this function's own "false is normal"
+      // contract. The harvester keeps whatever it was doing before.
+      if (!field || field.blockedByTeam?.has(inst.teamId)) return false;
       inst.targetField = field;
       return true;
     }
@@ -143,6 +170,28 @@ export function applyIntent(intent, ctx, teamId = null) {
       if (!victim || victim.teamId === inst.teamId) return false;
       inst.mode = 'armed';
       inst.combatTarget = victim;
+      return true;
+    }
+
+    case 'menuHold': {
+      const inst = intent.instanceKind === 'structure'
+        ? ctx.structures.instances.find((s) => s.id === intent.instanceId && !s.dead) ?? null
+        : vehicleById(ctx, intent.instanceId);
+      if (!owns(inst)) return false;
+      inst.menuOpen = !!intent.held;
+      return true;
+    }
+
+    case 'blockField': {
+      // A team can only ever set its own block — `owns` doesn't apply here
+      // (there is no instance to own), so the same roster check is done
+      // directly against the intent's own claimed team.
+      if (teamId !== null && intent.teamId !== teamId) return false;
+      const field = (ctx.world.blooms?.fields ?? []).find((f) => f.id === intent.fieldId) ?? null;
+      if (!field) return false;
+      field.blockedByTeam ??= new Set();
+      if (intent.blocked) field.blockedByTeam.add(intent.teamId);
+      else field.blockedByTeam.delete(intent.teamId);
       return true;
     }
 

@@ -37,6 +37,12 @@ export default defineConfig(({ mode }) => {
     // must stay fully playable — sandbox, AI matches, local saves — without
     // one. Only cloud saves and online multiplayer need this set.
     __API_URL__: JSON.stringify(env.VITE_API_URL ?? ''),
+    // The main site is same-site with the API, so its session rides an
+    // httpOnly cookie the page cannot read — strictly safer, and there is no
+    // reason to trade it away where cookies work. Only the itch.io fork, which
+    // browsers serve cross-site in a third-party iframe and therefore strip
+    // the cookie from, turns this on. See src/net/api.js's USE_BEARER_AUTH.
+    __USE_BEARER_AUTH__: JSON.stringify(env.VITE_USE_BEARER_AUTH === 'true'),
   },
   };
 });

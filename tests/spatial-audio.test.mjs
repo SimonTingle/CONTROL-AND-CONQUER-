@@ -190,3 +190,88 @@ test('presence never leaves [0, 1] across a long random walk of speeds', () => {
     assert.ok(p >= 0 && p <= 1, `presence left range: ${p} at step ${i}`);
   }
 });
+
+// ---- engineWritesNeeded / shouldReleaseIdleLoop: the per-frame write budget ----
+//
+// These exist because of a measured regression, not a theoretical one. With
+// `updateEngineLoop` writing volume, position and speed unconditionally, a
+// 40-vehicle benchmark scene in which *every vehicle was parked and silent*
+// scheduled 229.7 AudioParam automation events per frame — 14.4 per engine
+// loop, ~13,800/second at 60fps — to describe a fleet that was not moving and
+// could not be heard. See docs/plans/fps-regression.md.
+//
+// The contract worth protecting is therefore a negative one: when nothing has
+// changed, nothing is written.
+
+const NEXT = { volume: 0.5, speedFrac: 0.4, x: 10, y: 2, z: -3 };
+
+test('the first update writes everything, to establish a baseline', () => {
+  const w = audio.engineWritesNeeded(null, NEXT);
+  assert.deepEqual(w, { volume: true, speed: true, position: true });
+});
+
+test('an unchanged loop writes nothing at all', () => {
+  // The whole point. A parked fleet must cost no automation events.
+  const w = audio.engineWritesNeeded({ ...NEXT }, { ...NEXT });
+  assert.deepEqual(w, { volume: false, speed: false, position: false });
+});
+
+test('each parameter is written independently of the others', () => {
+  const louder = audio.engineWritesNeeded({ ...NEXT }, { ...NEXT, volume: NEXT.volume + 0.2 });
+  assert.deepEqual(louder, { volume: true, speed: false, position: false });
+
+  const faster = audio.engineWritesNeeded({ ...NEXT }, { ...NEXT, speedFrac: NEXT.speedFrac + 0.2 });
+  assert.deepEqual(faster, { volume: false, speed: true, position: false });
+
+  const moved = audio.engineWritesNeeded({ ...NEXT }, { ...NEXT, x: NEXT.x + 5 });
+  assert.deepEqual(moved, { volume: false, speed: false, position: true });
+});
+
+test('changes far below the audible threshold are not written', () => {
+  const w = audio.engineWritesNeeded({ ...NEXT }, {
+    ...NEXT,
+    volume: NEXT.volume + 1e-9,
+    speedFrac: NEXT.speedFrac + 1e-9,
+    x: NEXT.x + 1e-9,
+  });
+  assert.deepEqual(w, { volume: false, speed: false, position: false });
+});
+
+test('position is compared in three dimensions, not just one', () => {
+  // A vehicle climbing a slope or moving purely in z must still update the
+  // panner; an early draft compared only x and would have pinned those voices.
+  for (const axis of ['x', 'y', 'z']) {
+    const w = audio.engineWritesNeeded({ ...NEXT }, { ...NEXT, [axis]: NEXT[axis] + 5 });
+    assert.equal(w.position, true, `movement along ${axis} was not noticed`);
+  }
+});
+
+test('a drift too slow to trip the threshold still eventually writes', () => {
+  // The reason the baseline is the last value *written* rather than the last
+  // value seen. Against last-seen, a vehicle creeping by a hundredth of the
+  // threshold per frame would never write and its voice would silently
+  // detach from it forever.
+  const written = { ...NEXT };
+  let wrote = false;
+  for (let i = 0; i < 5000 && !wrote; i++) {
+    const next = { ...NEXT, x: NEXT.x + i * 1e-4 };
+    if (audio.engineWritesNeeded(written, next).position) wrote = true;
+  }
+  assert.ok(wrote, 'a slow drift never accumulated into a write');
+});
+
+test('a loop is not released while it can still be heard', () => {
+  assert.equal(audio.shouldReleaseIdleLoop(0.5, 0, 99), false, 'still audible');
+});
+
+test('a loop is not released while its vehicle is moving', () => {
+  assert.equal(audio.shouldReleaseIdleLoop(0, 1, 99), false, 'still moving');
+});
+
+test('a silent, stopped loop is released only after the idle window', () => {
+  // The hysteresis: a vehicle pausing at a waypoint and driving on must not
+  // tear down and rebuild five audio nodes on consecutive frames.
+  assert.equal(audio.shouldReleaseIdleLoop(0, 0, 0), false, 'released instantly');
+  assert.equal(audio.shouldReleaseIdleLoop(0, 0, 0.5), false, 'released inside the window');
+  assert.equal(audio.shouldReleaseIdleLoop(0, 0, 5), true, 'never released at all');
+});

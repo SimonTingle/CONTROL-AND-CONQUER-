@@ -19,15 +19,17 @@ import assert from 'node:assert/strict';
 
 globalThis.__API_URL__ = 'http://api.example.test';
 
-// server/src/ws/match.js's import chain reaches server/src/config.js, which
-// refuses to load without a connection string, even though nothing exercised
-// here touches the database — see match-room.test.mjs for the same guard.
-process.env.DATABASE_URL ??= 'postgres://test:test@127.0.0.1:5432/test';
-
 const { PROTOCOL_VERSION, socketUrl, versionMismatchMessage } =
   await import('../src/net/matchClient.js');
 
-const { PROTOCOL_VERSION: SERVER_PROTOCOL_VERSION } = await import('../server/src/ws/match.js');
+// From matchRoom.js, not ws/match.js. The route handler in the latter imports
+// db/pool.js, so reading one constant through it made this suite depend on
+// `pg` being installed — and when it wasn't, the suite died on
+// ERR_MODULE_NOT_FOUND before running. A version guard that cannot import is
+// not guarding anything, and this one sat broken while the client and the
+// itch.io build drifted apart underneath it.
+const { PROTOCOL_VERSION: SERVER_PROTOCOL_VERSION } =
+  await import('../server/src/ws/matchRoom.js');
 
 test('client and server agree on the protocol version constant', () => {
   // The two files can't share a module — they ship as separate deployables —

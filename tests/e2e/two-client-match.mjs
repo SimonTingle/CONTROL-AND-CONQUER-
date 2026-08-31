@@ -24,25 +24,25 @@
 //
 // MATCH_START_REPORT_MS is lowered only so the "what am I waiting for" frame
 // arrives inside the test's patience; the barrier itself has no timeout to tune.
+// `ws` is now a declared dependency of server/package.json (it used to be
+// reachable only transitively through @fastify/websocket, which meant the
+// exact version this test ran against was whatever that package happened to
+// pull in, undeclared anywhere). This path still reaches into the server
+// package's own node_modules rather than a bare `import 'ws'`, because this
+// file has no node_modules of its own for Node's resolver to find a
+// same-named package in — but the dependency it reaches for is now pinned
+// and visible in server/package.json instead of merely hoped for.
 import wsPkg from '../../server/node_modules/ws/index.js';
 const { WebSocket } = wsPkg;
 import { LockstepSession } from '../../src/net/lockstep.js';
 
-// server/src/ws/match.js's import chain reaches server/src/config.js, which
-// refuses to load without a connection string — even though PROTOCOL_VERSION,
-// the only thing pulled from it below, never touches the database. This
-// script's own process doesn't otherwise need DATABASE_URL (only the API
-// server subprocess named in the run instructions above does), so a
-// placeholder is set here purely to satisfy that import chain. A dynamic
-// import, not a static one, so this line actually runs first — a static
-// import is hoisted above it regardless of source order (see
-// tests/match-room.test.mjs, which needs the identical workaround).
-process.env.DATABASE_URL ??= 'postgres://test:test@127.0.0.1:5432/test';
 // The real relay this harness talks to, so "what version does a real client
 // declare" and "what version does the real server require" can never drift
 // apart from what this test asserts — importing the constant beats copying
-// its value in by hand.
-const { PROTOCOL_VERSION } = await import('../../server/src/ws/match.js');
+// its value in by hand. From matchRoom.js rather than ws/match.js: the latter's
+// route handler imports db/pool.js, which is why this file used to need a
+// DATABASE_URL placeholder just to read one integer.
+const { PROTOCOL_VERSION } = await import('../../server/src/ws/matchRoom.js');
 
 const API = process.env.E2E_API ?? 'http://127.0.0.1:3999';
 const results = [];

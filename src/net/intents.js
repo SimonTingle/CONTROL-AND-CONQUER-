@@ -63,6 +63,17 @@ export const Intent = {
    * the reasoning.
    */
   blockField: (fieldId, teamId, blocked) => ({ t: 'blockField', fieldId, teamId, blocked }),
+  /**
+   * Hold a unit still while its command menu is open, and release it again.
+   *
+   * This looks like pure UI and is not: autonomous drivers read `menuOpen`
+   * (harvesterAI, aiCommander) and stop for it, and opening a menu nulls the
+   * unit's order outright. So it is a player action that changes the world,
+   * and it travels like every other one. It used to be written straight onto
+   * the instance from a DOM handler, which held the unit on the opening
+   * client only while the peer's copy drove away.
+   */
+  menuHold: (instanceId, instanceKind, held) => ({ t: 'menuHold', instanceId, instanceKind, held }),
 };
 
 function vehicleById(ctx, id) {
@@ -102,6 +113,12 @@ export function applyIntent(intent, ctx, teamId = null) {
       // so without this a queued command could run after it stopped being
       // affordable or legal — and, worse, could do so on only some clients.
       if (!cmd || cmd.enabledResult !== true || !cmd.execute) return false;
+      // A `local: true` command only enters a UI mode on the client that
+      // chose it (see commands.js). It should never have been submitted, and
+      // running it here would put every peer into that mode. main.js's
+      // onCommand already routes these away from submitIntent; this is the
+      // backstop, so a future call site that forgets cannot resurrect the bug.
+      if (cmd.local) return false;
       cmd.execute(inst, ctx);
       return true;
     }
@@ -153,6 +170,15 @@ export function applyIntent(intent, ctx, teamId = null) {
       if (!victim || victim.teamId === inst.teamId) return false;
       inst.mode = 'armed';
       inst.combatTarget = victim;
+      return true;
+    }
+
+    case 'menuHold': {
+      const inst = intent.instanceKind === 'structure'
+        ? ctx.structures.instances.find((s) => s.id === intent.instanceId && !s.dead) ?? null
+        : vehicleById(ctx, intent.instanceId);
+      if (!owns(inst)) return false;
+      inst.menuOpen = !!intent.held;
       return true;
     }
 

@@ -97,6 +97,10 @@ export class Menu {
   setOpen(open) {
     this.open = open;
     this.panel.classList.toggle('open', open);
+    // Lets other UI react to this drawer specifically, the same way
+    // vehiclePicker.js's own `drawer-open` class already lets the minimap
+    // react to the right-hand one — see style.css's `body.settings-open #hud`.
+    document.body.classList.toggle('settings-open', open);
     this.panel.setAttribute('aria-hidden', String(!open));
     this.toggleButton.classList.toggle('active', open);
     this.toggleButton.setAttribute('aria-expanded', String(open));

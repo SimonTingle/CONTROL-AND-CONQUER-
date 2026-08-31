@@ -15,6 +15,64 @@ const BASE = __API_URL__;
 /** False when this build has no API server — cloud features hide themselves. */
 export const isConfigured = Boolean(BASE);
 
+/**
+ * Carry the session as a bearer token instead of a cookie.
+ *
+ * Off for the main site, which is same-site with the API and keeps its session
+ * in an httpOnly cookie page JS cannot read — strictly the safer arrangement,
+ * and there is no reason to give that up where cookies work.
+ *
+ * On for the itch.io build, which browsers serve from a third-party iframe on
+ * an entirely different registrable domain. Safari's ITP blocks that cookie
+ * outright and Chrome is phasing third-party cookies out the same way;
+ * `SameSite=None` does not exempt it. There the cookie is silently dropped,
+ * every request after sign-in looks anonymous, and a token the page holds
+ * itself is the only thing that survives.
+ *
+ * The cost is real and worth naming: this token lives in localStorage, so page
+ * JS can read it and an XSS bug could exfiltrate it — exactly what httpOnly
+ * prevents. That is why this is opt-in per build rather than on everywhere.
+ */
+// `typeof` guarded like matchClient.js's __API_URL__: these are Vite
+// build-time globals, and a plain-Node test importing this module has no
+// define step to supply them.
+const USE_BEARER_AUTH = typeof __USE_BEARER_AUTH__ !== 'undefined' && __USE_BEARER_AUTH__;
+
+const TOKEN_KEY = 'ptg_session_token';
+
+/** Wrapped: Safari in private mode throws on localStorage access rather than failing soft. */
+function readStoredToken() {
+  if (!USE_BEARER_AUTH) return null;
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredToken(token) {
+  if (!USE_BEARER_AUTH) return;
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    // Storage unavailable (private mode, storage disabled). The session then
+    // lasts only as long as the page, which is worse than persisting but far
+    // better than throwing on every request.
+  }
+}
+
+let sessionToken = readStoredToken();
+
+/**
+ * The session token, for transports that cannot send an Authorization header.
+ * Null unless this build uses bearer auth and somebody is signed in.
+ * @see src/net/matchClient.js, which passes it as a WebSocket subprotocol.
+ */
+export function getSessionToken() {
+  return sessionToken;
+}
+
 /** Thrown for a request the server refused, carrying the machine-readable code. */
 export class ApiError extends Error {
   constructor(status, code, details) {
@@ -45,6 +103,12 @@ async function request(path, { method = 'GET', body } = {}) {
   if (csrfToken && method !== 'GET' && method !== 'HEAD') {
     headers['x-csrf-token'] = csrfToken;
   }
+  // The server treats a bearer request as CSRF-immune and skips the token
+  // check for it, which is what makes this work at all where the `_csrf`
+  // cookie is dropped alongside the session one.
+  if (sessionToken) {
+    headers.authorization = `Bearer ${sessionToken}`;
+  }
 
   let res;
   try {
@@ -67,6 +131,12 @@ async function request(path, { method = 'GET', body } = {}) {
     throw new ApiError(res.status, payload?.error ?? 'request_failed', payload?.details);
   }
   if (payload?.csrfToken) csrfToken = payload.csrfToken;
+  // Login and register both mint one. Ignored entirely unless this build uses
+  // bearer auth, so the main site never puts a session token in storage.
+  if (payload?.sessionToken && USE_BEARER_AUTH) {
+    sessionToken = payload.sessionToken;
+    writeStoredToken(sessionToken);
+  }
   return payload;
 }
 
@@ -79,7 +149,18 @@ export const api = {
   login: (email, password) =>
     request('/auth/login', { method: 'POST', body: { email, password } }),
 
-  logout: () => request('/auth/logout', { method: 'POST' }),
+  // Drop the local token whatever the server said. A failed revoke leaves the
+  // token live server-side until it expires, but keeping it here would leave
+  // the player looking signed in with no way to clear it — and the next
+  // request would 401 anyway once the revoke did land.
+  logout: async () => {
+    try {
+      return await request('/auth/logout', { method: 'POST' });
+    } finally {
+      sessionToken = null;
+      writeStoredToken(null);
+    }
+  },
 
   // Always resolves { ok: true } on the server's side regardless of whether
   // the email has an account — see server/src/routes/auth.js. Still surfaced
@@ -103,6 +184,14 @@ export const api = {
     if (!isConfigured) return null;
     try {
       const { user } = await request('/auth/me');
+      // A stored token that the server no longer honours (expired, revoked,
+      // or minted by a since-reset database) would otherwise sit in storage
+      // forever, re-sent on every request and rejected every time. This call
+      // runs on every page load, so it is the natural place to notice.
+      if (!user && sessionToken) {
+        sessionToken = null;
+        writeStoredToken(null);
+      }
       return user;
     } catch {
       return null;

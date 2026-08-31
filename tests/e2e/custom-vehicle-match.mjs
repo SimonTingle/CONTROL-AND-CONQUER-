@@ -17,11 +17,18 @@
  * the Postgres + API setup, then:
  *   node tests/e2e/custom-vehicle-match.mjs
  */
+// See two-client-match.mjs's header for why this reaches into the server
+// package's node_modules rather than a bare `import 'ws'` — `ws` is now a
+// declared dependency of server/package.json, not merely a transitive one.
 import WebSocket from '../../server/node_modules/ws/index.js';
 import { blankDef, syncId } from '../../src/builder/vehicleDraft.js';
 
 const API = process.env.API_URL ?? 'http://127.0.0.1:3999';
-const PROTOCOL_VERSION = 2;
+// Imported, not copied. This was a hand-written `= 2` while its sibling
+// two-client-match.mjs deliberately imports the constant — so the copy here
+// would have gone silently stale on the next bump, which is exactly the drift
+// tests/match-client-protocol.test.mjs exists to prevent.
+const { PROTOCOL_VERSION } = await import('../../server/src/ws/matchRoom.js');
 
 let passed = 0;
 let failed = 0;
@@ -131,7 +138,8 @@ await joiner.call(`/matches/${matchId}/join`, { method: 'POST' });
 const a = await welcomeFor(host, matchId);
 const b = await welcomeFor(joiner, matchId);
 
-ok('both peers negotiated protocol v2', a.welcome.protocolVersion === 2 && b.welcome.protocolVersion === 2);
+ok('both peers negotiated the current protocol version',
+   a.welcome.protocolVersion === PROTOCOL_VERSION && b.welcome.protocolVersion === PROTOCOL_VERSION);
 ok('the host receives the match vehicle set', a.welcome.customDefs?.length === 1,
    JSON.stringify(a.welcome.customDefs?.map((d) => d.name)));
 ok('the joiner — who authored nothing — receives it too', b.welcome.customDefs?.length === 1,

@@ -16,6 +16,10 @@
 
 import { hasVehicleBehind } from './trafficController.js';
 import { CLEARED, DOCKED } from './facilityControl.js';
+// Imported rather than re-declared: a harvester and a combat unit deciding
+// differently how full is "full" is exactly the kind of split answer that put
+// 14 vehicles in one bay's queue in the first place.
+import { MAX_REPAIR_QUEUE } from './repairController.js';
 // Simulated time, never wall clock: field bans and threat memory are
 // simulation state, so they have to advance with the sim (including under
 // __step's fast-forward) and tick identically on every machine.
@@ -63,6 +67,34 @@ const REVERSE_DURATION = 1.5; // seconds backing off before trying the next deto
 const BAN_SECONDS = 45;
 // How far a cornered harvester runs when it has no facility to run to.
 const FLEE_DISTANCE = 90;
+
+/**
+ * Ground a harvester was shot on stays off-limits to the whole team for this
+ * long, within DANGER_ZONE_RADIUS of where the shooter was standing.
+ *
+ * Deliberately much longer than `BAN_SECONDS` (45) and than combatController's
+ * `THREAT_MEMORY` (6). Those two answer different questions: THREAT_MEMORY is
+ * "am I being shot at *right now*", which is what drives the flee itself, and a
+ * ban is one harvester's private "that field failed me". This is the team's
+ * memory of contested ground, and it should outlast the engagement that taught
+ * it — a harvester that returns the moment the shooting pauses has not learned
+ * anything, it has just respawned into the same ambush.
+ */
+const DANGER_ZONE_SECONDS = 90;
+/**
+ * How wide a lesson one shot teaches. Sized against the map (1024 units) and
+ * the weapons that do the shooting — a gun turret's reach is a few tens of
+ * units, so this covers the shooter's footprint and the approach to it without
+ * blanking a quarter of the island off the harvest map.
+ */
+const DANGER_ZONE_RADIUS = 70;
+/**
+ * Hard cap on remembered zones per team. Zones expire on their own, but a long
+ * running fight can mint them faster than they lapse, and every entry is walked
+ * on every field pick by every harvester. Oldest-first eviction: the newest
+ * lesson is the one worth keeping.
+ */
+const MAX_DANGER_ZONES = 12;
 const TRANSFER_SPEED = 0.5; // must be near enough stopped to load or unload
 
 // A fresh automatic pick prefers to leave a nearly-drained field alone and to
@@ -105,16 +137,85 @@ const MAX_PARKING_BAYS = 4;
 const ABANDON_ESCALATION = 2;
 
 export class HarvesterAI {
-  constructor({ vehicles, world, heightmap, structures, game, facilityControl }) {
+  constructor({ vehicles, world, heightmap, structures, game, facilityControl, navGrid }) {
     this.vehicles = vehicles;
     this.world = world;
     this.heightmap = heightmap;
     this.structures = structures;
     this.game = game;
+    // Optional, same as aiCommander's — a match built without one (or an
+    // older save's context) just gets every leg driven straight-line, exactly
+    // today's behaviour.
+    this.navGrid = navGrid;
     // Who is allowed to approach the dock, and where everyone else holds.
     // Owns what `dockedHarvester` + `_haulQueue` + `_sweepFacilities` used to.
     this.facilityControl = facilityControl;
     this.states = new Map();
+    /**
+     * Contested ground, per team: `teamId -> [{ x, z, radius, until }]`.
+     *
+     * Team-shared rather than per-harvester, which is the whole point — one
+     * harvester getting shot should teach the fleet, not just itself. The
+     * per-harvester `s.bans` still exists alongside this and means something
+     * different ("this field failed *me*", from an unroutable or dry field);
+     * the two are complementary and both filter the same picker.
+     *
+     * Positional rather than field-keyed so that a harvester ambushed between
+     * fields — with no `s.field` to blame — still records the lesson.
+     */
+    this.dangerZones = new Map();
+  }
+
+  /** Live zones for a team, pruned of expired entries. The prune happens on
+   * read because there is no other tick that owns this structure, and a team
+   * that stops harvesting should not keep a stale list alive forever. */
+  dangerZonesFor(teamId) {
+    const zones = this.dangerZones.get(teamId);
+    if (!zones || !zones.length) return zones ?? [];
+    const now = simClock.time;
+    const live = zones.filter((z) => z.until > now);
+    if (live.length !== zones.length) this.dangerZones.set(teamId, live);
+    return live;
+  }
+
+  /**
+   * Remember that a team was fired on here. Called when a harvester enters
+   * FLEEING, from the shooter's position that combatController recorded.
+   *
+   * Merges into an overlapping existing zone rather than stacking a new one
+   * for every shot in a sustained exchange — otherwise a single turret firing
+   * for twenty seconds mints twenty near-identical zones and evicts the
+   * memory of every *other* contested place on the map.
+   */
+  markDangerZone(teamId, x, z, { radius = DANGER_ZONE_RADIUS, seconds = DANGER_ZONE_SECONDS } = {}) {
+    if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
+    const until = simClock.time + seconds;
+    const zones = this.dangerZonesFor(teamId).slice();
+
+    const existing = zones.find((zone) => Math.hypot(zone.x - x, zone.z - z) <= zone.radius);
+    if (existing) {
+      // Refresh rather than replace: the ground is still hot, and the older
+      // centre is as good a description of it as the newer one.
+      existing.until = Math.max(existing.until, until);
+      existing.radius = Math.max(existing.radius, radius);
+      this.dangerZones.set(teamId, zones);
+      return existing;
+    }
+
+    const zone = { x, z, radius, until };
+    zones.push(zone);
+    // Oldest-first: `zones` is append-ordered, so the head is the stalest.
+    while (zones.length > MAX_DANGER_ZONES) zones.shift();
+    this.dangerZones.set(teamId, zones);
+    return zone;
+  }
+
+  /** Is this point inside ground the team currently considers contested? */
+  inDangerZone(teamId, x, z) {
+    for (const zone of this.dangerZonesFor(teamId)) {
+      if (Math.hypot(zone.x - x, zone.z - z) <= zone.radius) return true;
+    }
+    return false;
   }
 
   stateOf(instance) {
@@ -124,6 +225,9 @@ export class HarvesterAI {
   /** Terrain regenerated: every field reference and destination is meaningless. */
   reset() {
     this.states.clear();
+    // Zones are world coordinates, so a regenerated world makes every one of
+    // them a statement about ground that no longer exists.
+    this.dangerZones.clear();
     // Player-set targets live on the instance, not in `states`, so clearing the
     // map alone would leave a harvester holding a field from the old world —
     // still not `dead`, so it would pass validation and route to coordinates
@@ -241,6 +345,14 @@ export class HarvesterAI {
     if (inst.threatUntil != null) {
       if (simClock.time < inst.threatUntil) {
         if (s.state !== FLEEING && s.state !== UNLOADING && s.state !== WAITING_FOR_DOCK) {
+          // Record the contested ground on the way into the flee, not on the
+          // way out: `threatFrom` is not serialized (see snapshot.js), so a
+          // save taken mid-flee would otherwise lose the one fact worth
+          // keeping. Marked once per flee — the guard above means a sustained
+          // exchange re-enters this branch only after the threat lapses.
+          if (inst.threatFrom) {
+            this.markDangerZone(inst.teamId, inst.threatFrom.x, inst.threatFrom.z);
+          }
           s.resumeState = this._safeResumeState(inst, s);
           s.state = FLEEING;
           s.dest = null;
@@ -359,6 +471,8 @@ export class HarvesterAI {
         minStock: 1,
         reject: (f) =>
           (s.bans.get(f.id) ?? 0) > now ||
+          f.blockedByTeam?.has(inst.teamId) ||
+          this.inDangerZone(inst.teamId, f.x, f.z) ||
           this._isFieldCrowdedOrLow(f, inst) ||
           this._countHarvestersOnField(f, inst) > 0,
       });
@@ -367,13 +481,32 @@ export class HarvesterAI {
         // or low is still better than idling.
         field = this.world.blooms.nearestTo(inst.group.position.x, inst.group.position.z, {
           minStock: 1,
-          reject: (f) => (s.bans.get(f.id) ?? 0) > now || this._isFieldCrowdedOrLow(f, inst),
+          reject: (f) =>
+            (s.bans.get(f.id) ?? 0) > now ||
+            f.blockedByTeam?.has(inst.teamId) ||
+            this.inDangerZone(inst.teamId, f.x, f.z) ||
+            this._isFieldCrowdedOrLow(f, inst),
         });
       }
       if (!field) {
         field = this.world.blooms.nearestTo(inst.group.position.x, inst.group.position.z, {
           minStock: 1,
-          reject: (f) => (s.bans.get(f.id) ?? 0) > now,
+          // Note this last, most permissive tier still respects a block — a
+          // player-blocked field is never "share anything reachable" either;
+          // only the temporary per-harvester `bans` are given up on here.
+          //
+          // It also deliberately does *not* consult danger zones, and that
+          // omission is the release valve for the whole avoidance feature. The
+          // two tiers above route around contested ground whenever anywhere
+          // else will do; this one is reached only when nowhere else will. An
+          // economy that starves rather than work dangerous ground has not
+          // been made cautious, it has been switched off — and with zones
+          // lasting 90s across the whole team, a single well-placed turret
+          // could otherwise mean a team never harvests again. Taking the risk
+          // is the right call at this tier, and it is also what keeps the
+          // fallback below from spinning: clearing bans could never release a
+          // zone, so a zone-checking tier 3 would idle forever.
+          reject: (f) => (s.bans.get(f.id) ?? 0) > now || f.blockedByTeam?.has(inst.teamId),
         });
       }
     }
@@ -389,7 +522,7 @@ export class HarvesterAI {
 
     s.field = field;
     s.detours = 0;
-    if (this._order(inst, s, { x: field.x, z: field.z })) s.state = TO_FIELD;
+    if (this._advanceViaNavGrid(inst, s, { x: field.x, z: field.z })) s.state = TO_FIELD;
     else {
       s.bans.set(field.id, now + BAN_SECONDS);
       s.retryTimer = RETRY_PAUSE;
@@ -420,9 +553,10 @@ export class HarvesterAI {
   _retargetInFlight(inst, s) {
     const field = this._consumeTargetField(inst);
     if (!field || field === s.field) return;
-    if (!this._order(inst, s, { x: field.x, z: field.z })) return;
+    if (!this._advanceViaNavGrid(inst, s, { x: field.x, z: field.z })) return;
     s.field = field;
     s.waypoint = null;
+    s.navWaypoint = null;
     s.detours = 0;
     s.stallTimer = 0;
   }
@@ -808,6 +942,13 @@ export class HarvesterAI {
     for (const s of this.structures?.instances ?? []) {
       if (s.def.id !== 'repair-bay' || s.mode !== 'idle') continue;
       if (s.teamId !== inst.teamId) continue;
+      // Same depth cap repairController applies (MAX_REPAIR_QUEUE there): a
+      // harvester that joins a full bay's queue stops harvesting for as long
+      // as the wait, which costs the team more than the damage does. Returning
+      // null here just means `_maybeBreakOffForRepair` declines and the
+      // harvester keeps working — the same path a missing or unaffordable bay
+      // already takes.
+      if (this.facilityControl.queueDepth(s) >= MAX_REPAIR_QUEUE) continue;
       const d = Math.hypot(s.x - pos.x, s.z - pos.z);
       if (d < bestD) {
         bestD = d;
@@ -862,6 +1003,7 @@ export class HarvesterAI {
     s.state = TO_REPAIR;
     s.dest = null;
     s.waypoint = null;
+    s.navWaypoint = null;
     s.detours = 0;
     s.stallTimer = 0;
     return true;
@@ -927,6 +1069,7 @@ export class HarvesterAI {
       inst.arrive('reached');
       s.dest = null;
       s.waypoint = null;
+      s.navWaypoint = null;
       s.detours = 0;
       s.stallTimer = 0;
       onArrive();
@@ -947,7 +1090,19 @@ export class HarvesterAI {
       const wd = Math.hypot(s.waypoint.x - pos.x, s.waypoint.z - pos.z);
       if (wd <= WAYPOINT_RADIUS) {
         s.waypoint = null;
-        this._order(inst, s, dest);
+        this._advanceViaNavGrid(inst, s, dest);
+        return;
+      }
+    }
+
+    // Reached a NavGrid step: ask for the next one. Same shape as the local
+    // detour waypoint above, deliberately kept as a separate branch — see
+    // `_advanceViaNavGrid`'s header for why `s.navWaypoint` is its own field
+    // rather than reusing `s.waypoint`.
+    if (s.navWaypoint) {
+      const nd = Math.hypot(s.navWaypoint.x - pos.x, s.navWaypoint.z - pos.z);
+      if (nd <= WAYPOINT_RADIUS) {
+        this._advanceViaNavGrid(inst, s, dest);
         return;
       }
     }
@@ -1207,6 +1362,60 @@ export class HarvesterAI {
     const ok = inst.setTarget(point.x, point.z, this.heightmap);
     if (ok) s.dest = point;
     return ok;
+  }
+
+  /**
+   * Head toward the real destination `dest`, but ask NavGrid which way to go
+   * first — the same pattern `aiCommander.js`'s `_advanceUnit` already uses
+   * for army units, so a harvester routes around a structure sitting on the
+   * direct line instead of driving through it (see
+   * docs/plans/harvester-structure-avoidance.md).
+   *
+   * Deliberately a wrapper around `_order`, not a change to it: `_order`
+   * itself stays the single, simple "drive to this point" primitive that
+   * `_onAbandoned`'s local detour fan also calls directly (with its own
+   * short escape point, which has no business going through NavGrid — a
+   * three-metre reverse-and-retry manoeuvre is not "go around the mountain").
+   * Only the calls aiming at a *real* destination — a fresh leg, a retarget,
+   * or `_travel`'s own re-aim once a waypoint here is reached — route through
+   * this instead.
+   *
+   * `s.navWaypoint` is intentionally its own field, separate from
+   * `s.waypoint`. That one already means something specific — `_onAbandoned`
+   * treats it truthy as "already tried a local escape" and reverses
+   * immediately on the next abandonment — and a NavGrid step is almost always
+   * truthy on any leg longer than one ~24-unit cell. Reusing `s.waypoint` for
+   * it would make ordinary multi-cell travel indistinguishable from "already
+   * failed once," and change that escalation for the worse.
+   */
+  _advanceViaNavGrid(inst, s, dest) {
+    const pos = inst.group.position;
+    const waypoint = this.navGrid?.nextWaypoint(pos.x, pos.z, dest.x, dest.z);
+
+    // No grid, unreachable, or already in the goal's own cell (nextWaypoint
+    // answers with `dest` itself in that case) — nothing to route through,
+    // so drive the last/only leg directly. Exactly today's behaviour.
+    if (!waypoint || (waypoint.x === dest.x && waypoint.z === dest.z)) {
+      s.navWaypoint = null;
+      return this._order(inst, s, dest);
+    }
+
+    // NavGrid's cells are coarser than the fine-grained slope probe
+    // driveToTarget actually steers by, so a waypoint that hides an
+    // unclimbable local bump can come back identical call after call — a
+    // deterministic stall nothing here would otherwise break. Two repeats in
+    // a row means this step isn't working; fall through to the direct point
+    // instead, the same safe degrade as when NavGrid has nothing at all.
+    const repeat = s.navWaypoint &&
+      Math.hypot(waypoint.x - s.navWaypoint.x, waypoint.z - s.navWaypoint.z) < 1;
+    s.navStallCount = repeat ? (s.navStallCount ?? 0) + 1 : 0;
+    if (s.navStallCount >= 2) {
+      s.navWaypoint = null;
+      return this._order(inst, s, dest);
+    }
+
+    s.navWaypoint = waypoint;
+    return this._order(inst, s, waypoint);
   }
 
   _updateLoadCells(inst, s) {

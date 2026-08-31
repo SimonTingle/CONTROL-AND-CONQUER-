@@ -13,9 +13,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { AiCommander } from '../src/vehicles/aiCommander.js';
+import { AiCommander, isArmyUnit } from '../src/vehicles/aiCommander.js';
 import { HarvesterAI } from '../src/vehicles/harvesterAI.js';
-import { RepairController } from '../src/vehicles/repairController.js';
+import { RepairController, MAX_REPAIR_QUEUE } from '../src/vehicles/repairController.js';
 import { FacilityControl, CLEARED, DOCKED } from '../src/vehicles/facilityControl.js';
 
 const DRY_HEIGHTMAP = { heightAt: () => 10, seaLevelY: 0 };
@@ -313,13 +313,16 @@ test('losing the clearance mid-approach re-queues instead of servicing', () => {
 // ---------------------------------------------------------------------------
 
 const GUN = { id: 'gun-platform', tags: ['combat'], cost: 650, maxHealth: 400, turret: { damage: 22, fireInterval: 1.4 } };
+// A second *army* id, so "one budget shared across ids" can still be tested
+// now that scout-buggy is recon and no longer draws on it.
+const TANK = { id: 'tracked-tank', tags: ['combat'], cost: 1300, maxHealth: 400, turret: { damage: 30, fireInterval: 1.6 } };
 const SCOUT = { id: 'scout-buggy', tags: ['recon', 'combat'], cost: 350, maxHealth: 100, turret: { damage: 2, fireInterval: 1.5 } };
 const HARVESTER = { id: 'crystal-harvester', tags: ['economy'], cost: 600, maxHealth: 220 };
 const CUSTOM_HARVESTER = { id: 'custom:abc', tags: ['economy'], cost: 600, maxHealth: 220 };
 
 function makeBuildCommander(owned, produces) {
   const built = [];
-  const defs = [GUN, SCOUT, HARVESTER, CUSTOM_HARVESTER];
+  const defs = [GUN, TANK, SCOUT, HARVESTER, CUSTOM_HARVESTER];
   const factory = { teamId: 1, mode: 'idle', def: { id: 'armed-factory', produces } };
   const team = { id: 1, credits: 10000, weaponTier: 0, spend: () => true };
   const ctx = {
@@ -343,14 +346,40 @@ function makeBuildCommander(owned, produces) {
   return { ai, built };
 }
 
-test('combat budget counts every combat-tagged unit, not each id separately', () => {
-  // Seven combat-tagged units already owned, of two different ids — the exact
-  // shape a real match reached (7 tanks, then 7 scouts, against combatCap 7).
-  const owned = [GUN, GUN, GUN, GUN, GUN, GUN, SCOUT];
-  const { ai, built } = makeBuildCommander(owned, ['gun-platform', 'scout-buggy']);
+test('combat budget counts every army unit, not each id separately', () => {
+  // Seven army units already owned, of two different ids. The per-id version
+  // of this cap let each id have its own allowance, so a real match ended with
+  // 7 tanks *and* 7 gun platforms against a cap of 7.
+  const owned = [GUN, GUN, GUN, GUN, GUN, GUN, TANK];
+  const { ai, built } = makeBuildCommander(owned, ['gun-platform', 'tracked-tank']);
 
   assert.equal(ai._tryBuildUnit('combat', 7), false, 'budget is spent');
-  assert.deepEqual(built, [], 'no scout bought to top up a per-id allowance');
+  assert.deepEqual(built, [], 'no second-id unit bought to top up a per-id allowance');
+});
+
+test('scouts do not spend the army budget, and cannot be bought as army', () => {
+  // The inverse of the test above, and the bug it replaced. scout-buggy is
+  // tagged ['recon','combat'], and `_tryBuildUnit` used to count it while
+  // `_manageArmy` refused to field it — so scouts spent the army budget
+  // without ever being army. Because a scout is also the cheapest combat
+  // candidate and build candidates are filtered by what is affordable right
+  // now, it won that race repeatedly: 23 scouts, one gun platform and zero
+  // tanks across four AI teams in a 41-minute match.
+  const owned = [GUN, SCOUT, SCOUT, SCOUT, SCOUT, SCOUT, SCOUT];
+  const { ai, built } = makeBuildCommander(owned, ['gun-platform', 'scout-buggy']);
+
+  assert.equal(ai._tryBuildUnit('combat', 7), true, 'six scouts must not exhaust an army budget of 7');
+  assert.deepEqual(built, ['gun-platform'], 'and the army buy is the tank, never the scout');
+});
+
+test('the army budget and the army roster agree on what a scout is', () => {
+  // The actual invariant. These two answers were hard-coded separately and
+  // drifted; they now share `isArmyUnit`, so assert they cannot disagree.
+  assert.equal(isArmyUnit(GUN), true);
+  assert.equal(isArmyUnit(TANK), true);
+  assert.equal(isArmyUnit(SCOUT), false, 'combat-tagged, but recon');
+  assert.equal(isArmyUnit(HARVESTER), false);
+  assert.equal(isArmyUnit(undefined), false, 'a missing def is not army');
 });
 
 test('the combat budget still builds while there is room', () => {
@@ -585,6 +614,10 @@ const STUB_CLEARANCE = {
   statusOf: () => null,
   release: () => {},
   holdingFix: () => null,
+  // An empty queue, so bay lookups that now consult MAX_REPAIR_QUEUE behave
+  // as they did before the cap existed — these tests are about the retreat
+  // decision, not about contention.
+  queueDepth: () => 0,
 };
 
 function makeHarvesterAI(inst, structures = []) {
@@ -790,4 +823,240 @@ test('the same harvester retreats the moment it is empty', () => {
 
   assert.equal(ai._maybeRetreatForRepair(inst, s, 0.1), true);
   assert.equal(s.state, 'to-repair');
+});
+
+// ---- repair-queue depth cap -------------------------------------------------
+//
+// A bay repairs one vehicle at a time, so queue depth *is* the wait.
+// `facilityControl._assignSlots` has no cap of its own and argues the geometry
+// substitutes for one. A 41-minute four-AI diagnostic disproved that: slots 0
+// through 10 filled at one bay, 14 vehicles queued against 2 being repaired,
+// and a scout had been holding 23,753 ticks (6.6 minutes) without reaching
+// QUEUE_TIMEOUT's 10-minute backstop. The bay had become a car park.
+
+function makeQueuedBay(id, x) {
+  return {
+    id, teamId: 1, mode: 'idle', x, z: 0, dock: { x: x + 16, z: 0 },
+    def: { id: 'repair-bay', repair: { creditsPerHealth: 1, secondsPerHealth: 0.1 }, upgradeTiers: [] },
+    upgradeLevel: 0, group: { userData: {} },
+  };
+}
+
+/** A repairController whose facilityControl reports a fixed depth per bay id. */
+function makeCappedCtx(bays, depths) {
+  const inst = makeDriveInst({ x: 0, z: 0 });
+  inst.health = 30;
+  inst.def.maxHealth = 200;
+  const controller = new RepairController({
+    vehicles: { instances: [inst], active: null },
+    structures: { instances: bays },
+    heightmap: DRY_HEIGHTMAP,
+    game: { teamOf: () => ({ credits: 100000, spend: () => true }) },
+    facilityControl: { queueDepth: (bay) => depths[bay.id] ?? 0 },
+  });
+  return { controller, inst };
+}
+
+test('a bay with room still takes the vehicle', () => {
+  const bay = makeQueuedBay(1, 0);
+  const { controller, inst } = makeCappedCtx([bay], { 1: MAX_REPAIR_QUEUE - 1 });
+  assert.equal(controller._nearestBay(inst)?.id, 1, 'under the cap, so still open');
+});
+
+test('a bay at the queue cap is skipped', () => {
+  const bay = makeQueuedBay(1, 0);
+  const { controller, inst } = makeCappedCtx([bay], { 1: MAX_REPAIR_QUEUE });
+  assert.equal(controller._nearestBay(inst), null, 'full — do not join a car park');
+});
+
+test('a full near bay defers to an emptier far one rather than blocking repair', () => {
+  // The cap must not simply relocate the logjam: with two bays and one full,
+  // the second still takes the vehicle even though it is further away.
+  const near = makeQueuedBay(1, 0);
+  const far = makeQueuedBay(2, 500);
+  const { controller, inst } = makeCappedCtx([near, far], { 1: MAX_REPAIR_QUEUE, 2: 0 });
+  assert.equal(controller._nearestBay(inst)?.id, 2);
+});
+
+test('with every bay full, the vehicle carries on damaged instead of queueing', () => {
+  // Returning null here is the *existing* "no bay at all" disposition, not a
+  // new branch — _maybeAutoQueue has always had to cope with nowhere to go.
+  const a = makeQueuedBay(1, 0);
+  const b = makeQueuedBay(2, 500);
+  const { controller, inst } = makeCappedCtx([a, b], { 1: MAX_REPAIR_QUEUE, 2: MAX_REPAIR_QUEUE });
+  assert.equal(controller._nearestBay(inst), null);
+});
+
+// ---- weapon-tier escalation --------------------------------------------------
+//
+// TEAM_WEAPON_UPGRADE_COMMAND has always existed and was wired only to the
+// player's radial menu, so `weaponTier` stayed 0 on every AI team for whole
+// matches — the uploaded 41-minute diagnostic recorded exactly that on all
+// five teams. The gap was a missing caller, not a missing system. See
+// docs/plans/ai-weapon-tier-escalation.md.
+//
+// These build their own commander rather than reusing makeBuildCommander,
+// because that harness gives AiCommander a *different* team object than
+// ctx.game.teamOf() returns. In production both are the same Team out of
+// game.teams (main.js's teamOf indexes game.teams; the commander is
+// constructed with a member of it), and the upgrade path reads `this.team`
+// for its guard while the command reads `teamOf()` for the spend — so a split
+// mock would test a shape the game never has.
+
+function makeUpgradeCommander({ credits = 10000, weaponTier = 0, difficulty = 'hard', owned = [] } = {}) {
+  const team = {
+    id: 1,
+    defeated: false,
+    homePoint: { x: 0, z: 0 },
+    credits,
+    weaponTier,
+    spend(n) {
+      if (this.credits < n) return false;
+      this.credits -= n;
+      return true;
+    },
+  };
+  const factory = {
+    teamId: 1, mode: 'idle',
+    def: { id: 'armed-factory', produces: ['gun-platform', 'tracked-tank', 'scout-buggy'] },
+  };
+  const defs = [GUN, TANK, SCOUT, HARVESTER, CUSTOM_HARVESTER];
+  const built = [];
+  const ctx = {
+    game: { difficulty: { id: difficulty }, teams: [{}, team], teamOf: () => team },
+    vehicles: {
+      instances: owned.map((def, i) => ({ id: 200 + i, teamId: 1, def, dead: false, group: { position: { x: 0, y: 0, z: 0 } } })),
+      active: null,
+      instanceOf: () => null,
+      defOf: (id) => defs.find((d) => d.id === id),
+    },
+    structures: { instances: [factory] },
+    heightmap: DRY_HEIGHTMAP,
+    produceUnit: (def) => built.push(def.id),
+  };
+  const ai = new AiCommander({ team, buildDelaySeconds: 0, ctx, camera: null });
+  return { ai, team, built };
+}
+
+test('an AI with a full army and money buys the next weapon tier', () => {
+  const { ai, team } = makeUpgradeCommander({ credits: 10000 });
+  assert.equal(ai._tryUpgradeWeapons(), true);
+  assert.equal(team.weaponTier, 1, 'tier actually advanced');
+  assert.equal(team.credits, 10000 - 800, 'and the tier was paid for');
+});
+
+test('upgrades stop at the difficulty cap, not at the catalog max', () => {
+  // normal caps at 2 of the catalog's 3. This is the first knob in
+  // DIFFICULTY_ECONOMY that changes behaviour rather than a magnitude.
+  const { ai, team } = makeUpgradeCommander({ credits: 100000, weaponTier: 2, difficulty: 'normal' });
+  assert.equal(ai._tryUpgradeWeapons(), false, 'normal has spent its allowance');
+  assert.equal(team.weaponTier, 2, 'and bought nothing');
+});
+
+test('hard goes one tier further than normal on identical money', () => {
+  const onHard = makeUpgradeCommander({ credits: 100000, weaponTier: 2, difficulty: 'hard' });
+  assert.equal(onHard.ai._tryUpgradeWeapons(), true);
+  assert.equal(onHard.team.weaponTier, 3);
+});
+
+test('easy never upgrades at all', () => {
+  const { ai, team } = makeUpgradeCommander({ credits: 100000, difficulty: 'easy' });
+  assert.equal(ai._tryUpgradeWeapons(), false);
+  assert.equal(team.weaponTier, 0);
+});
+
+test('an upgrade never spends the money that would replace a harvester', () => {
+  // Tier 1 costs 800 and the reserve is a crystal-harvester's 600. 1000 is
+  // affordable by the command's own `enabled()` and must still be refused.
+  const { ai, team } = makeUpgradeCommander({ credits: 1000 });
+  assert.equal(ai._tryUpgradeWeapons(), false, 'affordable, but it would strand the economy');
+  assert.equal(team.credits, 1000, 'nothing spent');
+
+  const flush = makeUpgradeCommander({ credits: 1400 });
+  assert.equal(flush.ai._tryUpgradeWeapons(), true, 'clears cost + reserve exactly');
+});
+
+test('a maxed-out team stops buying', () => {
+  const { ai, team } = makeUpgradeCommander({ credits: 100000, weaponTier: 3, difficulty: 'expert' });
+  assert.equal(ai._tryUpgradeWeapons(), false);
+  assert.equal(team.credits, 100000);
+});
+
+test('rebuilding a lost tank outranks escalation', () => {
+  // The escalation mechanic in one assertion: the chain reaches an upgrade
+  // only when _tryBuildUnit('combat') declines, which is exactly when the army
+  // is at cap. Below cap, the army buy wins and the tier waits.
+  const belowCap = makeUpgradeCommander({ credits: 10000, difficulty: 'hard', owned: [GUN] });
+  assert.equal(belowCap.ai._tryBuildUnit('combat', 5), true, 'army is short — build first');
+  // Which army unit is value-per-cost's business (gun-platform outranks the
+  // tank on that measure); this test's claim is only that it bought *army*.
+  assert.equal(belowCap.built.length, 1, 'exactly one army unit');
+  assert.ok(isArmyUnit({ id: belowCap.built[0], tags: ['combat'] }), 'and it was army, not recon');
+  assert.equal(belowCap.team.weaponTier, 0, 'no tier bought while the army is short');
+
+  const atCap = makeUpgradeCommander({
+    credits: 10000, difficulty: 'hard', owned: [GUN, GUN, GUN, GUN, GUN],
+  });
+  assert.equal(atCap.ai._tryBuildUnit('combat', 5), false, 'army full — nothing better to buy');
+  assert.equal(atCap.ai._tryUpgradeWeapons(), true, 'so the chain escalates instead');
+});
+
+test('the chain escalates only once the army is full', () => {
+  // The ordering claim itself, exercised through _manageEconomy rather than by
+  // calling the two methods separately — the escalation mechanic *is* the
+  // chain order, so testing the pieces in isolation would not catch the
+  // upgrade being moved ahead of the army buy.
+  //
+  // BASE is deployed and every structure is already built, so _tryBuildNext
+  // declines and the chain runs. harvesterCap/defenseCap are satisfied by the
+  // owned roster so economy and defense decline too, leaving combat -> upgrade
+  // -> recon as the live part.
+  const BASE = { id: 'base-station', tags: [], cost: 0, maxHealth: 500 };
+
+  const run = ({ owned, credits }) => {
+    const team = {
+      id: 1, defeated: false, homePoint: { x: 0, z: 0 }, credits, weaponTier: 0,
+      spend(n) { if (this.credits < n) return false; this.credits -= n; return true; },
+    };
+    const base = {
+      id: 300, teamId: 1, def: BASE, dead: false, mode: 'deployed',
+      group: { position: { x: 0, y: 0, z: 0 } },
+    };
+    const defs = [GUN, TANK, SCOUT, HARVESTER, CUSTOM_HARVESTER, BASE];
+    const built = [];
+    // Only an armed factory: no harvester-facility/repair-bay to build means
+    // _tryBuildNext finds nothing affordable-and-missing to distract the chain.
+    const factory = {
+      teamId: 1, mode: 'idle',
+      def: { id: 'armed-factory', produces: ['gun-platform', 'tracked-tank', 'scout-buggy'] },
+    };
+    const ctx = {
+      game: { difficulty: { id: 'hard' }, teams: [{}, team], teamOf: () => team },
+      vehicles: {
+        instances: [base, ...owned.map((def, i) => ({
+          id: 400 + i, teamId: 1, def, dead: false, group: { position: { x: 0, y: 0, z: 0 } },
+        }))],
+        active: null, instanceOf: () => null, defOf: (id) => defs.find((d) => d.id === id),
+      },
+      structures: { instances: [factory], instanceOf: () => null, freeSlot: () => null },
+      heightmap: DRY_HEIGHTMAP,
+      // No pad: basePad returns null so _tryBuildNext declines outright,
+      // isolating the unit/upgrade half of the chain that this test is about.
+      terraform: { padAt: () => null },
+      produceUnit: (def) => built.push(def.id),
+    };
+    const ai = new AiCommander({ team, buildDelaySeconds: 0, ctx, camera: null });
+    ai.buildTimer = 0;
+    ai._manageEconomy(0.016);
+    return { team, built };
+  };
+
+  // hard: combatCap 5. Four army units is one short.
+  const short = run({ owned: [HARVESTER, HARVESTER, GUN, GUN, GUN, GUN], credits: 10000 });
+  assert.equal(short.team.weaponTier, 0, 'army short — the chain must not reach the upgrade');
+  assert.equal(short.built.length, 1, 'it built instead');
+
+  const full = run({ owned: [HARVESTER, HARVESTER, GUN, GUN, GUN, GUN, GUN], credits: 10000 });
+  assert.equal(full.team.weaponTier, 1, 'army full — nothing better to buy, so escalate');
+  assert.deepEqual(full.built, [], 'and it bought no unit');
 });

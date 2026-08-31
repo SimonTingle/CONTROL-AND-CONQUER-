@@ -1,5 +1,5 @@
 /**
- * Coarse global routing for AI army movement.
+ * Coarse global routing for AI army movement and harvesters alike.
  *
  * `vehicleController`'s `driveToTarget` and `aiCommander`'s `ADVANCE_DETOURS`
  * fan are both purely *local*: they know how to fail a straight line and try
@@ -15,6 +15,24 @@
  * `setTarget`/`driveToTarget` machinery, which keeps doing exactly what it
  * already does (grade checks, steering, yielding to traffic) for that one
  * short leg.
+ *
+ * Passability is terrain grade first, then (when a `structures` reference is
+ * supplied) every standing structure's footprint on top — a harvester driving
+ * straight through the armed factory on its way to a crystal field was the
+ * same "no notion of what's in the way" gap the army-movement case above
+ * describes, just for buildings instead of mountains.
+ *
+ * One exemption this needs, applied in `_solve` rather than at build time: a
+ * structure's footprint must never make its own cell unreachable as a *goal*,
+ * or a harvester ordered to dock there could never solve a route to its own
+ * destination — exactly the "to and from the depot" half of the problem this
+ * exists to fix. It still blocks that same cell for anyone routing *through*
+ * it toward somewhere else. Two separate passability arrays carry this:
+ * `_terrainPassable` (dry land only, used solely to reject an underwater
+ * goal) and `_passable` (terrain and structures both, used for every edge
+ * during solving) — folding the goal-cell exemption into `_passable` itself
+ * would have let a genuinely underwater goal slip through as "reachable"
+ * too, which is a different failure than the one this is fixing.
  */
 
 // World units per grid cell. ~1024/24 ≈ 43 cells per axis, ~1,850 cells
@@ -46,16 +64,23 @@ const NEIGHBORS = [
 const MAX_CACHED_FIELDS = 24;
 
 export class NavGrid {
-  /** @param {import('../terrain/heightmap.js').Heightmap} heightmap */
-  constructor(heightmap) {
+  /**
+   * @param {import('../terrain/heightmap.js').Heightmap} heightmap
+   * @param {import('../structures/structures.js').StructureController} [structures]
+   *   Optional — callers with no notion of structures (none exist today, but
+   *   nothing requires one) get the original terrain-only grid.
+   */
+  constructor(heightmap, structures = null) {
     this.heightmap = heightmap;
+    this.structures = structures;
     this.cols = 0;
     this.rows = 0;
     this.originX = 0;
     this.originZ = 0;
-    /** Cached flow fields, keyed by goal cell index. Cleared on terrainVersion change. */
+    /** Cached flow fields, keyed by goal cell index. Cleared on terrainVersion/structuresVersion change. */
     this._cache = new Map();
     this._builtForVersion = -1;
+    this._builtForStructuresVersion = -1;
     this._build();
   }
 
@@ -68,7 +93,7 @@ export class NavGrid {
 
     const n = this.cols * this.rows;
     const height = new Float32Array(n);
-    const passable = new Uint8Array(n); // above sea level; edge climbability is checked per-edge, not stored here
+    const terrainPassable = new Uint8Array(n); // above sea level; edge climbability is checked per-edge, not stored here
     const seaLevelY = this.heightmap.seaLevelY;
 
     for (let row = 0; row < this.rows; row++) {
@@ -77,14 +102,44 @@ export class NavGrid {
         const h = this.heightmap.heightAt(x, z);
         const idx = row * this.cols + col;
         height[idx] = h;
-        passable[idx] = h > seaLevelY ? 1 : 0;
+        terrainPassable[idx] = h > seaLevelY ? 1 : 0;
+      }
+    }
+
+    // Structures block routing on top of terrain — every cell whose center
+    // falls inside a standing structure's footprint radius is marked
+    // impassable here, including that structure's own home cell. Reaching a
+    // structure as a *destination* is handled separately, in `_solve` — see
+    // this file's header for why that exemption belongs there and not here.
+    const passable = terrainPassable.slice();
+    if (this.structures) {
+      for (const inst of this.structures.instances) {
+        if (inst.dead) continue;
+        const footprint = inst.def.footprint ?? 0;
+        if (footprint <= 0) continue;
+        const cellRadius = Math.ceil(footprint / CELL_SIZE);
+        const homeCol = Math.floor((inst.x - this.originX) / CELL_SIZE);
+        const homeRow = Math.floor((inst.z - this.originZ) / CELL_SIZE);
+        for (let dr = -cellRadius; dr <= cellRadius; dr++) {
+          for (let dc = -cellRadius; dc <= cellRadius; dc++) {
+            const col = homeCol + dc;
+            const row = homeRow + dr;
+            if (col < 0 || row < 0 || col >= this.cols || row >= this.rows) continue;
+            const { x, z } = this._cellCenter(col, row);
+            if (Math.hypot(x - inst.x, z - inst.z) <= footprint) {
+              passable[row * this.cols + col] = 0;
+            }
+          }
+        }
       }
     }
 
     this._height = height;
+    this._terrainPassable = terrainPassable;
     this._passable = passable;
     this._cache.clear();
     this._builtForVersion = this.heightmap.terrainVersion;
+    this._builtForStructuresVersion = this.structures?.version ?? -1;
   }
 
   _cellCenter(col, row) {
@@ -101,19 +156,31 @@ export class NavGrid {
     return row * this.cols + col;
   }
 
-  /** Rebuild if the terrain has been edited since the grid was solved — see
-   * heightmap.terrainVersion. Cheap to call every query; almost always a no-op. */
+  /** Rebuild if the terrain has been edited (heightmap.terrainVersion) or a
+   * structure has been built/destroyed (structures.version) since the grid
+   * was solved. Cheap to call every query; almost always a no-op. */
   _refreshIfStale() {
-    if (this.heightmap.terrainVersion !== this._builtForVersion) this._build();
+    if (
+      this.heightmap.terrainVersion !== this._builtForVersion ||
+      (this.structures?.version ?? -1) !== this._builtForStructuresVersion
+    ) {
+      this._build();
+    }
   }
 
   /**
    * Cost to travel from cell `from` to its neighbor `to`, or `Infinity` if
    * the edge cannot be driven. Downhill and flat are always passable —
    * matches `readGrade`'s own uphill-only cap in vehicleController.js.
+   *
+   * `goalCell` is `to`'s passability exemption: entering the solve's own goal
+   * is always allowed regardless of `_passable`, which is what lets a route
+   * end at a structure's dock without that same structure blocking anyone
+   * routing *through* the same cell on the way to somewhere else. See this
+   * file's header.
    */
-  _edgeCost(from, to, dist) {
-    if (!this._passable[to]) return Infinity;
+  _edgeCost(from, to, dist, goalCell) {
+    if (to !== goalCell && !this._passable[to]) return Infinity;
     const rise = this._height[to] - this._height[from];
     if (rise <= 0) return dist;
     const grade = rise / (dist * CELL_SIZE);
@@ -155,7 +222,7 @@ export class NavGrid {
         if (visited[v]) continue;
         // Edge direction is v -> u (we're walking the graph backwards from
         // the goal), so climbability is checked in that direction.
-        const cost = this._edgeCost(v, u, dm);
+        const cost = this._edgeCost(v, u, dm, goalCell);
         if (cost === Infinity) continue;
         const nd = dist[u] + cost;
         if (nd < dist[v]) {
@@ -179,7 +246,11 @@ export class NavGrid {
     const goalCell = this._cellOf(goalX, goalZ);
     const fromCell = this._cellOf(x, z);
     if (goalCell === -1 || fromCell === -1) return null;
-    if (!this._passable[goalCell]) return null;
+    // Terrain-only check, deliberately not `_passable`: a structure sitting
+    // on dry land is a valid destination (that's the whole point of the
+    // goal-cell exemption in `_edgeCost`) — only a genuinely underwater goal
+    // is rejected here.
+    if (!this._terrainPassable[goalCell]) return null;
 
     let field = this._cache.get(goalCell);
     if (!field) {

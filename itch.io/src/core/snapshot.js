@@ -36,12 +36,18 @@ import { simClock, resetSimClock } from './simClock.js';
 // bans, AI commander timers, combat cooldown/turret aim, and the sim tick.
 // v1 saves still load — the restore paths below all tolerate the fields being
 // absent, which is why this stayed a readable bump and not a migration.
-export const SCHEMA_VERSION = 2;
+// v3 adds shells in flight, crater records and uncollected bounty coins —
+// three new kinds of entity that did not exist when v2 was written. v2 and v1
+// saves still load: each new section below tolerates its field being absent,
+// which restores a world with nothing in flight and no craters, exactly the
+// world those saves described.
+export const SCHEMA_VERSION = 3;
 
 /** Transient controller state that is rebuilt or self-heals, and is deliberately not saved. */
 const REBUILT_ON_LOAD =
   'mesh/LOD/quaternion, fog textures, nav-grid caches, dock queue slot sets, ' +
-  'per-vehicle reveal caches, in-flight tracer visuals, traffic yield cooldowns';
+  'per-vehicle reveal caches, projectile/impact/coin meshes, scorch marks, ' +
+  'traffic yield cooldowns';
 
 // ---------------------------------------------------------------------------
 // serialize
@@ -162,6 +168,41 @@ function serializeVehicle(inst) {
   };
 }
 
+/**
+ * A shell in flight. Everything here is a value the shell already carries —
+ * see vehicles/projectiles.js on why it copies its shooter's identity rather
+ * than referencing it. That property is what makes this trivially
+ * serializable: there is no object graph to flatten, only `targetId`, which
+ * follows the cross-references-as-ids rule like every other id here.
+ */
+function serializeProjectile(p) {
+  return {
+    id: p.id,
+    teamId: p.teamId,
+    shooterId: p.shooterId,
+    shooterKind: p.shooterKind,
+    shooterDefId: p.shooterDefId,
+    damage: round(p.damage, 3),
+    calibre: round(p.calibre, 3),
+    color: p.color,
+    x: round(p.x),
+    y: round(p.y),
+    z: round(p.z),
+    vx: round(p.vx, 4),
+    vy: round(p.vy, 4),
+    vz: round(p.vz, 4),
+    aimX: round(p.aimX),
+    aimY: round(p.aimY),
+    aimZ: round(p.aimZ),
+    targetId: p.targetId,
+    targetKind: p.targetKind,
+    targetHeight: round(p.targetHeight ?? 1.5, 3),
+    willHit: p.willHit,
+    elapsed: round(p.elapsed, 4),
+    flight: round(p.flight, 4),
+  };
+}
+
 function serializeStructure(inst) {
   return {
     id: inst.id,
@@ -246,6 +287,46 @@ export function serialize(ctx) {
       complete: p.complete,
     })),
 
+    // Craters, replayed onto the regenerated terrain in the same
+    // record-and-replay way pads are, and for the same reason: a crater is a
+    // runtime edit to `heightmap.data` and is not reproducible from the seed,
+    // but replaying the maths is exact and costs a few dozen bytes instead of
+    // a megabyte of floats. See core/craters.js.
+    craters: (ctx.craters?.records ?? []).map((c) => ({
+      x: round(c.x),
+      z: round(c.z),
+      radius: round(c.radius, 3),
+      depth: round(c.depth, 5),
+    })),
+
+    // Per-team crystal field blocks (net/intents.js's 'blockField'). Flattened
+    // to (fieldId, teamId) pairs rather than saved on the field itself — there
+    // is no other field-state serialization to attach to. This is the same
+    // shape `harvesterAI`'s per-harvester bans take (see `harvesterStates`
+    // below, which does persist them) and the same shape the team-wide
+    // `dangerZones` take.
+    blockedFields: (world.blooms?.fields ?? []).flatMap((f) =>
+      [...(f.blockedByTeam ?? [])].map((teamId) => ({ fieldId: f.id, teamId }))
+    ),
+
+    // Shells in flight. Saved rather than dropped because a shell is damage
+    // already committed to: a save taken mid-volley that discarded them would
+    // hand the loading player a free reprieve, and in a lockstep resync it
+    // would hand one client a different future than the others.
+    projectiles: (ctx.projectiles?.instances ?? []).map(serializeProjectile),
+
+    // Uncollected bounty coins — credits sitting on the ground, so exactly as
+    // load-bearing as the credits already in a team's account.
+    bounties: (ctx.bounties?.instances ?? []).map((b) => ({
+      id: b.id,
+      x: round(b.x),
+      z: round(b.z),
+      value: b.value,
+      expiresAtTick: b.expiresAtTick,
+      defId: b.defId,
+      teamId: b.teamId,
+    })),
+
     teams: (game.teams ?? []).map(serializeTeam),
     vehicles: vehicles.instances.filter((v) => !v.dead).map(serializeVehicle),
     structures: structures.instances.filter((s) => !s.dead).map(serializeStructure),
@@ -263,12 +344,30 @@ export function serialize(ctx) {
     // Harvester routing state, keyed by vehicle id. Held in a Map keyed by
     // object identity at runtime, so it has to be flattened out separately.
     harvesterStates: serializeHarvesterStates(ctx),
+    // Contested ground, per team. Sim-time expiries like the bans below, and
+    // restored against the same `simTick`. Worth persisting where a single
+    // harvester's bans arguably were not: this is the team's shared memory of
+    // where it has been ambushed, and dropping it on load would send the whole
+    // fleet straight back into the ground it just learned to avoid.
+    dangerZones: serializeDangerZones(ctx),
     aiCommanders: serializeAiCommanders(ctx),
     // The simulation's own clock. Field bans and threat memory are expressed in
     // sim time, so restoring them without the tick they were written against
     // would make every one of them either already expired or unreachably distant.
     simTick: simClock.tick,
   };
+}
+
+function serializeDangerZones(ctx) {
+  const zones = ctx.harvesterAI?.dangerZones;
+  if (!zones) return [];
+  const out = [];
+  for (const [teamId, list] of zones) {
+    for (const z of list) {
+      out.push({ teamId, x: round(z.x, 2), z: round(z.z, 2), radius: round(z.radius, 2), until: round(z.until, 3) });
+    }
+  }
+  return out;
 }
 
 function serializeHarvesterStates(ctx) {
@@ -374,7 +473,7 @@ export function deserialize(ctx, snap) {
   if (!snap || typeof snap !== 'object') throw new Error('Snapshot is empty or malformed.');
   if (snap.schemaVersion > SCHEMA_VERSION) throw new SnapshotVersionError(snap.schemaVersion);
 
-  const { world, terraform, vehicles, structures, game } = ctx;
+  const { world, terraform, vehicles, structures, game, projectiles, craters, bounties } = ctx;
 
   // --- clear the current world -------------------------------------------
   // Through each controller's own remove(), which detaches the mesh and
@@ -385,6 +484,12 @@ export function deserialize(ctx, snap) {
   vehicles.active = null;
   terraform.pads.length = 0;
   terraform.jobs.length = 0;
+  // These describe the world being replaced, not the one being loaded. Cleared
+  // before `world.regenerate` rather than after, so nothing is holding a
+  // position on a heightfield that is about to be thrown away.
+  projectiles?.clear();
+  craters?.clear();
+  bounties?.clear();
 
   // --- terrain, then pads replayed on top --------------------------------
   world.regenerate(snap.terrain);
@@ -397,6 +502,14 @@ export function deserialize(ctx, snap) {
   // migrated, since tracks are cosmetic and fade within 75s of play anyway.
   if (snap.tracksRLE && world.trackMask) {
     world.trackMask.fromRLE(base64ToBytes(snap.tracksRLE));
+  }
+
+  // Craters replay directly after pads and before anything else reads a
+  // height. Order within the list is preserved for the same reason pads'
+  // is — overlapping craters compose the way they originally did, and a
+  // depth cap applied out of order would clamp a different one.
+  if (snap.craters && craters) {
+    for (const c of snap.craters) craters.restore(c);
   }
 
   // --- teams --------------------------------------------------------------
@@ -483,10 +596,34 @@ export function deserialize(ctx, snap) {
     };
   }
 
+  // Shells in flight. Restored before the cross-reference pass below even
+  // though they carry ids of their own: a shell resolves its target by id at
+  // arrival rather than holding a reference (see vehicles/projectiles.js), so
+  // it has nothing to resolve here and a target that died while the save sat
+  // on disk is handled by the same path that handles one dying mid-flight.
+  if (snap.projectiles && projectiles) {
+    for (const saved of snap.projectiles) {
+      projectiles.restore(saved);
+    }
+  }
+
+  if (snap.bounties && bounties) {
+    for (const saved of snap.bounties) bounties.restore(saved);
+  }
+
   // --- cross-references, now that everything exists -----------------------
   const fieldById = new Map((world.blooms?.fields ?? []).map((f) => [f.id, f]));
   const lookup = (kind, id) =>
     kind === 'structure' ? structureById.get(id) : vehicleById.get(id);
+
+  // world.regenerate() above rebuilt fresh field records with no blocks on
+  // them, same as it did for trackMask; restore them from the save.
+  for (const saved of snap.blockedFields ?? []) {
+    const field = fieldById.get(saved.fieldId);
+    if (!field) continue; // a map regenerated with fewer fields than the save
+    field.blockedByTeam ??= new Set();
+    field.blockedByTeam.add(saved.teamId);
+  }
 
   for (const saved of snap.vehicles) {
     const inst = vehicleById.get(saved.id);
@@ -534,6 +671,15 @@ export function deserialize(ctx, snap) {
 
   // --- harvester routing --------------------------------------------------
   if (ctx.harvesterAI) {
+    ctx.harvesterAI.dangerZones.clear();
+    // Absent on saves written before danger zones existed — those simply load
+    // with no contested ground remembered, which is the pre-feature behaviour
+    // and degrades to "learn it again the next time you get shot".
+    for (const z of snap.dangerZones ?? []) {
+      const list = ctx.harvesterAI.dangerZones.get(z.teamId) ?? [];
+      list.push({ x: z.x, z: z.z, radius: z.radius, until: z.until });
+      ctx.harvesterAI.dangerZones.set(z.teamId, list);
+    }
     ctx.harvesterAI.states.clear();
     for (const saved of snap.harvesterStates) {
       const inst = vehicleById.get(saved.vehicleId);

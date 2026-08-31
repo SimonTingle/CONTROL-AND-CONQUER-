@@ -180,6 +180,7 @@ function serializeProjectile(p) {
     id: p.id,
     teamId: p.teamId,
     shooterId: p.shooterId,
+    shooterKind: p.shooterKind,
     shooterDefId: p.shooterDefId,
     damage: round(p.damage, 3),
     calibre: round(p.calibre, 3),
@@ -300,9 +301,10 @@ export function serialize(ctx) {
 
     // Per-team crystal field blocks (net/intents.js's 'blockField'). Flattened
     // to (fieldId, teamId) pairs rather than saved on the field itself — there
-    // is no other field-state serialization to attach to, and this is the
-    // same shape harvesterAI's bans would take if bans were worth persisting
-    // (they aren't: they're a few-seconds retry, not a player decision).
+    // is no other field-state serialization to attach to. This is the same
+    // shape `harvesterAI`'s per-harvester bans take (see `harvesterStates`
+    // below, which does persist them) and the same shape the team-wide
+    // `dangerZones` take.
     blockedFields: (world.blooms?.fields ?? []).flatMap((f) =>
       [...(f.blockedByTeam ?? [])].map((teamId) => ({ fieldId: f.id, teamId }))
     ),
@@ -342,12 +344,30 @@ export function serialize(ctx) {
     // Harvester routing state, keyed by vehicle id. Held in a Map keyed by
     // object identity at runtime, so it has to be flattened out separately.
     harvesterStates: serializeHarvesterStates(ctx),
+    // Contested ground, per team. Sim-time expiries like the bans below, and
+    // restored against the same `simTick`. Worth persisting where a single
+    // harvester's bans arguably were not: this is the team's shared memory of
+    // where it has been ambushed, and dropping it on load would send the whole
+    // fleet straight back into the ground it just learned to avoid.
+    dangerZones: serializeDangerZones(ctx),
     aiCommanders: serializeAiCommanders(ctx),
     // The simulation's own clock. Field bans and threat memory are expressed in
     // sim time, so restoring them without the tick they were written against
     // would make every one of them either already expired or unreachably distant.
     simTick: simClock.tick,
   };
+}
+
+function serializeDangerZones(ctx) {
+  const zones = ctx.harvesterAI?.dangerZones;
+  if (!zones) return [];
+  const out = [];
+  for (const [teamId, list] of zones) {
+    for (const z of list) {
+      out.push({ teamId, x: round(z.x, 2), z: round(z.z, 2), radius: round(z.radius, 2), until: round(z.until, 3) });
+    }
+  }
+  return out;
 }
 
 function serializeHarvesterStates(ctx) {
@@ -651,6 +671,15 @@ export function deserialize(ctx, snap) {
 
   // --- harvester routing --------------------------------------------------
   if (ctx.harvesterAI) {
+    ctx.harvesterAI.dangerZones.clear();
+    // Absent on saves written before danger zones existed — those simply load
+    // with no contested ground remembered, which is the pre-feature behaviour
+    // and degrades to "learn it again the next time you get shot".
+    for (const z of snap.dangerZones ?? []) {
+      const list = ctx.harvesterAI.dangerZones.get(z.teamId) ?? [];
+      list.push({ x: z.x, z: z.z, radius: z.radius, until: z.until });
+      ctx.harvesterAI.dangerZones.set(z.teamId, list);
+    }
     ctx.harvesterAI.states.clear();
     for (const saved of snap.harvesterStates) {
       const inst = vehicleById.get(saved.vehicleId);

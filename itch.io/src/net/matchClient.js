@@ -7,6 +7,8 @@
  * be reasoned about (and tested) without a socket in the picture.
  */
 
+import { getSessionToken } from './api.js';
+
 /** Same origin the REST client uses; baked in at build time by Vite. */
 const API_BASE = typeof __API_URL__ === 'string' ? __API_URL__ : '';
 
@@ -26,7 +28,28 @@ const API_BASE = typeof __API_URL__ === 'string' ? __API_URL__ : '';
 // resolve none of those defIds, which is precisely the silent divergence the
 // version check exists to prevent, so this is exactly the kind of change that
 // must bump it rather than ride along as an additive field.
-export const PROTOCOL_VERSION = 2;
+// v3 does not change the wire format at all — it bumps because the
+// *simulation behind it* did. Between v2 and v3, src/ gained travelling
+// projectiles, craters, bounty coins and veterancy (SCHEMA_VERSION 2 -> 3),
+// while the itch.io fork stayed on hitscan combat and none of those modules.
+// Both still declared v2, so the handshake passed and the two builds joined
+// the same match and diverged on the first shot fired — one resolving damage
+// instantly, the other flying a shell.
+//
+// That is the case this constant exists to catch and structurally could not:
+// it guards the shape of the frames, but what actually has to match is the
+// simulation reading them. So the rule is wider than the comment above
+// implies — bump when the wire format changes, *and* when a change lands that
+// two peers would simulate differently. A stale deployed bundle then fails
+// loudly at the handshake instead of silently playing a different game.
+// See docs/plans/itch-fork-silent-split-brain.md.
+//
+// v4 is that wider rule applied deliberately rather than in hindsight: the
+// frames are unchanged again, but harvesters now consult team-shared danger
+// zones when choosing a field (harvesterAI.js) and the AI commander's army
+// budget no longer counts scouts (aiCommander.js). Both decide where units
+// drive, so two peers straddling this bump diverge within seconds.
+export const PROTOCOL_VERSION = 4;
 
 // Exported so the query-string construction can be checked directly without a
 // browser `location` global — see matchClient-protocol.test.mjs, which sets
@@ -37,6 +60,23 @@ export function socketUrl(matchId) {
   // rather than from location.
   const base = API_BASE || `${location.protocol}//${location.host}`;
   return `${base.replace(/^http/, 'ws')}/ws/match/${matchId}?protocolVersion=${PROTOCOL_VERSION}`;
+}
+
+/**
+ * Subprotocols for the upgrade: none normally, `['ptg-bearer', <token>]` when
+ * this build carries its session as a token rather than a cookie.
+ *
+ * The browser WebSocket API has no way to set an Authorization header, and the
+ * alternative — the token as a query parameter — would write a live credential
+ * into every access log the request passes through. The subprotocol list is
+ * the one client-settable handshake header, so the token goes there.
+ *
+ * Exported for the same reason `socketUrl` is: so the handshake can be checked
+ * without a browser WebSocket.
+ */
+export function socketProtocols() {
+  const token = getSessionToken();
+  return token ? ['ptg-bearer', token] : undefined;
 }
 
 /**
@@ -74,7 +114,7 @@ export class MatchClient {
   connect() {
     return new Promise((resolve, reject) => {
       let settled = false;
-      const ws = new WebSocket(socketUrl(this.matchId));
+      const ws = new WebSocket(socketUrl(this.matchId), socketProtocols());
       this.socket = ws;
 
       ws.addEventListener('open', () => {

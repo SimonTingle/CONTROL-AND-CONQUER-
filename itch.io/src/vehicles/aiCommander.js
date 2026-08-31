@@ -31,6 +31,9 @@
  */
 
 import { commandsFor, basePad, producedUnitIds } from './commands.js';
+// For the tier's price only — the purchase itself goes through
+// TEAM_WEAPON_UPGRADE_COMMAND so there is one owner of the cost table.
+import { WEAPON_TIERS } from '../core/team.js';
 import { findSpawnPointNear } from '../core/pick.js';
 import { STRUCTURE_CATALOG } from '../structures/structures.js';
 import { simClock } from '../core/simClock.js';
@@ -69,13 +72,79 @@ const ADVANCE_DETOURS = [0.8, -0.8, 1.5, -1.5, 2.3, -2.3];
 // planting turrets is no more interesting than one that never stops massing
 // tanks. Deliberately flat across difficulty rather than scaled like combatCap:
 // a fortified perimeter is a one-time investment, not an ongoing arms race.
+// reconCap is scouts specifically, now that they no longer draw on combatCap
+// (see isArmyUnit). Small on purpose and barely scaled: a team spawns with one
+// scout already, so this is an allowance for a second pair of eyes, not a unit
+// type to mass. Scouting does real work here — `_scoutedEnemyStrength` gates
+// whether the commander commits to an attack at all — but the diagnostic that
+// prompted this had teams holding six and seven of them, which bought no extra
+// intel and cost the entire army budget.
+// maxWeaponTier is how far up WEAPON_TIERS (core/team.js) this difficulty will
+// buy. It is the first thing in this table that changes what an AI *does*
+// rather than how much or how often — every other knob here scales a number,
+// which is why a harder AI has so far been the same AI acting more often. A
+// tier is a real capability step: it divides fire interval (combatController)
+// and widens craters (craters.js's `1 + 0.12 * weaponTier`).
+//
+// easy stays at 0 deliberately. Combined with the army fix that made the
+// commander field a full roster at all, an easy opponent at tier 3 would be a
+// very large jump from the passive AI that shipped before it — 1.9x fire rate
+// *and* bigger holes is not an easy match.
 const DIFFICULTY_ECONOMY = {
-  easy: { harvesterCap: 2, buildInterval: 20, combatCap: 1, attackAt: 2, defenseCap: 1 },
-  normal: { harvesterCap: 2, buildInterval: 15, combatCap: 3, attackAt: 2, defenseCap: 2 },
-  hard: { harvesterCap: 2, buildInterval: 11, combatCap: 5, attackAt: 3, defenseCap: 3 },
-  expert: { harvesterCap: 2, buildInterval: 8, combatCap: 7, attackAt: 3, defenseCap: 3 },
+  easy: { harvesterCap: 2, buildInterval: 20, combatCap: 1, attackAt: 2, defenseCap: 1, reconCap: 1, maxWeaponTier: 0 },
+  normal: { harvesterCap: 2, buildInterval: 15, combatCap: 3, attackAt: 2, defenseCap: 2, reconCap: 2, maxWeaponTier: 2 },
+  hard: { harvesterCap: 2, buildInterval: 11, combatCap: 5, attackAt: 3, defenseCap: 3, reconCap: 2, maxWeaponTier: 3 },
+  expert: { harvesterCap: 2, buildInterval: 8, combatCap: 7, attackAt: 3, defenseCap: 3, reconCap: 3, maxWeaponTier: 3 },
 };
+
+/**
+ * Credits an upgrade must leave behind.
+ *
+ * Not an arbitrary cushion: it is the cost of a crystal-harvester, the economy
+ * unit this commander actually rebuilds when one dies. A tier bought with the
+ * last of the treasury speeds up guns the team can no longer afford to keep
+ * supplied — and a dead harvester it cannot replace costs far more over the
+ * rest of a match than a fire-rate step gains. Stated as the number it is
+ * protecting so a catalog price change is visibly the thing to re-check.
+ */
+const UPGRADE_RESERVE = 600;
 const DEFAULT_ECONOMY = DIFFICULTY_ECONOMY.normal;
+
+/**
+ * Vehicles that carry the `combat` tag but are recon, not army.
+ *
+ * `scout-buggy` is tagged `['recon', 'combat']` in the catalog, and that one
+ * overlap used to be answered independently in three places — the build
+ * budget, the build-candidate scan, and `_manageArmy` — which is exactly how
+ * they came to disagree. See `isArmyUnit`.
+ */
+const RECON_ONLY_IDS = new Set(['scout-buggy']);
+
+/**
+ * Is this def part of the *army* — the roster `combatCap` budgets for, the one
+ * `_manageArmy` will actually send somewhere?
+ *
+ * The single answer to that question, deliberately. Before this existed,
+ * `_tryBuildUnit` counted every combat-tagged unit against `combatCap` while
+ * `_manageArmy` filtered `id !== 'scout-buggy'` — so scouts *spent* the army
+ * budget but could never *be* the army. The previous pass knew about the
+ * overlap and predicted the cost as "6 tanks at expert, not 7". A 41-minute
+ * four-AI diagnostic showed the real cost is total: because build candidates
+ * are filtered to whatever is affordable *this instant* (`enabled()` tests
+ * credits and nothing else), and a scout is 350cr against a gun platform's
+ * 650, the scout is the only enabled combat candidate on every tick the team
+ * holds 350-649cr. It wins that race repeatedly, and each win permanently
+ * spends a point of the budget on a unit the commander refuses to field.
+ * Result across four AI teams: 23 scouts, one gun platform, zero tanks, and
+ * `_manageArmy` early-returning on `army.length === 0` for the whole match —
+ * taking `_updatePosture`, `_pickArmyTarget` and `_advanceUnit` with it.
+ *
+ * Exported so the agreement between the budget and the army is testable
+ * rather than merely commented.
+ */
+export function isArmyUnit(def) {
+  return !!def?.tags?.includes('combat') && !RECON_ONLY_IDS.has(def.id);
+}
 
 // Structures an AI ever chooses to build on its own initiative, cheapest
 // first — reads generically off the catalog's own `tags`/`cost`, so a new
@@ -300,6 +369,15 @@ export class AiCommander {
     );
   }
 
+  /** This team's live army — what `combatCap` budgets for and `_manageArmy`
+   * commits. Both read `isArmyUnit`, so the budget and the roster it funds
+   * cannot drift apart the way they did before that predicate existed. */
+  _ownArmyUnits() {
+    return this.ctx.vehicles.instances.filter(
+      (v) => v.teamId === this.team.id && !v.dead && isArmyUnit(v.def)
+    );
+  }
+
   /** This team's already-deployed defenses — gun-turret and sensor-tower
    * together, the same grouping defenseCap counts them under. */
   _ownDefenses() {
@@ -414,9 +492,37 @@ export class AiCommander {
     // harvester that pays for itself is worth more than a gun that does not.
     // Defense sits between the two: cheaper and more one-off than the ongoing
     // combat cap, but only worth a look once the harvester cap is already met.
+    // Recon sits last, below the army, now that it has its own cap rather than
+    // drawing on `combatCap`. Ordering it after combat is the whole point: a
+    // scout is the cheapest thing on the list, so anywhere earlier in the
+    // chain it wins the affordability race on every tick the team is between
+    // paydays and the army never gets funded — which, with a shared budget,
+    // is precisely how the AI ended up with 23 scouts and no tanks.
+    // Weapon tiers sit *after* combat, and that placement is the whole
+    // escalation mechanic — no timer, no separate schedule. `_tryBuildUnit`
+    // returns false precisely when the army is at `combatCap`, so the chain
+    // reaches an upgrade exactly when there is nothing better left to buy.
+    // Lose a tank and the army drops below cap, so the next tick rebuilds it
+    // instead: replacement outranks escalation for free, which is the right
+    // priority and would have taken explicit code to express any other way.
+    //
+    // Ahead of recon because a fire-rate tier is worth more than a second
+    // scout.
+    //
+    // Not, however, a fix for the AI's hoarding, and worth saying so here so
+    // nobody assumes it was: all three tiers together cost 5,200, against a
+    // strong team's 43,000+ match income. Measured, a team that ended at
+    // 29,109 idle credits before this existed ended at 27,891 after — it buys
+    // its tiers and goes right back to accumulating. A treasury that large
+    // wants a sink that scales (repairs, reinforcements, a second base), which
+    // is its own piece of work.
     if (!this._tryBuildUnit('economy', this.economy.harvesterCap)) {
       if (!this._manageDefense()) {
-        this._tryBuildUnit('combat', this.economy.combatCap);
+        if (!this._tryBuildUnit('combat', this.economy.combatCap)) {
+          if (!this._tryUpgradeWeapons()) {
+            this._tryBuildUnit('recon', this.economy.reconCap);
+          }
+        }
       }
     }
   }
@@ -478,12 +584,13 @@ export class AiCommander {
     // tag-level here would halve their income inside the very change meant to
     // repair income. It wants its own measured balance pass, not a drive-by.
     //
-    // Knock-on, stated rather than discovered later: a surviving scout now
-    // spends one point of the budget, so the fielded army is `combatCap` minus
-    // however many scouts are alive — 6 tanks at expert, not 7. That is the
-    // honest reading of a shared budget, and 6 committed tanks beats 7 tanks
-    // plus 7 units the commander refuses to send anywhere.
-    if (tag === 'combat' && this._ownUnitsWithTag(tag).length >= cap) return false;
+    // Scouts are excluded from both the count and the candidate scan below,
+    // via the one `isArmyUnit` predicate `_manageArmy` also uses. They get
+    // their own `reconCap` instead. The earlier version of this line counted
+    // them, on the reading that a shared budget honestly costs "6 tanks at
+    // expert, not 7" — see isArmyUnit for why the real cost turned out to be
+    // every tank, always.
+    if (tag === 'combat' && this._ownArmyUnits().length >= cap) return false;
 
     let bestStructure = null;
     let bestCmd = null;
@@ -497,6 +604,11 @@ export class AiCommander {
       for (const unitId of producedUnitIds(s.def, this.ctx)) {
         const def = this.ctx.vehicles.defOf(unitId);
         if (!def?.tags?.includes(tag)) continue;
+        // A scout carries the `combat` tag, so without this it would still be
+        // a candidate here — and now that it no longer counts against
+        // `combatCap`, an uncapped one. It is bought under `recon` instead,
+        // where the per-id cap below applies to it normally.
+        if (tag === 'combat' && !isArmyUnit(def)) continue;
         if (tag !== 'combat' && this._ownUnits(unitId).length >= cap) continue;
 
         const cmd = commandsFor(s, this.ctx).find((c) => c.id === `build-${unitId}`);
@@ -520,6 +632,48 @@ export class AiCommander {
     return true;
   }
 
+  /**
+   * Buy the next weapon tier, if this difficulty still allows one and the
+   * treasury can stand it.
+   *
+   * The upgrade itself is not reimplemented here — `TEAM_WEAPON_UPGRADE_COMMAND`
+   * (commands.js) already owns the cost table, the max-tier check and the
+   * spend, and it is the same command the player's radial menu fires. This
+   * only decides *whether the AI wants to*, which was the entire gap: the
+   * command has always existed and nothing on the AI side ever called it, so
+   * `weaponTier` stayed 0 on every AI team for whole matches. See
+   * docs/plans/ai-strategy-genre-audit.md.
+   *
+   * Same one-action-per-tick contract as `_tryBuildUnit`/`_manageDefense`, so
+   * `_manageEconomy` can chain it the same way.
+   */
+  _tryUpgradeWeapons() {
+    // `weaponTier` is a count of tiers already bought, so this reads as "has
+    // this difficulty spent its allowance". It covers easy's cap of 0 without
+    // a separate early-out — `0 >= 0` refuses, and a difficulty that somehow
+    // omits the knob defaults to 0 and refuses too. An explicit `maxTier <= 0`
+    // guard was written here first and removed once a negative control showed
+    // it could never change an outcome.
+    const maxTier = this.economy.maxWeaponTier ?? 0;
+    if (this.team.weaponTier >= maxTier) return false;
+
+    for (const s of this.ctx.structures.instances) {
+      if (s.teamId !== this.team.id || s.mode !== 'idle') continue;
+      const cmd = commandsFor(s, this.ctx).find((c) => c.id === 'upgrade-weapons');
+      // `enabledResult` covers affordability and the catalog's own max tier;
+      // the reserve below is this commander's own, stricter, question.
+      if (cmd?.enabledResult !== true) continue;
+
+      const cost = WEAPON_TIERS[this.team.weaponTier]?.cost;
+      if (cost == null) return false;
+      if (this.team.credits < cost + UPGRADE_RESERVE) return false;
+
+      cmd.execute(s, this.ctx);
+      return true;
+    }
+    return false;
+  }
+
   // ---- army: arm what it builds, and send it at something it can see ----
 
   // How often the army's target (attack-target scan, or fallback advance
@@ -534,9 +688,10 @@ export class AiCommander {
   static ARMY_TARGET_INTERVAL = 1.5;
 
   _manageArmy(dt) {
-    const army = this.ctx.vehicles.instances.filter(
-      (v) => v.teamId === this.team.id && !v.dead && v.def.tags?.includes('combat') && v.def.id !== 'scout-buggy'
-    );
+    // Same predicate the build budget uses — this filter used to spell the
+    // scout exclusion out by id here while `_tryBuildUnit` spelled the
+    // opposite answer out there. See isArmyUnit.
+    const army = this._ownArmyUnits();
     if (army.length === 0) {
       this.posture = 'economy';
       return;
