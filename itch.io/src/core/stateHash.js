@@ -49,7 +49,7 @@ function byId(a, b) {
  *   never be compared against one from a different point in time.
  * @returns {string} `"<tick>:<hex>"`
  */
-export function hashState({ vehicles, structures, game, projectiles, bounties, blooms }, tick) {
+export function hashState({ vehicles, structures, game, projectiles, bounties, blooms, harvesterAI }, tick) {
   const parts = [`t${tick}`];
 
   const vs = vehicles.instances.filter((v) => !v.dead).sort(byId);
@@ -82,6 +82,28 @@ export function hashState({ vehicles, structures, game, projectiles, bounties, b
       if (!f.blockedByTeam || f.blockedByTeam.size === 0) continue;
       const teams = [...f.blockedByTeam].sort((a, b) => a - b);
       parts.push(`bf${f.id},${teams.join('.')}`);
+    }
+  }
+
+  // Contested ground (harvesterAI's team-shared danger zones). Hashed for
+  // exactly the reason blocked fields above are: this decides where a team's
+  // harvesters go, so two clients disagreeing about a zone route their
+  // economies apart within seconds — long before the divergence would surface
+  // in the positions and credits that are hashed downstream of it.
+  //
+  // Teams are sorted, and zones within a team are sorted by their own
+  // coordinates, because Map iteration is insertion order: two clients that
+  // recorded the same two ambushes in a different sequence hold identical
+  // state in a different order, and must still hash the same.
+  if (harvesterAI?.dangerZones) {
+    const teamIds = [...harvesterAI.dangerZones.keys()].sort((a, b) => a - b);
+    for (const teamId of teamIds) {
+      const zones = harvesterAI.dangerZones.get(teamId) ?? [];
+      if (!zones.length) continue;
+      const sorted = zones
+        .map((z) => `${q(z.x)}.${q(z.z)}.${q(z.radius)}.${q(z.until)}`)
+        .sort();
+      parts.push(`dz${teamId},${sorted.join('|')}`);
     }
   }
 

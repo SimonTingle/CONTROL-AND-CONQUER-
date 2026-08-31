@@ -55,7 +55,15 @@ export async function build() {
   }
 
   await app.register(cors, {
-    origin: config.corsOrigin,
+    origin: (origin, callback) => {
+      // If no origin header, allow it (same-origin requests don't send one).
+      // If the origin is in the allow-list, allow it. Otherwise reject.
+      if (!origin || config.corsOrigin.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('CORS policy violation'));
+      }
+    },
     // The session cookie only travels on credentialed requests, which in turn
     // require a named origin rather than '*' (see config.corsOrigin).
     credentials: true,
