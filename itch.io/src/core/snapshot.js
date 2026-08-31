@@ -195,7 +195,18 @@ function serializeTeam(team) {
     weaponTier: team.weaponTier,
     defeated: team.defeated,
     reachedRelocateThreshold: team.reachedRelocateThreshold,
-    stats: { ...team.stats },
+    // Nested values copied explicitly, not left to the spread. Every field
+    // here was a flat number until the Statistics screen added a map and a
+    // list, and a shallow spread would hand the caller a live reference into
+    // the running team — a snapshot that keeps changing after it was taken.
+    // Today's callers all stringify immediately so nothing is broken, but
+    // `view.snapshot()` hands this object out raw, and that is not a property
+    // worth depending on.
+    stats: {
+      ...team.stats,
+      killsByDefId: { ...team.stats.killsByDefId },
+      deadHarvesterEarnings: [...team.stats.deadHarvesterEarnings],
+    },
     // The per-team explored mask: the one genuinely irreproducible bulk value
     // in a save, since it records where this team has actually driven.
     fog: team.fog ? bytesToBase64(team.fog.data) : null,
@@ -326,6 +337,10 @@ function serializeAiCommanders(ctx) {
       // a commander back to searching a ring it has already proven is no good.
       exploreRadius: round(c.exploreRadius, 2),
       baseRelocateAttempts: c.baseRelocateAttempts,
+      // Also latched: the enemy bases this commander has already discovered.
+      // Its opportunistic strike fires at most once per team, ever, so losing
+      // this on load hands every already-found base a second free run at it.
+      foundEnemyBaseTeamIds: [...c._foundEnemyBase],
     });
     // `armyTarget` is deliberately not saved: it is a live entity reference
     // that _manageArmy re-picks on its own interval anyway.
@@ -567,6 +582,7 @@ export function deserialize(ctx, snap) {
       c.baseOrderElapsed = saved.baseOrderElapsed ?? 0;
       if (saved.exploreRadius != null) c.exploreRadius = saved.exploreRadius;
       if (saved.baseRelocateAttempts != null) c.baseRelocateAttempts = saved.baseRelocateAttempts;
+      c._foundEnemyBase = new Set(saved.foundEnemyBaseTeamIds ?? []);
     }
   }
 
