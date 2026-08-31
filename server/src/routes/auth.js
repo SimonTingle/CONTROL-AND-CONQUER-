@@ -16,6 +16,7 @@ import {
   revokeSession,
   sessionCookieOptions,
 } from '../auth/sessions.js';
+import { bearerToken } from '../auth/credentials.js';
 import { createPasswordReset, userForResetToken, consumePasswordReset } from '../auth/passwordResets.js';
 import { sendEmail, passwordResetEmail } from '../email/resend.js';
 import { config } from '../config.js';
@@ -89,7 +90,7 @@ export async function authRoutes(app) {
 
     const session = await createSession(user.id);
     reply.setCookie(SESSION_COOKIE, session.token, sessionCookieOptions());
-    return reply.code(201).send({ user: publicUser(user) });
+    return reply.code(201).send({ user: publicUser(user), sessionToken: session.token });
   });
 
   app.post('/auth/login', { config: authLimit }, async (req, reply) => {
@@ -128,11 +129,14 @@ export async function authRoutes(app) {
 
     const session = await createSession(user.id);
     reply.setCookie(SESSION_COOKIE, session.token, sessionCookieOptions());
-    return reply.send({ user: publicUser(user) });
+    return reply.send({ user: publicUser(user), sessionToken: session.token });
   });
 
-  app.post('/auth/logout', { onRequest: app.csrfProtection }, async (req, reply) => {
-    await revokeSession(req.cookies[SESSION_COOKIE]);
+  app.post('/auth/logout', { onRequest: app.csrfUnlessBearer }, async (req, reply) => {
+    // Revoke whichever token actually carried this session. A bearer client
+    // has no cookie to read here, and revoking nothing would leave its token
+    // live until it expired — "log out" that does not log you out.
+    await revokeSession(req.cookies[SESSION_COOKIE] ?? bearerToken(req));
     // Clear with the same attributes it was set with, or the browser keeps
     // the original cookie and "logout" only appears to work.
     reply.clearCookie(SESSION_COOKIE, sessionCookieOptions());
@@ -201,7 +205,7 @@ export async function authRoutes(app) {
     password: z.string().min(12).max(200),
   });
 
-  app.post('/auth/reset-password', { config: authLimit, onRequest: app.csrfProtection }, async (req, reply) => {
+  app.post('/auth/reset-password', { config: authLimit, onRequest: app.csrfUnlessBearer }, async (req, reply) => {
     const parsed = resetPasswordBody.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send({

@@ -57,6 +57,7 @@
 
 
 import { userForToken, SESSION_COOKIE } from '../auth/sessions.js';
+import { subprotocolToken } from '../auth/credentials.js';
 import { query } from '../db/pool.js';
 /**
  * The room rules live in their own module so they can be imported without a
@@ -156,11 +157,18 @@ async function handleMatchSocket(socket, req) {
     return;
   }
 
-  // `onRequest` already resolved the session cookie for this upgrade, but fall
-  // back to reading it directly so this does not silently depend on plugin
+  // `onRequest` already resolved the session for this upgrade, but fall back to
+  // reading the credential directly so this does not silently depend on plugin
   // ordering — an unauthenticated socket is the one failure worth being loud
   // about.
-  const user = req.user ?? (await userForToken(req.cookies?.[SESSION_COOKIE]));
+  //
+  // The browser WebSocket API cannot set an Authorization header, so a
+  // cross-site client (see auth/credentials.js) passes its token as
+  // the second WebSocket subprotocol instead: `['ptg-bearer', <token>]`. That
+  // is deliberately not a query parameter — Fastify logs `req.url` on every
+  // request, and a session token in an access log is a credential at rest.
+  const user =
+    req.user ?? (await userForToken(req.cookies?.[SESSION_COOKIE] ?? subprotocolToken(req)));
   if (!user) {
     send(socket, { t: 'error', error: 'authentication_required' });
     socket.close(4001, 'authentication required');

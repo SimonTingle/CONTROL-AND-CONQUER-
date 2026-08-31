@@ -28,7 +28,7 @@ export async function saveRoutes(app) {
   const auth = { onRequest: app.requireAuth };
   // State-changing routes also need the CSRF check — a cookie-authenticated
   // POST/DELETE is exactly what CSRF forges, a GET is not.
-  const authWrite = { onRequest: [app.requireAuth, app.csrfProtection] };
+  const authWrite = { onRequest: [app.requireAuth, app.csrfUnlessBearer] };
 
   /** Slot list, without payloads — a save browser doesn't need megabytes to draw a list. */
   app.get('/saves', auth, async (req) => {
