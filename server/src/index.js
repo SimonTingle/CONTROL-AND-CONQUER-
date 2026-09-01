@@ -19,7 +19,7 @@ import authPlugin from './auth/plugin.js';
 import { authRoutes } from './routes/auth.js';
 import { saveRoutes } from './routes/saves.js';
 import websocket from '@fastify/websocket';
-import { matchRoutes } from './routes/matches.js';
+import { matchRoutes, abandonOrphanedMatches } from './routes/matches.js';
 import { matchSocket } from './ws/match.js';
 
 /**
@@ -183,6 +183,13 @@ async function start() {
   // never briefly serve requests against an old schema. The advisory lock in
   // the runner makes this safe with several replicas starting at once.
   await migrate({ log: app.log });
+
+  // Every `open`/`running` match row from before this boot is orphaned —
+  // matchRoom.js's `rooms` map is in-memory and this process just started
+  // with an empty one. See abandonOrphanedMatches's own header for why this
+  // matters: left alone, /matches/mine keeps returning a match like this
+  // forever, permanently hijacking that account's lobby.
+  await abandonOrphanedMatches({ log: app.log });
 
   // Logged before listen so it is the line right above "Server listening at",
   // where anyone reading a deploy log to answer "what is actually running?"
