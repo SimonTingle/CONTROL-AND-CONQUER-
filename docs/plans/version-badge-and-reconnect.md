@@ -149,6 +149,35 @@ decide which turn to resume at — stale, it would resume at the wrong one.
   machine in `matchClient.js`, and argued from the log evidence — not proven
   against the real failure mode.
 
+## Follow-up: instance count checked, one more retry-code gap closed
+
+The user checked CapRover directly: `control-conquer-api`'s **Instance
+Count is 1**. That rules out the multi-replica hypothesis above outright —
+`matchRoom.js`'s in-memory, per-process room state was never split across
+processes for these matches. It is not the cause of the observed `1006`
+closures.
+
+While checking, a fresh production log (single-account reconnect flow, no
+new `1006` case) surfaced `[match] reaping <user> from <matchId>: silent for
+15150ms` — `matchRoom.js`'s `reapSilent`, which drops a socket after
+`DROP_AFTER_MS` (15s) of silence via an explicit `socket.close(4008, 'timed
+out')`. That code was missing from `matchClient.js`'s `TERMINAL_CLOSE_CODES`
+(`4001, 4003, 4009, 4010` — no `4008`), so a legitimately-timed-out player
+would have been retried by this change's own reconnect logic instead of
+being told plainly they timed out. Fixed: `4008` added to the set, with a
+negative control (reverted, confirmed
+`tests/match-client-reconnect.test.mjs`'s server-codes test fails for `4008`
+specifically, for the right reason; restored, confirmed passing again).
+This is a real gap closed, not a fix for the `1006` mystery — `reapSilent`
+closes with an explicit `4008`, never `1006`, so it was never the mechanism
+behind the original two-account reports either.
+
+The `1006` root cause is still open. With multi-replica ruled out, the
+remaining concrete things worth checking on the CapRover side are the same
+two named above: "Websocket Support" actually enabled on the app's HTTP
+settings, and any reverse-proxy read/idle timeout under roughly the
+observed 2–20 second window.
+
 ## Honest limits
 
 - **This does not fix the root cause.** If it is a load-balancer routing two
