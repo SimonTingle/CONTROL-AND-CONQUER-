@@ -30,6 +30,21 @@ COPY . .
 # (e.g. testing the offline path, or a different environment's own server).
 ARG VITE_API_URL="https://control-conquer-api.apps.simontingle.com"
 ENV VITE_API_URL=$VITE_API_URL
+
+# The commit this build came from, for vite.config.js's version stamp.
+#
+# node:20-alpine has no git, so `git rev-parse` inside the build always fails
+# and every deployed bundle used to stamp itself 'unknown' — see the
+# `/bin/sh: git: not found` line in any CapRover build log. CapRover injects
+# CAPROVER_GIT_COMMIT_SHA on every build (no UI field needed, which matters
+# here: the GitHub-deploy method has none), so passing it through is what makes
+# the browser console line name a real commit.
+#
+# Unlike the API image, there is nothing to protect from cache invalidation by
+# placing this later: `COPY . .` above already busts on any repo change.
+ARG CAPROVER_GIT_COMMIT_SHA=""
+ENV CAPROVER_GIT_COMMIT_SHA=$CAPROVER_GIT_COMMIT_SHA
+
 RUN npm run build
 
 FROM nginx:1.27-alpine

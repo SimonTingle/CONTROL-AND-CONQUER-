@@ -32,6 +32,21 @@ RUN npm install --omit=dev
 
 COPY src ./src
 
+# The commit this image was built from, surfaced at boot and on /health.
+#
+# CapRover injects CAPROVER_GIT_COMMIT_SHA as a build arg automatically on
+# every build — including the GitHub-deploy method, which has no UI field for
+# custom build args — so this needs no configuration to work. Before it was
+# consumed, CapRover's own build log said as much:
+#   [Warning] One or more build-args [CAPROVER_GIT_COMMIT_SHA ...] were not consumed
+#
+# Declared *after* `COPY src ./src` on purpose. An ARG/ENV whose value changes
+# every commit invalidates every layer below it, so putting this higher would
+# re-run `npm install` (and its argon2 source build) on every single deploy.
+# Nothing below this line is expensive.
+ARG CAPROVER_GIT_COMMIT_SHA=unknown
+ENV GIT_COMMIT_SHA=$CAPROVER_GIT_COMMIT_SHA
+
 ENV NODE_ENV=production
 ENV PORT=3000
 EXPOSE 3000

@@ -15,7 +15,16 @@ function commitHash() {
     return execSync('git rev-parse --short HEAD').toString().trim() +
       (execSync('git status --porcelain').toString().trim() ? '-dirty' : '');
   } catch {
-    return 'unknown'; // no git available (e.g. a source tarball) — fail soft, not the whole build
+    // No git binary. This is not the rare case it reads as: it is *every
+    // production build*. The Docker image is node:20-alpine, which ships no
+    // git, so CapRover's build log prints `/bin/sh: git: not found` and every
+    // deployed build stamped itself 'unknown' — the one situation the stamp
+    // exists for, and the one where it said nothing.
+    //
+    // CapRover injects CAPROVER_GIT_COMMIT_SHA on every build; the Dockerfile
+    // passes it through. Falling back to it means the deployed game can
+    // finally answer "which commit is this?" from the browser console.
+    return process.env.CAPROVER_GIT_COMMIT_SHA?.trim() || 'unknown';
   }
 }
 
