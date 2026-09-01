@@ -22,6 +22,24 @@ import websocket from '@fastify/websocket';
 import { matchRoutes } from './routes/matches.js';
 import { matchSocket } from './ws/match.js';
 
+/**
+ * The git commit this image was built from, reported at boot and on /health.
+ *
+ * This exists because "is the fix actually deployed?" was, twice, a question
+ * that could only be answered by reading a stack trace's line number against
+ * `git show`. A CSRF fix sat merged on main while production kept serving the
+ * commit before it — the deploy had rebuilt from a stale ref, and nothing the
+ * running server said could have revealed that.
+ *
+ * CapRover already passes CAPROVER_GIT_COMMIT_SHA as a build arg on every
+ * build (its own build logs list it under "build-args ... were not consumed").
+ * server/Dockerfile now consumes it into GIT_COMMIT_SHA. Unset — a plain
+ * `node src/index.js`, or a `docker build` without the arg — reports
+ * 'unknown' rather than failing: knowing the version is a diagnostic, never a
+ * precondition for serving.
+ */
+const COMMIT_SHA = process.env.GIT_COMMIT_SHA || 'unknown';
+
 export async function build() {
   const app = Fastify({
     logger: {
@@ -114,7 +132,7 @@ export async function build() {
    * you turn a 10-second outage into a restart loop. Readiness below is where
    * dependency checks belong.
    */
-  app.get('/health', async () => ({ status: 'ok' }));
+  app.get('/health', async () => ({ status: 'ok', commit: COMMIT_SHA }));
 
   /** Readiness: can this instance actually serve requests that need data? */
   app.get('/health/ready', async (req, reply) => {
@@ -165,6 +183,11 @@ async function start() {
   // never briefly serve requests against an old schema. The advisory lock in
   // the runner makes this safe with several replicas starting at once.
   await migrate({ log: app.log });
+
+  // Logged before listen so it is the line right above "Server listening at",
+  // where anyone reading a deploy log to answer "what is actually running?"
+  // is already looking.
+  app.log.info(`[version] commit ${COMMIT_SHA}`);
 
   await app.listen({ port: config.port, host: config.host });
 }
