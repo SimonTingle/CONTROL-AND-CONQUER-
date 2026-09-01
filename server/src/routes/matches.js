@@ -57,7 +57,7 @@ async function hostLoadout(userId) {
 
 const createBody = z.object({
   name: z.string().trim().min(1).max(64),
-  maxPlayers: z.number().int().min(2).max(4).default(2),
+  maxPlayers: z.number().int().min(2).max(20).default(2),
   aiCount: z.number().int().min(0).max(3).default(0),
   difficultyId: z.string().max(32).default('normal'),
   // Optional so a client can pin a seed for testing; otherwise the server

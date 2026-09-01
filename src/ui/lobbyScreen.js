@@ -34,6 +34,14 @@ export class LobbyScreen {
     /** The match we are sitting in, if any. */
     this.current = null;
     /**
+     * How many player seats the *next* match this client creates should
+     * have. Lives here, not read fresh from a form each time, because the
+     * selector persists across a `refresh()` re-render (the poll loop
+     * rebuilds `renderBrowser` every `POLL_MS`, which would otherwise reset
+     * a half-made choice back to the default on every tick).
+     */
+    this.newMatchMaxPlayers = 2;
+    /**
      * Has `onStart` already fired for the match we are sitting in?
      *
      * Two independent races can otherwise fire it twice: the host's own click
@@ -225,8 +233,42 @@ export class LobbyScreen {
     }
     this.panel.appendChild(grid);
 
+    this.panel.appendChild(this.createPlayerCountField());
     this.panel.appendChild(this.button('Create match', () => this.create(), { primary: true }));
     this.panel.appendChild(this.button('Back', () => { this.hide(); this.onBack(); }));
+  }
+
+  /**
+   * How many seats the next match this client creates should have —
+   * matches `createBody`'s `maxPlayers` bound on the server
+   * (server/src/routes/matches.js), 2 to 20.
+   */
+  createPlayerCountField() {
+    const row = document.createElement('div');
+    row.className = 'control control-slider lobby-player-count';
+
+    const label = document.createElement('label');
+    const readout = document.createElement('span');
+    readout.className = 'readout';
+    const setReadout = (n) => { readout.textContent = `${n} players`; };
+    setReadout(this.newMatchMaxPlayers);
+    label.textContent = 'New match size';
+    label.appendChild(readout);
+    row.appendChild(label);
+
+    const input = document.createElement('input');
+    input.type = 'range';
+    input.min = 2;
+    input.max = 20;
+    input.step = 1;
+    input.value = this.newMatchMaxPlayers;
+    input.addEventListener('input', () => {
+      this.newMatchMaxPlayers = parseInt(input.value, 10);
+      setReadout(this.newMatchMaxPlayers);
+    });
+    row.appendChild(input);
+
+    return row;
   }
 
   renderRoom(match, players) {
@@ -271,7 +313,7 @@ export class LobbyScreen {
     try {
       const match = await this.api.createMatch({
         name: 'Skirmish',
-        maxPlayers: 2,
+        maxPlayers: this.newMatchMaxPlayers,
         aiCount: 0,
         difficultyId: 'normal',
       });
