@@ -97,11 +97,18 @@ export function versionMismatchMessage({ serverVersion, clientVersion }) {
  * Close codes this client must never retry behind: each is the server (or
  * this client itself, mirroring the server's own code back) deliberately
  * ending the connection for a reason a reconnect cannot fix.
- *   4001 authentication_required, 4003 not_a_member, 4009 replaced by a new
- *   connection (this exact client reconnecting elsewhere), 4010 protocol
- *   version mismatch.
+ *   4001 authentication_required, 4003 not_a_member, 4008 timed out
+ *   (matchRoom.js's reapSilent — this socket was silent past DROP_AFTER_MS),
+ *   4009 replaced by a new connection (this exact client reconnecting
+ *   elsewhere), 4010 protocol version mismatch.
+ *
+ * Belt-and-suspenders alongside the `wasClean` check below: every one of
+ * these is an explicit `socket.close(code, reason)` from the server, which
+ * should already report `wasClean: true`, but this list is what actually
+ * decides "never retry" rather than trusting a browser's `wasClean` in every
+ * case.
  */
-const TERMINAL_CLOSE_CODES = new Set([4001, 4003, 4009, 4010]);
+const TERMINAL_CLOSE_CODES = new Set([4001, 4003, 4008, 4009, 4010]);
 
 /** How many times to retry an abnormal mid-match close before giving up. */
 const RECONNECT_ATTEMPTS = 3;

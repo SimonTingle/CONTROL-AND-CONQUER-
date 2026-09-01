@@ -151,8 +151,8 @@ test('a clean close (1000) is never retried', async () => {
   client.close();
 });
 
-test('the server\'s own deliberate codes (4001/4003/4009/4010) are never retried', async () => {
-  for (const code of [4001, 4003, 4009, 4010]) {
+test('the server\'s own deliberate codes (4001/4003/4008/4009/4010) are never retried', async () => {
+  for (const code of [4001, 4003, 4008, 4009, 4010]) {
     const sockets = installFakeWebSocket();
     const closes = [];
     const client = new MatchClient('m1', { onClose: (ev) => closes.push(ev) });
