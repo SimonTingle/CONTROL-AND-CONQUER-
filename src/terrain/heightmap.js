@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { SimplexNoise } from './noise.js';
+import { heightmapLinearFilterSupported } from '../core/deviceTier.js';
 
 export const DEFAULT_TERRAIN = {
   seed: 20260727,
@@ -23,6 +24,29 @@ export const DEFAULT_TERRAIN = {
  * at (x, z)?" without touching the GPU, and exposes the same data as a
  * DataTexture so the vertex shader can displace geometry from the identical
  * source. One field, two consumers — CPU and GPU can never disagree.
+ *
+ * ## Why the texture is half-float
+ *
+ * They *did* disagree, totally, on an iPad Air 2: the island never appeared and
+ * units deployed hovering over open water. This texture was `FloatType` (R32F)
+ * with LINEAR filtering, and R32F is only linear-filterable with
+ * `OES_texture_float_linear`. On a GPU without that extension the texture is
+ * incomplete, every sample returns 0, and `terrainMaterial.js` — which reads it
+ * in the *vertex* stage — flattened the terrain to y = 0, beneath the water
+ * plane, while `heightAt()` below went on reporting the true 48.5m of ground
+ * that nothing was drawing. three.js only warns about this and then sets the
+ * LINEAR filter regardless.
+ *
+ * `HalfFloatType` (R16F) is linear-filterable in **WebGL2 core**, no extension.
+ * Its 11-bit mantissa quantises the normalised [0,1] field to ~1/2048, which at
+ * `amplitude: 90` is ~4cm — two orders of magnitude below the 2m vertex spacing
+ * of a 513² grid over 1024 world units, so the displaced surface is unchanged.
+ * `this.data` stays Float32Array, so gameplay, pathing and determinism are
+ * untouched: only the GPU's copy is quantised.
+ *
+ * The filter still degrades to NEAREST if even half-float linear is missing —
+ * a faceted island rather than no island. The failure mode should never again
+ * be a blank sea.
  */
 export class Heightmap {
   constructor(params = {}) {
@@ -94,14 +118,45 @@ export class Heightmap {
     this.max = max;
 
     if (this.texture) this.texture.dispose();
-    this.texture = new THREE.DataTexture(data, n, n, THREE.RedFormat, THREE.FloatType);
-    this.texture.magFilter = THREE.LinearFilter;
-    this.texture.minFilter = THREE.LinearFilter;
+    // Half-float, not float — see the class header. `texelData` is a separate
+    // array from `this.data` because a half-float texture cannot share the
+    // Float32Array; `syncTexture` is what keeps the two in step, and every
+    // in-place editor of `data` (terraform, craters) must call it.
+    this.texelData = new Uint16Array(n * n);
+    this.texture = new THREE.DataTexture(this.texelData, n, n, THREE.RedFormat, THREE.HalfFloatType);
+    const filter = heightmapLinearFilterSupported() ? THREE.LinearFilter : THREE.NearestFilter;
+    this.texture.magFilter = filter;
+    this.texture.minFilter = filter;
     this.texture.wrapS = THREE.ClampToEdgeWrapping;
     this.texture.wrapT = THREE.ClampToEdgeWrapping;
-    this.texture.needsUpdate = true;
+    this.syncTexture();
 
     return this;
+  }
+
+  /**
+   * Re-encode `data` into the texture's half-float mirror and flag an upload.
+   *
+   * Callers that edit `this.data` in place used to just set
+   * `texture.needsUpdate = true`, which worked only because the texture wrapped
+   * the very same Float32Array. It no longer does, so that shortcut would
+   * silently upload stale ground — exactly the CPU/GPU divergence this whole
+   * change exists to remove. Bounds are inclusive and optional; they limit the
+   * conversion work, not the upload, since a DataTexture re-uploads whole.
+   */
+  syncTexture(i0 = 0, j0 = 0, i1 = this.params.resolution - 1, j1 = this.params.resolution - 1) {
+    const n = this.params.resolution;
+    const lo = Math.max(0, Math.min(n - 1, i0));
+    const hi = Math.max(0, Math.min(n - 1, i1));
+    const top = Math.max(0, Math.min(n - 1, j0));
+    const bottom = Math.max(0, Math.min(n - 1, j1));
+    for (let j = top; j <= bottom; j++) {
+      const row = j * n;
+      for (let i = lo; i <= hi; i++) {
+        this.texelData[row + i] = THREE.DataUtils.toHalfFloat(this.data[row + i]);
+      }
+    }
+    if (this.texture) this.texture.needsUpdate = true;
   }
 
   /** Normalised height [0,1] at world position, bilinearly filtered. */

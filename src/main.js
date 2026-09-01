@@ -68,6 +68,7 @@ import { PerfHud } from './core/perfHud.js';
 import { TickProfiler } from './core/tickProfiler.js';
 import { AutoQuality } from './core/autoQuality.js';
 import { IS_MOBILE } from './core/platform.js';
+import { initDeviceTier } from './core/deviceTier.js';
 import { showToast } from './ui/toast.js';
 
 // __APP_VERSION__/__BUILD_TIME__ are literal strings substituted at build
@@ -88,22 +89,37 @@ console.log(`[Procedural Terrain] IS_MOBILE=${IS_MOBILE}`);
 
 const canvas = document.getElementById('viewport');
 
+// What this GPU can actually do, asked once before the renderer exists — the
+// renderer needs `antialias` at construction, so it cannot be the context we
+// probe. See deviceTier.js: this began as the fix for an iPad Air 2 that drew
+// no island at all, and the tier it returns is a *starting point* that
+// autoQuality then adapts from, never a ceiling and never an override of a
+// choice the player has made (they cannot have made one yet).
+const device = initDeviceTier();
+console.log(
+  `[Procedural Terrain] device tier=${device.tier} ` +
+    `webgl2=${device.caps.webgl2} floatLinear=${device.caps.floatLinear} ` +
+    `maxTexture=${device.caps.maxTextureSize} cores=${device.caps.hardwareConcurrency} ` +
+    `memGB=${device.caps.deviceMemory}`,
+);
+
 // docs/performance-optimization-plan.md Phase 1 — mobile was measured at
 // ~10fps; DPR alone compounds every fragment cost paid downstream (shadows,
 // terrain shader), so it's the highest-leverage single setting here. MSAA
 // (antialias) is comparatively expensive on mobile tile-based GPUs too, cut
 // alongside it rather than left to fight the lower resolution for the same
-// visual-quality budget.
+// visual-quality budget. Both are now the tier's call rather than a bare
+// IS_MOBILE split, so a 2014 tablet and an M4 iPad Pro no longer start alike.
 const renderer = new THREE.WebGLRenderer({
   canvas,
-  antialias: !IS_MOBILE,
+  antialias: device.settings.antialias,
   powerPreference: 'high-performance',
 });
 // Captured so autoQuality has something to restore to after dropping to 1 under
 // load. On a Retina Mac this is 2, i.e. 4x the fragments of DPR 1 — measured at
 // 4.4ms vs 1.65ms, which makes it the biggest single GPU lever left once the
 // headlight-pool fix removed the spotlight blowup.
-const BASE_PIXEL_RATIO = Math.min(window.devicePixelRatio, IS_MOBILE ? 1 : 2);
+const BASE_PIXEL_RATIO = Math.min(window.devicePixelRatio, device.settings.pixelRatioCap);
 // userForced: set if the player ever picks a render resolution themselves, after
 // which autoQuality stops touching it. Mirrors shadowQuality.userForced below.
 const renderQuality = { userForced: false };
@@ -163,7 +179,11 @@ const { heightmap } = world;
 // High by default on every platform, mobile included — unlike antialiasing and pixel ratio
 // just above, this one isn't a per-frame cost that scales with resolution, so there's no
 // mobile-specific reason to start it lower than desktop.
-const shadowQuality = { high: true, userForced: false };
+// Starts from the device tier rather than unconditionally high: a GPU old
+// enough to fail the capability probe should not begin at 2048² PCF soft
+// shadows and be walked back down over several bad seconds. userForced stays
+// false — the tier is not a player choice and must never masquerade as one.
+const shadowQuality = { high: device.settings.shadowHigh, userForced: false };
 function applyShadowQuality(high) {
   shadowQuality.high = high;
   renderer.shadowMap.type = high ? THREE.PCFSoftShadowMap : THREE.BasicShadowMap;
@@ -205,8 +225,12 @@ function applyShadowQuality(high) {
   });
 }
 applyShadowQuality(shadowQuality.high);
+// Reported on screen for the same reason the IS_MOBILE log exists: a real
+// device can tell us what it detected without devtools attached.
 perfHud.setDeviceLine(
-  `mobile=${IS_MOBILE} aa=${!IS_MOBILE} px=${renderer.getPixelRatio()} shadows=${shadowQuality.high ? 'soft/2048' : 'basic/1024'}`
+  `tier=${device.tier} mobile=${IS_MOBILE} aa=${device.settings.antialias} ` +
+    `px=${renderer.getPixelRatio()} shadows=${shadowQuality.high ? 'soft/2048' : 'basic/1024'} ` +
+    `floatLinear=${device.caps.floatLinear}`
 );
 
 camera.position.set(240, heightmap.params.amplitude * 1.5, 320);

@@ -9,6 +9,13 @@ const MIN_PITCH = 0.06; // just above ground level
 const MAX_PITCH = 1.35; // just short of straight overhead
 const MIN_DISTANCE = 8;
 const MAX_DISTANCE = 160;
+/**
+ * Where the camera starts. Raised from 26 at the player's request: 26 put the
+ * viewport close enough that the surrounding ground — and, on a first deploy,
+ * whether there is any ground at all — was off screen. The zoom range either
+ * side is unchanged; only the starting point moves.
+ */
+const DEFAULT_DISTANCE = 40;
 
 /**
  * Third-person chase camera: always above and behind the vehicle.
@@ -23,7 +30,7 @@ export class ChaseCamera {
     this.camera = camera;
     this.heightmap = heightmap;
 
-    this.distance = opts.distance ?? 26;
+    this.distance = opts.distance ?? DEFAULT_DISTANCE;
     // Height is expressed as a pitch angle rather than a fixed offset, so
     // dragging the mouse vertically has a single value to drive and the framing
     // stays sane at any zoom level.

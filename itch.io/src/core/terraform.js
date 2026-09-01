@@ -2,9 +2,8 @@
  * Runtime terrain edits — currently one thing: flattening a construction pad
  * under a deploying base station.
  *
- * This works because the heightmap's DataTexture wraps its Float32Array *by
- * reference*: writing into `heightmap.data` and flagging `needsUpdate` re-uploads
- * the field, and because the terrain shader derives its normals analytically
+ * This works because the heightmap is one field with two consumers: writing into
+ * `heightmap.data` and calling `syncTexture` re-uploads it, and because the terrain shader derives its normals analytically
  * from that same texture — and shares the displacement with the depth material —
  * the new shape gets correct shading and shadows with no extra work. Every CPU
  * consumer (wheel grounding, the grade probe, picking, camera clamps) reads the
@@ -80,7 +79,7 @@ export class Terraform {
         hm.data[j * res + i] = from + (pad.targetN - from) * spatial * eased;
       }
     }
-    hm.texture.needsUpdate = true;
+    hm.syncTexture(i0, j0, i1, j1);
 
     if (pad.complete) {
       // The same world-changed-shape housekeeping _updateJob does on
@@ -270,7 +269,7 @@ export class Terraform {
         hm.data[j * res + i] = from + (pad.targetN - from) * spatial * eased;
       }
     }
-    hm.texture.needsUpdate = true;
+    hm.syncTexture(i0, j0, i1, j1);
     // The pour effect is a single set of shader uniforms, so only one pad can
     // animate it. Give it to the player's — an AI pad flattening on the far
     // side of the island is usually fogged anyway, and the heightfield edit

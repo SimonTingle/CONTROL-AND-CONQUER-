@@ -2,9 +2,8 @@
  * Craters — permanent terrain damage where a shell hit the ground.
  *
  * This works exactly the way `terraform.js`'s construction pads work, and for
- * exactly the same reason: the heightmap's DataTexture wraps its Float32Array
- * *by reference*, so writing into `heightmap.data` and flagging `needsUpdate`
- * re-uploads the field, and because the terrain shader derives its normals
+ * exactly the same reason: the heightmap is one field with two consumers, so
+ * writing into `heightmap.data` and calling `syncTexture` re-uploads it, and because the terrain shader derives its normals
  * analytically from that same texture — and shares the displacement with the
  * depth material — a fresh crater gets correct shading and correct shadows
  * with no extra work. Every CPU consumer (wheel grounding, line of sight,
@@ -188,7 +187,7 @@ export class Craters {
         hm.data[idx] = Math.max(floorN, hm.data[idx] - depthN * bowl);
       }
     }
-    hm.texture.needsUpdate = true;
+    hm.syncTexture(i0, j0, i1, j1);
   }
 
   /** Terrain regenerated or a new match started: these describe ground that is gone. */

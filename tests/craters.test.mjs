@@ -27,6 +27,15 @@ function makeWorld() {
     params,
     data,
     texture: { needsUpdate: false },
+    // The real Heightmap's GPU copy is a separate half-float array (see
+    // heightmap.js), so an editor that writes `data` must call this to upload
+    // it. Counted rather than stubbed away so a missed call is a test failure
+    // and not a silently stale island.
+    syncCalls: 0,
+    syncTexture() {
+      this.syncCalls++;
+      this.texture.needsUpdate = true;
+    },
     terrainVersion: 0,
     heightAt(x, z) {
       // Nearest-sample read, matching how a real Heightmap answers this for
@@ -86,6 +95,11 @@ test('dig lowers the centre and leaves distant ground untouched', () => {
 
   const far = w.heightmap.heightAt(90, 90);
   assert.ok(Math.abs(far - before) < 1e-6, 'ground far from the impact is untouched');
+
+  // The GPU's copy of the field is no longer the same array as `data`, so a dig
+  // that edits the ground without syncing would leave the terrain drawn as it
+  // was before the shell landed.
+  assert.ok(w.heightmap.syncCalls > 0, 'digging must push the edit to the texture');
 });
 
 test('a crater never digs below the sea-level margin', () => {
