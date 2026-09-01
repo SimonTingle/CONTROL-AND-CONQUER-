@@ -52,13 +52,24 @@ export class Menu {
    *   depends on state that changes at runtime — signing in and out rewrites
    *   the Account row's text, which refreshValues() cannot do because it only
    *   re-reads getters into existing widgets.
+   * @param {object} [opts]
+   * @param {() => boolean} [opts.isMatchActive] whether an online match is
+   *   currently live — gates whether "Close current game" appears at all.
+   *   Checked fresh every time the chooser renders, not cached, so the item
+   *   appears the moment a match starts and disappears the moment it ends.
+   * @param {() => void} [opts.onCloseGame] end the current online match and
+   *   return to the lobby. Not this file's business to know how — it just
+   *   calls whatever main.js hands it, the same way every other schema
+   *   control's `action`/`onClick` does.
    */
-  constructor(schema, statsScreen = null) {
+  constructor(schema, statsScreen = null, { isMatchActive, onCloseGame } = {}) {
     this.buildSchema = typeof schema === 'function' ? schema : () => schema;
     // The Statistics page. Owned elsewhere because its content is a live table,
     // not a list of tunables — the schema/createControl pipeline below has no
     // vocabulary for that, and bending it into one would serve neither.
     this.statsScreen = statsScreen;
+    this.isMatchActive = isMatchActive;
+    this.onCloseGame = onCloseGame;
     this.toggleButton = document.getElementById('menu-toggle');
     this.panel = document.getElementById('panel');
     this.body = document.getElementById('panel-body');
@@ -146,6 +157,17 @@ export class Menu {
       item('Statistics', 'How this match is going', () => this.showStatistics()),
       item('World Settings', 'Terrain, atmosphere, camera', () => this.showSettings())
     );
+
+    // Only while an online match is actually live — nothing to close in
+    // sandbox or vs-AI, and this is specifically the way out of the
+    // orphaned-match trap: end this match on the server too (not just
+    // locally) so it can't come back and hijack the next lobby visit — see
+    // docs/plans/orphaned-match-hijack.md.
+    if (this.isMatchActive?.()) {
+      this.body.append(
+        item('Close current game', 'End this match and return to the lobby', () => this.onCloseGame?.())
+      );
+    }
   }
 
   showSettings() {
