@@ -89,6 +89,45 @@ function toMatch(r) {
   };
 }
 
+/**
+ * Mark every `open`/`running` match as `abandoned` at boot.
+ *
+ * `matchRoom.js`'s `rooms` map is purely in-memory (its own header says so)
+ * and starts empty on every process start. So the instant this runs, there
+ * is categorically no live room behind any match still `open` or `running`
+ * from before this boot — a restart (a deploy, a crash) is the only way to
+ * reach this code path, and a restart is exactly what wipes `rooms`.
+ *
+ * Found from a real production report: two accounts each went straight into
+ * a match instead of the lobby, and turned out to be two *different*
+ * matches — one a fresh one waiting for a second player, the other a match
+ * from an earlier test session, `status='running'` since a deploy days
+ * earlier, still turn 283 in the room the client rebuilt on reconnect but
+ * frozen at `status='running'` in the DB forever, because nothing ever
+ * moved it out of that state once the process that ran it was gone.
+ * `/matches/mine` (its own header explains why it exists) then returned
+ * that stale row on every subsequent lobby visit, permanently hijacking
+ * that account away from ever reaching the lobby normally again.
+ *
+ * Scoped to a single instance on purpose: with more than one API process
+ * live at once, a restarting replica would wrongly abandon a match another
+ * replica is still actively running. `matchRoom.js`'s own in-memory,
+ * per-process design already documents that this app is not safe to run
+ * with more than one instance for exactly this kind of reason — see
+ * CLAUDE.md and docs/plans/version-badge-and-reconnect.md.
+ */
+export async function abandonOrphanedMatches({ log } = {}) {
+  const { rows } = await query(
+    `update matches set status = 'abandoned'
+      where status in ('open', 'running')
+      returning id`
+  );
+  if (rows.length) {
+    log?.info(`[matches] abandoned ${rows.length} orphaned match(es) from before this boot`);
+  }
+  return rows.length;
+}
+
 export async function matchRoutes(app) {
   const auth = { onRequest: app.requireAuth };
   // State-changing routes also need the CSRF check — a cookie-authenticated
