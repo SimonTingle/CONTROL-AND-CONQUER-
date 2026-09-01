@@ -48,9 +48,25 @@ async function authPlugin(app) {
    * clients this exists for — the `_csrf` secret is itself a cookie, and so is
    * dropped by exactly the browsers that dropped the session cookie.
    */
-  app.decorate('csrfUnlessBearer', async (req, reply) => {
-    if (req.authViaBearer) return;
-    return app.csrfProtection(req, reply);
+  // Deliberately callback-style — `(req, reply, done)`, not `async (req,
+  // reply)` — because `app.csrfProtection` (from @fastify/csrf-protection) is
+  // itself callback-style: on success it calls `next()`, but on failure it
+  // calls `reply.send(err)` directly and returns *without* calling `next` at
+  // all. Wrapping this in a promise that resolves only when `next` fires
+  // would hang forever on that failure path. Forwarding Fastify's own `done`
+  // straight through handles both: `next === done` on success, and the
+  // request lifecycle short-circuits on `reply.send()` exactly as it does for
+  // any other hook that sends a reply and returns.
+  //
+  // This replaced a broken `async (req, reply) => app.csrfProtection(req,
+  // reply)`, which called `csrfProtection` with no third argument at all —
+  // `next()` inside it then threw `TypeError: next is not a function` on
+  // every request that reached it: every state-changing route for a
+  // cookie-authenticated (i.e. non-itch.io) session — create/join/start
+  // match, logout, password reset, saves.
+  app.decorate('csrfUnlessBearer', (req, reply, done) => {
+    if (req.authViaBearer) return done();
+    app.csrfProtection(req, reply, done);
   });
 }
 
