@@ -2039,6 +2039,30 @@ function endOnlineMatch(reason) {
 }
 
 /**
+ * The player deliberately chose "Leave match" — as opposed to every other
+ * `endOnlineMatch` call site, which fires on a disconnect or an unrecoverable
+ * desync the player did not ask for and may well want to rejoin (their reason
+ * strings say so: "please rejoin", "Disconnected from the match").
+ *
+ * Only this path tells the server. Without it, `match_players` still held the
+ * row and `matches.status` was still `'running'` after clicking Leave, so
+ * `/matches/mine` (the fix for "no way back into a running match") would have
+ * handed the player straight back into the exact match they had just left.
+ * Best-effort and fire-and-forget, matching `LobbyScreen.leave()`'s own
+ * `try { await this.api.leaveMatch(id); } catch {}` — a failed leave call
+ * must not block getting out of the match locally.
+ */
+async function leaveOnlineMatchDeliberately() {
+  // Awaited, and ordered before endOnlineMatch's location.reload(): a reload
+  // cancels any request still in flight, so firing this after — or racing it
+  // against — the reload risks losing it exactly the same way not sending it
+  // at all would.
+  const id = match?.matchId;
+  if (id) await api.leaveMatch(id).catch(() => {});
+  endOnlineMatch(null);
+}
+
+/**
  * Record who is holding which seat, for the Statistics screen.
  *
  * Fed from all three places the server describes the roster — `welcome` on
@@ -2229,6 +2253,9 @@ async function startOnlineMatch(matchId, difficulty) {
   match = {
     client,
     session,
+    // Kept for endOnlineMatch(), which needs it to tell the server this
+    // player actually left rather than merely closing the socket.
+    matchId,
     isHost: welcome.isHost,
     userId: welcome.userId,
     expectedPlayers: welcome.expectedPlayers,
@@ -2542,6 +2569,7 @@ game.signOut = async () => {
 
 game.lobbyScreen = new LobbyScreen({
   api,
+  getAccount: () => game.account,
   // The lobby hands back a match id once it is running; from here the world is
   // built entirely from the seed on that match row.
   onStart: (matchId) => {
@@ -3034,7 +3062,7 @@ function renderTick(dt) {
           `Still waiting for ${waiting.expected - waiting.present} of ` +
             `${waiting.expected} players to connect.`,
           0,
-          { label: 'Leave match', onClick: () => endOnlineMatch(null) }
+          { label: 'Leave match', onClick: () => leaveOnlineMatchDeliberately() }
         );
       } else if (match.begun && matchStallSeconds >= MID_MATCH_STALL_ESCALATE_S) {
         // The match itself pauses on an absent or lagging peer for as long as
@@ -3046,7 +3074,7 @@ function renderTick(dt) {
         showToast(
           'Still waiting for the other player — the match is paused, not frozen.',
           0,
-          { label: 'Leave match', onClick: () => endOnlineMatch(null) }
+          { label: 'Leave match', onClick: () => leaveOnlineMatchDeliberately() }
         );
       } else {
         showToast(

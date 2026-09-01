@@ -205,6 +205,9 @@ export const api = {
   // (net/matchClient.js); these only get a player in and out of a lobby.
   listMatches: () => request('/matches').then((r) => r.matches),
   getMatch: (id) => request(`/matches/${id}`),
+  // The caller's own open-or-running match, if any — how a client finds its
+  // way back after a reload. `{ match: null }` when there isn't one.
+  getMyMatch: () => request('/matches/mine'),
   createMatch: (body) => request('/matches', { method: 'POST', body }).then((r) => r.match),
   // No body: the server assigns the team, so there is nothing for a client to
   // ask for. Re-joining returns the seat already held rather than erroring.
