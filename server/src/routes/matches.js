@@ -109,6 +109,60 @@ export async function matchRoutes(app) {
     return { matches: rows.map(toMatch) };
   });
 
+  /**
+   * The caller's own not-yet-over match, if any — what lets a client find its
+   * way back after a reload.
+   *
+   * `GET /matches` above only lists `status = 'open'`, on purpose — a running
+   * match should not appear as something a stranger can join. That is correct
+   * for *browsing*, but it left nothing else in its place: a match's id lives
+   * only in the browser's in-page JS state (`LobbyScreen.current`), which a
+   * reload, crash, or closed tab wipes. Once that happened — to the host or a
+   * guest, at any point in a match, including mid-game — there was no path
+   * back into it *for anyone*: the host included. The match itself was fine;
+   * every socket it had would just sit disconnected until `DROP_AFTER_MS`
+   * reaped them, at which point the roster-quorum design (deliberately, see
+   * `ws/match.js`) stalls it forever rather than shrinking to run without the
+   * missing seat. Confirmed directly: reload a connected host's tab mid-match
+   * and the guest's `[tick-rate]` log goes straight to `STALLED` and stays
+   * there, with no route back for either side.
+   *
+   * Scoped to `status in ('open', 'running')` — a match this user is still
+   * actually part of, not history. Ordered so a genuine stray double match
+   * (should not happen, but nothing enforces one-active-match-per-user at the
+   * DB level) resolves to the most recent rather than an arbitrary row.
+   */
+  app.get('/matches/mine', auth, async (req) => {
+    const { rows } = await query(
+      `select m.*, u.display_name as host_name,
+              (select count(*) from match_players p where p.match_id = m.id) as player_count
+         from matches m
+         join match_players mp on mp.match_id = m.id and mp.user_id = $1
+         join users u on u.id = m.host_user_id
+        where m.status in ('open', 'running')
+        order by m.created_at desc
+        limit 1`,
+      [req.user.id]
+    );
+    if (!rows.length) return { match: null };
+
+    const players = await query(
+      `select p.user_id, p.team_id, u.display_name
+         from match_players p join users u on u.id = p.user_id
+        where p.match_id = $1
+        order by p.team_id`,
+      [rows[0].id]
+    );
+    return {
+      match: toMatch(rows[0]),
+      players: players.rows.map((p) => ({
+        userId: p.user_id,
+        teamId: p.team_id,
+        displayName: p.display_name,
+      })),
+    };
+  });
+
   /** One match, with its roster — what the lobby screen polls while waiting. */
   app.get('/matches/:id', auth, async (req, reply) => {
     if (!uuid.safeParse(req.params.id).success) {

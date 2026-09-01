@@ -19,11 +19,16 @@ export class LobbyScreen {
    * @param {object} opts.api the shared API client.
    * @param {(matchId: string) => void} opts.onStart the match is starting; join it.
    * @param {() => void} opts.onBack return to the portal.
+   * @param {() => object|null} [opts.getAccount] the signed-in user, so a
+   *   rejoined match can tell whether this client is its host. Optional so
+   *   existing test/embedding call sites without an account concept still
+   *   work — a rejoin then just never claims host status.
    */
-  constructor({ api, onStart, onBack }) {
+  constructor({ api, onStart, onBack, getAccount }) {
     this.api = api;
     this.onStart = onStart;
     this.onBack = onBack;
+    this.getAccount = getAccount;
     this.open = false;
     this.timer = null;
     /** The match we are sitting in, if any. */
@@ -55,8 +60,50 @@ export class LobbyScreen {
     this.open = true;
     this.entered = false;
     this.root.classList.remove('hidden');
-    this.renderBrowser();
+    this.checkForOwnMatch();
     this.startPolling();
+  }
+
+  /**
+   * Look for a match this player is already part of before falling back to
+   * the open-lobby browse list.
+   *
+   * `GET /matches` (behind `renderBrowser`) only ever lists `status = 'open'`
+   * — correct for browsing, since a running match should not look joinable to
+   * a stranger — but that left nothing else in its place. A match's id lived
+   * only in this screen's own `current` field, which a page reload wipes.
+   * Once that happened, mid-match, to *either* player, there was no path back
+   * in for anyone — confirmed directly: reload a connected host's tab during a
+   * live match and the guest's session stalls (by design, see `ws/match.js`'s
+   * roster quorum) with nowhere to go. `/matches/mine` is what this reads.
+   *
+   * A network failure here must not block the lobby from opening at all —
+   * this is a recovery path layered on top of the ordinary browse flow, not a
+   * dependency of it.
+   */
+  async checkForOwnMatch() {
+    let mine;
+    try {
+      mine = await this.api.getMyMatch();
+    } catch {
+      mine = null;
+    }
+    // The screen may have been closed, or this exact rejoin already completed
+    // via the poll loop, while the request was in flight.
+    if (!this.open || this.entered) return;
+    if (mine?.match) {
+      this.current = mine.match;
+      this.isHost = mine.match.hostUserId === this.getAccount?.()?.id;
+      if (mine.match.status === 'running') {
+        this.entered = true;
+        this.hide();
+        this.onStart(mine.match.id);
+        return;
+      }
+      this.renderRoom(mine.match, mine.players);
+      return;
+    }
+    this.renderBrowser();
   }
 
   hide() {
