@@ -70,6 +70,7 @@ import { AutoQuality } from './core/autoQuality.js';
 import { IS_MOBILE } from './core/platform.js';
 import { initDeviceTier } from './core/deviceTier.js';
 import { showToast } from './ui/toast.js';
+import { mountVersionBadge } from './ui/versionBadge.js';
 
 // __APP_VERSION__/__BUILD_TIME__ are literal strings substituted at build
 // time by vite.config.js's `define` — not runtime values, so they describe
@@ -79,6 +80,14 @@ import { showToast } from './ui/toast.js';
 // stamped onto `game` (once it exists, see `beginMatch`'s neighbourhood)
 // for console access without scrolling back through the log.
 console.log(`[Procedural Terrain] ${__APP_VERSION__} · built ${__BUILD_TIME__}`);
+
+// On screen too, not just the console — a phone has no console. Reported
+// directly by a real two-device multiplayer session: confirming both players
+// were even on the same build took reading CapRover deploy logs, when it
+// should take one glance at either screen. Mounted unconditionally, before
+// anything else that could fail, for the same "answerable even from a broken
+// load" reason the console line above is logged first.
+mountVersionBadge();
 
 // Phase 1 verification gap: this environment's browser tooling has no real
 // touch/pointer CDP emulation, so IS_MOBILE can never actually read true
@@ -2106,6 +2115,16 @@ async function startOnlineMatch(matchId, difficulty) {
   game.playerNames = {};
   const { match: info } = await api.getMatch(matchId);
   const client = new MatchClient(matchId, {
+    // Fires on every welcome, not just the first — including the one a
+    // reconnect gets (see matchClient.js's bounded reconnect on an abnormal
+    // close). `match` doesn't exist yet for the very first welcome (this
+    // constructor call is still awaiting `client.connect()` below), so this
+    // is a no-op then; on a later reconnect it keeps `releasedTurn` current
+    // for `onBegin`'s `resuming` branch just below, which reads it to decide
+    // where to resume — stale, it would resume at the wrong turn.
+    onWelcome: (msg) => {
+      if (match) match.releasedTurn = msg.releasedTurn ?? -1;
+    },
     // The server holds every client at the gate until the roster is complete;
     // reporting input before that is what used to deadlock the match.
     onBegin: (msg) => {

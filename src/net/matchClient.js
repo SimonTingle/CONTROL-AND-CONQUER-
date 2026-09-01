@@ -93,6 +93,21 @@ export function versionMismatchMessage({ serverVersion, clientVersion }) {
   );
 }
 
+/**
+ * Close codes this client must never retry behind: each is the server (or
+ * this client itself, mirroring the server's own code back) deliberately
+ * ending the connection for a reason a reconnect cannot fix.
+ *   4001 authentication_required, 4003 not_a_member, 4009 replaced by a new
+ *   connection (this exact client reconnecting elsewhere), 4010 protocol
+ *   version mismatch.
+ */
+const TERMINAL_CLOSE_CODES = new Set([4001, 4003, 4009, 4010]);
+
+/** How many times to retry an abnormal mid-match close before giving up. */
+const RECONNECT_ATTEMPTS = 3;
+/** Backoff base — attempt N waits N times this, so 1s/2s/3s. */
+const RECONNECT_BASE_DELAY_MS = 1000;
+
 export class MatchClient {
   /**
    * @param {string} matchId
@@ -109,143 +124,218 @@ export class MatchClient {
     this.heartbeat = null;
     /** Diagnostic only: last time a 'pong' was actually received back. */
     this.lastPongAt = null;
+    /** Set once `connect()`'s first welcome/error/close has settled it. */
+    this._connectSettle = null;
+    /**
+     * True once any welcome has ever landed. Reconnection only makes sense
+     * past this point — a close before it is a handshake failure (server
+     * down, upgrade not forwarded), which `connect()`'s own rejection already
+     * reports; retrying that silently would just repeat it.
+     */
+    this._everConnected = false;
+    this._reconnectAttempt = 0;
+    this._reconnectTimer = null;
   }
 
   connect() {
     return new Promise((resolve, reject) => {
-      let settled = false;
-      const ws = new WebSocket(socketUrl(this.matchId), socketProtocols());
-      this.socket = ws;
+      this._connectSettle = { resolve, reject, settled: false };
+      this._openSocket();
+    });
+  }
 
-      ws.addEventListener('open', () => {
-        this.connected = true;
-        // Liveness has to be independent of the simulation. The server drops a
-        // client that has gone quiet, and a client's input is its only other
-        // traffic — so a client that is *stalled waiting for a peer* sends
-        // nothing and looks identical to one that crashed. Without this, any
-        // genuine stall would end with the server reaping both players, which
-        // is precisely the situation lockstep is supposed to survive.
-        this.heartbeat = setInterval(() => this._send({ t: 'ping', at: Date.now() }), 5000);
-      });
+  /**
+   * Open one WebSocket and wire it up. Split out of `connect()` so a mid-match
+   * reconnect (see `_handleClose`) can call it again on a fresh socket without
+   * re-running `connect()`'s promise machinery — `_connectSettle` stays
+   * pointed at the *original* call, already resolved by then.
+   */
+  _openSocket() {
+    const ws = new WebSocket(socketUrl(this.matchId), socketProtocols());
+    this.socket = ws;
 
-      ws.addEventListener('message', (ev) => {
-        let msg;
-        try {
-          msg = JSON.parse(ev.data);
-        } catch {
-          return; // a malformed frame is the server's problem, not a crash here
+    ws.addEventListener('open', () => {
+      this.connected = true;
+      // Liveness has to be independent of the simulation. The server drops a
+      // client that has gone quiet, and a client's input is its only other
+      // traffic — so a client that is *stalled waiting for a peer* sends
+      // nothing and looks identical to one that crashed. Without this, any
+      // genuine stall would end with the server reaping both players, which
+      // is precisely the situation lockstep is supposed to survive.
+      this.heartbeat = setInterval(() => this._send({ t: 'ping', at: Date.now() }), 5000);
+    });
+
+    ws.addEventListener('message', (ev) => this._handleMessage(ev));
+    ws.addEventListener('close', (ev) => this._handleClose(ev));
+    ws.addEventListener('error', () => this._handleError());
+  }
+
+  _handleMessage(ev) {
+    const ws = this.socket;
+    let msg;
+    try {
+      msg = JSON.parse(ev.data);
+    } catch {
+      return; // a malformed frame is the server's problem, not a crash here
+    }
+    const settle = this._connectSettle;
+    switch (msg.t) {
+      case 'welcome':
+        // A server that predates PROTOCOL_VERSION never rejects the query
+        // param this client sent (it doesn't know to look for one) and
+        // proceeds straight to a welcome with no `protocolVersion` field
+        // at all — `undefined !== 1` catches that case exactly like a
+        // numeric mismatch does. Caught here, before anything about the
+        // match is trusted, rather than desyncing on whatever wire shape
+        // the two builds disagree about.
+        if (msg.protocolVersion !== PROTOCOL_VERSION) {
+          const err = new Error(
+            versionMismatchMessage({ serverVersion: msg.protocolVersion, clientVersion: PROTOCOL_VERSION })
+          );
+          err.code = 'protocol_version_mismatch';
+          ws.close(4010, 'protocol version mismatch');
+          if (settle && !settle.settled) { settle.settled = true; settle.reject(err); }
+          return;
         }
-        switch (msg.t) {
-          case 'welcome':
-            // A server that predates PROTOCOL_VERSION never rejects the query
-            // param this client sent (it doesn't know to look for one) and
-            // proceeds straight to a welcome with no `protocolVersion` field
-            // at all — `undefined !== 1` catches that case exactly like a
-            // numeric mismatch does. Caught here, before anything about the
-            // match is trusted, rather than desyncing on whatever wire shape
-            // the two builds disagree about.
-            if (msg.protocolVersion !== PROTOCOL_VERSION) {
-              const err = new Error(
-                versionMismatchMessage({ serverVersion: msg.protocolVersion, clientVersion: PROTOCOL_VERSION })
-              );
-              err.code = 'protocol_version_mismatch';
-              ws.close(4010, 'protocol version mismatch');
-              if (!settled) { settled = true; reject(err); }
-              return;
-            }
-            this.info = msg;
-            this.handlers.onWelcome?.(msg);
-            if (!settled) { settled = true; resolve(msg); }
-            return;
-          case 'begin':
-            // The roster is complete. Until this lands the client must not
-            // report input — see the start barrier in server/src/ws/match.js.
-            // `resuming` marks the copy sent directly to a socket that joined
-            // an already-running match, which must resync rather than start
-            // simulating from turn 0.
-            return void this.handlers.onBegin?.(msg);
-          case 'waiting':
-            // The roster is still short and the wait has gone on long enough to
-            // be worth naming. Repeats every few seconds until it resolves.
-            return void this.handlers.onWaiting?.(msg);
-          case 'turn':
-            return void this.handlers.onTurn?.(msg.turn, msg.inputs);
-          case 'agreed':
-            // A positive verdict from a real comparison — distinct from the
-            // server merely not having complained.
-            return void this.handlers.onAgreed?.(msg);
-          case 'desync':
-            return void this.handlers.onDesync?.(msg);
-          case 'snapshot':
-            return void this.handlers.onSnapshot?.(msg);
-          case 'playerJoined':
-            return void this.handlers.onPlayerJoined?.(msg);
-          case 'playerLeft':
-            return void this.handlers.onPlayerLeft?.(msg);
-          case 'pong':
-            // Diagnostic only: confirms this socket's inbound leg is actually
-            // alive, not just the outbound ping that keeps the server's
-            // reaper from firing. A ping that keeps sending while no pong
-            // ever comes back is a half-open socket the server can't see.
-            this.lastPongAt = Date.now();
-            return;
-          case 'resyncNeeded':
-            // The host's own cue that some other player just rejoined stale or
-            // empty — the same signal a hash mismatch produces, on a different
-            // trigger. Handled identically: schedule a snapshot at a turn the
-            // host can promise to reach.
-            return void this.handlers.onResyncNeeded?.(msg);
-          case 'error':
-            // An error before the welcome means we never got in at all — reject
-            // rather than leave the caller waiting on a connection that failed.
-            // `protocol_version_mismatch` gets a message worth showing a
-            // player instead of the bare error code the others fall back to —
-            // the server rejected the query param before this client got far
-            // enough to have a `welcome` to compare against on its own.
-            if (!settled) {
-              settled = true;
-              reject(new Error(
-                msg.error === 'protocol_version_mismatch'
-                  ? versionMismatchMessage(msg)
-                  : msg.error
-              ));
-            }
-            // The full frame, not just the string — `turn_already_released`
-            // carries the turn that was rejected, and a handler needs it to
-            // tell "stale input, ignorable" from "this session can never
-            // rejoin the turn stream" (see onError in main.js).
-            return void this.handlers.onError?.(msg);
-          default:
-            return;
-        }
-      });
-
-      ws.addEventListener('close', (ev) => {
-        this.connected = false;
-        clearInterval(this.heartbeat);
-        this.heartbeat = null;
-        console.log(
-          `[matchClient] socket closed: code=${ev.code} reason=${ev.reason || '(none)'} ` +
-          `wasClean=${ev.wasClean} lastPongAt=${this.lastPongAt ?? '(never)'}`
-        );
-        if (!settled) { settled = true; reject(new Error(`socket closed: ${ev.code}`)); }
-        this.handlers.onClose?.(ev);
-      });
-
-      ws.addEventListener('error', () => {
-        // The browser deliberately does not expose the HTTP status of a failed
-        // handshake, so this is all we can ever know locally — say what it
-        // usually means rather than the bare "socket error" the event gives us.
-        console.log('[matchClient] socket error event fired');
-        if (!settled) {
-          settled = true;
-          reject(new Error(
-            'the server refused the WebSocket connection (it may be down, or a ' +
-            'proxy in front of it may not be forwarding WebSocket upgrades)'
+        this.info = msg;
+        this._everConnected = true;
+        this._reconnectAttempt = 0; // a fresh welcome means the reconnect, if any, worked
+        // Fires again on every reconnect, not just the first connection —
+        // `onWelcome` handlers must be safe to call more than once (see
+        // main.js's, which only refreshes `match.releasedTurn`).
+        this.handlers.onWelcome?.(msg);
+        if (settle && !settle.settled) { settle.settled = true; settle.resolve(msg); }
+        return;
+      case 'begin':
+        // The roster is complete. Until this lands the client must not
+        // report input — see the start barrier in server/src/ws/match.js.
+        // `resuming` marks the copy sent directly to a socket that joined
+        // an already-running match, which must resync rather than start
+        // simulating from turn 0 — the same frame a mid-match reconnect
+        // receives, which is what makes reconnecting resume play instead of
+        // just quietly re-opening a socket nothing then uses.
+        return void this.handlers.onBegin?.(msg);
+      case 'waiting':
+        // The roster is still short and the wait has gone on long enough to
+        // be worth naming. Repeats every few seconds until it resolves.
+        return void this.handlers.onWaiting?.(msg);
+      case 'turn':
+        return void this.handlers.onTurn?.(msg.turn, msg.inputs);
+      case 'agreed':
+        // A positive verdict from a real comparison — distinct from the
+        // server merely not having complained.
+        return void this.handlers.onAgreed?.(msg);
+      case 'desync':
+        return void this.handlers.onDesync?.(msg);
+      case 'snapshot':
+        return void this.handlers.onSnapshot?.(msg);
+      case 'playerJoined':
+        return void this.handlers.onPlayerJoined?.(msg);
+      case 'playerLeft':
+        return void this.handlers.onPlayerLeft?.(msg);
+      case 'pong':
+        // Diagnostic only: confirms this socket's inbound leg is actually
+        // alive, not just the outbound ping that keeps the server's
+        // reaper from firing. A ping that keeps sending while no pong
+        // ever comes back is a half-open socket the server can't see.
+        this.lastPongAt = Date.now();
+        return;
+      case 'resyncNeeded':
+        // The host's own cue that some other player just rejoined stale or
+        // empty — the same signal a hash mismatch produces, on a different
+        // trigger. Handled identically: schedule a snapshot at a turn the
+        // host can promise to reach.
+        return void this.handlers.onResyncNeeded?.(msg);
+      case 'error':
+        // An error before the welcome means we never got in at all — reject
+        // rather than leave the caller waiting on a connection that failed.
+        // `protocol_version_mismatch` gets a message worth showing a
+        // player instead of the bare error code the others fall back to —
+        // the server rejected the query param before this client got far
+        // enough to have a `welcome` to compare against on its own.
+        if (settle && !settle.settled) {
+          settle.settled = true;
+          settle.reject(new Error(
+            msg.error === 'protocol_version_mismatch'
+              ? versionMismatchMessage(msg)
+              : msg.error
           ));
         }
-      });
-    });
+        // The full frame, not just the string — `turn_already_released`
+        // carries the turn that was rejected, and a handler needs it to
+        // tell "stale input, ignorable" from "this session can never
+        // rejoin the turn stream" (see onError in main.js).
+        return void this.handlers.onError?.(msg);
+      default:
+        return;
+    }
+  }
+
+  _handleClose(ev) {
+    this.connected = false;
+    clearInterval(this.heartbeat);
+    this.heartbeat = null;
+    console.log(
+      `[matchClient] socket closed: code=${ev.code} reason=${ev.reason || '(none)'} ` +
+      `wasClean=${ev.wasClean} lastPongAt=${this.lastPongAt ?? '(never)'}`
+    );
+
+    const settle = this._connectSettle;
+    if (settle && !settle.settled) {
+      // The very first connection never got as far as a welcome — a
+      // handshake failure (wrong URL, server down, proxy not forwarding the
+      // upgrade), not a mid-match drop. Nothing about retrying silently would
+      // fix that; report it the way `connect()`'s caller already expects.
+      settle.settled = true;
+      settle.reject(new Error(`socket closed: ${ev.code}`));
+      return;
+    }
+
+    // Reported live in production: two real players' sockets, both already
+    // past `agreed`, closing with code 1006 (abnormal — no close frame, the
+    // connection itself was cut) within seconds of each other. That is
+    // exactly the shape of a transient network or proxy hiccup, and it used
+    // to be fatal instantly — `onClose` fired immediately and ended the
+    // match with no attempt to get back in. `wasClean`/`TERMINAL_CLOSE_CODES`
+    // are what keep this from retrying a close that was never going to
+    // resolve differently: the server's own deliberate codes, and a normal
+    // page-driven close (1000/1001, both "clean").
+    const retryable =
+      this._everConnected &&
+      !ev.wasClean &&
+      !TERMINAL_CLOSE_CODES.has(ev.code) &&
+      this._reconnectAttempt < RECONNECT_ATTEMPTS;
+
+    if (retryable) {
+      this._reconnectAttempt++;
+      const delay = RECONNECT_BASE_DELAY_MS * this._reconnectAttempt;
+      console.log(
+        `[matchClient] abnormal close (code=${ev.code}); reconnect attempt ` +
+        `${this._reconnectAttempt}/${RECONNECT_ATTEMPTS} in ${delay}ms`
+      );
+      this._reconnectTimer = setTimeout(() => this._openSocket(), delay);
+      return;
+    }
+
+    this.handlers.onClose?.(ev);
+  }
+
+  _handleError() {
+    // The browser deliberately does not expose the HTTP status of a failed
+    // handshake, so this is all we can ever know locally — say what it
+    // usually means rather than the bare "socket error" the event gives us.
+    console.log('[matchClient] socket error event fired');
+    const settle = this._connectSettle;
+    if (settle && !settle.settled) {
+      settle.settled = true;
+      settle.reject(new Error(
+        'the server refused the WebSocket connection (it may be down, or a ' +
+        'proxy in front of it may not be forwarding WebSocket upgrades)'
+      ));
+    }
+    // Past the first connection, `error` carries nothing `close` doesn't
+    // also fire — the retry/give-up decision lives entirely in
+    // `_handleClose`, which always follows.
   }
 
   _send(msg) {
@@ -270,6 +360,11 @@ export class MatchClient {
   }
 
   close() {
+    // Without this, a reconnect scheduled just before a deliberate close
+    // (the player quitting, `endOnlineMatch` reloading) would still fire —
+    // opening a brand new socket on a page already on its way out.
+    clearTimeout(this._reconnectTimer);
+    this._reconnectTimer = null;
     clearInterval(this.heartbeat);
     this.heartbeat = null;
     this.socket?.close();

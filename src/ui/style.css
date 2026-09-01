@@ -642,6 +642,33 @@ body.settings-open #hud { transform: translateX(calc(var(--panel-width) + 8px));
 
 #perf-hud.hidden { display: none; }
 
+/* ---- version badge — "am I on the latest build?" answerable by looking ---- */
+
+#version-badge {
+  position: fixed;
+  /* Below the hamburger, not beside it: #menu-toggle already owns the top-left
+     corner at 44px tall starting from the same inset, and this is meant to be
+     glanced at, not fought with for space. */
+  top: calc(16px + 44px + 8px + env(safe-area-inset-top));
+  left: calc(16px + env(safe-area-inset-left));
+  /* Above every overlay screen (#portal/#lobby/#match-end top out at 34, the
+     toast at 40) — the whole point is answering "which build is this" from
+     wherever the player currently is, including the very first landing
+     screen, not just in-game once #hud is showing. Below only #perf-hud (50),
+     an opt-in diagnostic overlay this would otherwise collide with in the
+     same corner if both are ever visible together. */
+  z-index: 45;
+  padding: 2px 6px;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 4px;
+  pointer-events: none;
+  user-select: none;
+}
+
 .hud-name {
   font-size: 12px;
   font-weight: 600;
