@@ -1261,8 +1261,27 @@ const BASE_ALERT_RADIUS = 70;
 
 const chatter = new Chatter({ onCaption: (line) => pushRadioLine(line) });
 
+/**
+ * The live match, or null in single player.
+ *
+ * Declared here, ahead of the "Online match session" section further down
+ * that documents and assigns it, specifically so `Menu`'s constructor —
+ * which calls `renderChooser()` synchronously, and that reads `isMatchActive`
+ * immediately — does not hit the temporal dead zone. A closure that merely
+ * *references* `match` is fine wherever it is defined; one that is actually
+ * *called* before this line has run is not.
+ */
+let match = null;
+
 const statisticsScreen = new StatisticsScreen({ game, vehicles, structures });
-const menu = new Menu(() => buildSchema(world, view, game), statisticsScreen);
+const menu = new Menu(() => buildSchema(world, view, game), statisticsScreen, {
+  // `match` (declared further down) is read lazily inside these closures, not
+  // at construction time — by the time either actually runs (the chooser
+  // opening, or a click), module init has long since finished and `match`
+  // holds whatever is currently true.
+  isMatchActive: () => !!match,
+  onCloseGame: () => leaveOnlineMatchDeliberately(),
+});
 
 const hud = new Hud();
 
@@ -2005,8 +2024,8 @@ const HASH_EVERY_TURNS = 10;
  */
 const RESYNC_LEAD_TURNS = 3;
 
-/** The live match, or null in single player. */
-let match = null;
+// `match` itself is declared earlier, alongside `chatter` — see its own
+// comment there for why.
 /** Seconds since the last "waiting…" notice, so a stall explains itself once a second. */
 let matchWaitTimer = 0;
 /**

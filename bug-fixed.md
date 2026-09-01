@@ -9,6 +9,32 @@ tuning/balance changes are not included unless they were fixing broken behavior.
 
 ## Online multiplayer
 
+- **MILESTONE: "when a secondary player connects, the first device is
+  disconnected" / two devices going straight into a match instead of the
+  lobby, appearing to be two separate games.** This was the original,
+  long-running report this whole section traces back to. The final root
+  cause turned out to be neither a disconnect nor a race condition:
+  `server/src/ws/matchRoom.js`'s `rooms` map is purely in-memory, so a
+  server restart (any deploy) silently ends a running match without ever
+  telling the database — the match's row stays `status = 'running'` forever.
+  `GET /matches/mine` (added earlier in this section to let a client find
+  its way back into a match after a reload) has no way to distinguish a
+  genuinely live match from one orphaned by a restart days earlier, so it
+  kept returning the same stale match to one account on every lobby visit —
+  and the lobby screen auto-redirects into whatever it returns, with no
+  lobby ever shown and no way to decline. The other device, meanwhile, was
+  creating and waiting in a real, fresh match the trapped account could
+  never reach. Confirmed from two live screenshots: two different seeds, one
+  a fresh match waiting for a second player, the other the actual stale
+  match (`93d78dd3...`) from earlier testing in this section, still
+  `running` at turn 283. Fixed with `abandonOrphanedMatches()`
+  (`server/src/routes/matches.js`), called once at server boot: every
+  `open`/`running` match is marked `abandoned`, which is safe
+  unconditionally since a freshly started process's `rooms` map is always
+  empty — there is categorically no live room any such row could still
+  correspond to. See `docs/plans/orphaned-match-hijack.md` for the full
+  investigation. **User-confirmed live in production: "it works."**
+
 - **After the fix below shipped, a follow-up redeploy showed the same match
   still split — this time each screen showed "waiting for the other player",
   then one client reached turn 14 (with 8 vehicles) while the other sat at
