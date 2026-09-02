@@ -71,6 +71,48 @@ test('with no sliceHalfWidth given (camera-based single-bearing callers), a full
   assert.equal(found.point.z, 0);
 });
 
+/** Uniformly dry, out to `radius` — no coastline for the sweep to react to. */
+function heightmapAllDry(radius) {
+  return {
+    params: { size: radius * 2 },
+    seaLevelY: SEA_LEVEL,
+    heightAt: () => LAND_HEIGHT,
+  };
+}
+
+test('findTeamSpawnPoints gives 20 players equally spaced spawn angles, not clustered', () => {
+  // A generous, obstacle-free map: every nudge candidate clears
+  // minSeparation on the very first try (nudge 0, dead centre of its slice),
+  // so every team lands exactly on its slice's own bearing with nothing to
+  // pull it off-centre — the plain "equal separation" case this exists for.
+  const RADIUS = 2000;
+  const heightmap = heightmapAllDry(RADIUS);
+  const count = 20;
+  const starts = findTeamSpawnPoints(heightmap, count, { minSeparation: 260 });
+
+  assert.equal(starts.length, count);
+
+  const expectedSlice = (Math.PI * 2) / count;
+  const angles = starts.map((s) => Math.atan2(s.point.z, s.point.x));
+  for (let i = 0; i < count; i++) {
+    const expected = i * expectedSlice;
+    // Angles wrap at +-pi; normalise the difference into (-pi, pi] before
+    // comparing so team 0 (angle ~0) and a team near +-pi don't look far
+    // apart when they are not.
+    let diff = angles[i] - expected;
+    diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+    assert.ok(Math.abs(diff) < 1e-6, `team ${i} at angle ${angles[i]}, expected ${expected}`);
+  }
+
+  // Equal angles at a shared radius means equal chord distance between every
+  // pair of angularly-adjacent teams — the actual "equal separation" a
+  // player sees on the ground, not just equal angles on paper.
+  const chordFor = (a, b) => Math.hypot(a.point.x - b.point.x, a.point.z - b.point.z);
+  const adjacentChords = starts.map((s, i) => chordFor(s, starts[(i + 1) % count]));
+  const [min, max] = [Math.min(...adjacentChords), Math.max(...adjacentChords)];
+  assert.ok(max - min < 1, `adjacent spacing should be uniform, got range [${min}, ${max}]`);
+});
+
 test('findTeamSpawnPoints keeps every team on dry land even when one nudge bearing is fully underwater', () => {
   // 4 teams -> slice = pi/2. Team 0's centre bearing is 0, wedge is narrower
   // than its own nudge range, so the degenerate case is real but recoverable

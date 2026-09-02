@@ -13,10 +13,23 @@
 /** The human is always team 0, so `teamId` sorts with the player first. */
 export const PLAYER_TEAM_ID = 0;
 
-const AI_NAMES = ['Crimson', 'Amber', 'Violet', 'Jade'];
+// 19 entries — enough for a full 20-player online match (`createTeams` is
+// called with `teamCount = totalTeams - 1`, one entry per non-human-team-0
+// seat) without wrapping back to a repeat. Below 20 players this still just
+// takes the first `aiCount` of each, unchanged from before.
+const AI_NAMES = [
+  'Crimson', 'Amber', 'Violet', 'Jade', 'Cobalt', 'Rust', 'Magenta', 'Olive',
+  'Slate', 'Coral', 'Indigo', 'Gold', 'Maroon', 'Lime', 'Plum', 'Sand',
+  'Azure', 'Rose', 'Umber',
+];
 // Deliberately far from the UI accent (a teal, --accent) so an owner tint can
-// never be mistaken for a selection highlight.
-const AI_COLORS = [0xd6455a, 0xd98c2b, 0x9457c9, 0x3fa66b];
+// never be mistaken for a selection highlight — and spread across the hue
+// wheel so 19 teams read as 19 distinct colors, not near-duplicates.
+const AI_COLORS = [
+  0xd6455a, 0xd98c2b, 0x9457c9, 0x3fa66b, 0x4a7fd9, 0xb5652e, 0xc2469a,
+  0x8a9a3a, 0x7d8ba1, 0xe0785a, 0x5c4fc4, 0xd9b23a, 0x8c3040, 0x6bb84a,
+  0xa15fc9, 0xc9a374, 0x3a8fc9, 0xd9678f, 0x9c6b3a,
+];
 const PLAYER_COLOR = 0x4fd1c5;
 
 /**
@@ -123,7 +136,9 @@ export class Team {
 /**
  * Build the team list for a match. Team 0 is always the human; the rest are AI.
  *
- * @param {number} aiCount 0 for sandbox, 1-4 for a Multiplayer AI match
+ * @param {number} aiCount 0 for sandbox, 1-4 for a Multiplayer AI match,
+ *   up to 19 for an online match's non-host seats (`beginMatch` sets
+ *   `game.aiMatch.teamCount` from the lobby's `maxPlayers + aiCount`).
  */
 export function createTeams(aiCount = 0) {
   const teams = [
