@@ -54,7 +54,8 @@ tuning/balance changes are not included unless they were fixing broken behavior.
   re-running against a real server reproduces the exact reported symptom
   (`status=running` after both sockets close), restored and confirmed
   passing again. Plus 3 new dependency-free-against-a-real-database tests
-  for the `leave` route's own gap.
+  for the `leave` route's own gap. **User-confirmed live: "good this
+  works."**
 
 - **MILESTONE: matches were hard-capped at 2 players, with no way for a
   host to ask for more and no way for a 3rd player to ever join** (a

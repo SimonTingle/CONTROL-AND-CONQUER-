@@ -240,6 +240,10 @@ export class MatchClient {
         return void this.handlers.onPlayerJoined?.(msg);
       case 'playerLeft':
         return void this.handlers.onPlayerLeft?.(msg);
+      case 'activeVehicle':
+        // Presence, not sim state — see server/src/ws/match.js's own case
+        // for why this rides outside the turn/lockstep system entirely.
+        return void this.handlers.onActiveVehicle?.(msg);
       case 'pong':
         // Diagnostic only: confirms this socket's inbound leg is actually
         // alive, not just the outbound ping that keeps the server's
@@ -364,6 +368,17 @@ export class MatchClient {
   /** Host only: hand a full snapshot to a client that has diverged. */
   sendSnapshot(toUserId, turn, payload) {
     this._send({ t: 'snapshot', toUserId, turn, payload });
+  }
+
+  /**
+   * Tell peers which vehicle this client is currently piloting, or `null`
+   * when nothing is (e.g. between deaths). Presence info for
+   * headlightPool.js's real-light candidate list, not sim state — see
+   * server/src/ws/match.js's `activeVehicle` case for why it never touches
+   * the turn/lockstep system.
+   */
+  sendActiveVehicle(vehicleId) {
+    this._send({ t: 'activeVehicle', vehicleId });
   }
 
   close() {

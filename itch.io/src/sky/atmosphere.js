@@ -150,6 +150,36 @@ export class Atmosphere {
     return this.update(0);
   }
 
+  /**
+   * Fast-forward the cycle by `simDt * elapsedTicks` seconds, without
+   * actually stepping through each tick.
+   *
+   * `update(dt)` is a pure accumulator (`phase += dt / periodSeconds`), which
+   * keeps two continuously-connected clients in lockstep automatically — both
+   * call it the same number of times, with the same `dt`, because it only
+   * ever runs from inside the deterministic sim tick. It does NOT help a
+   * client that reconnects mid-match: `startOnlineMatch` rebuilds the world
+   * (and a fresh `Atmosphere`, back at its fixed construction-time phase)
+   * regardless of how far into the match it's rejoining, and a rejoining
+   * client's `LockstepSession` resumes at the current turn rather than
+   * replaying every skipped one — so `update()` is simply never called for
+   * the ticks that happened before it reconnected. The result: everyone else
+   * has moved on to whatever time of day the match has actually reached, and
+   * the rejoiner is stuck at dawn (or whenever `initialPhase` starts).
+   *
+   * This closes that gap in one step, using the same formula `update()`
+   * applies incrementally: given how many ticks have already elapsed and
+   * this client's own fixed `simDt`, the phase they would have reached by
+   * ticking through all of them is computable directly. Safe to call
+   * unconditionally on every join, not just a rejoin — a fresh match has
+   * `elapsedTicks` at or near 0, so this is a no-op there.
+   */
+  seedFromElapsedTicks(elapsedTicks, simDt) {
+    const elapsedSeconds = Math.max(0, elapsedTicks) * simDt;
+    this.cycle.phase = (this.cycle.phase + elapsedSeconds / this.cycle.periodSeconds) % 1;
+    return this.update(0);
+  }
+
   /** Push the current params into the sky shader, lights and fog. */
   apply() {
     const p = this.params;

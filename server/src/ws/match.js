@@ -349,6 +349,18 @@ async function handleMatchSocket(socket, req) {
         if (target) send(target.socket, { t: 'snapshot', payload: msg.payload, turn: msg.turn });
         return;
       }
+      case 'activeVehicle': {
+        // Presence info, not sim state: which vehicle this team's player is
+        // currently piloting, so every other client can decide whether it's
+        // one of the few allowed to cast a real headlight (headlightPool.js).
+        // Relayed as-is, outside the turn/lockstep system entirely — unlike
+        // 'input', this never has to agree across clients or replay
+        // identically, so it doesn't need a turn number or release barrier.
+        const vehicleId = msg.vehicleId == null ? null : Number(msg.vehicleId);
+        if (msg.vehicleId != null && !Number.isFinite(vehicleId)) return;
+        broadcast(room, { t: 'activeVehicle', teamId, vehicleId }, user.id);
+        return;
+      }
       case 'ping':
         send(socket, { t: 'pong', at: msg.at });
         return;

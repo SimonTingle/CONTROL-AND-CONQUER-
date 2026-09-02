@@ -531,11 +531,30 @@ function checkBaseRepositioning() {
 }
 
 const vehicles = new VehicleController(world.scene);
-// The scene's only vehicle headlights — four, shared, re-parented to whoever the
-// player is driving. Vehicles used to carry their own; at 20 vehicles that was 80
-// spotlights and 705ms of a 710ms frame. See headlightPool.js.
+// The scene's only real vehicle headlights — a small fixed pool, shared and
+// re-parented to whichever few vehicles currently most deserve one. Vehicles
+// used to carry their own; at 20 vehicles that was 80 spotlights and 705ms of
+// a 710ms frame. See headlightPool.js.
 const headlightPool = new HeadlightPool(world.scene);
 window.__headlightPool = headlightPool; // console access, same convention as window.__tickProfiler
+
+/**
+ * Which vehicle each *other* team is currently piloting, teamId -> vehicleId
+ * (or no entry / null for "nothing"). Fed by `onActiveVehicle` in
+ * `startOnlineMatch`, fire-and-forget presence info relayed outside the
+ * lockstep turn system (see matchClient.js's `sendActiveVehicle` and
+ * server/src/ws/match.js's `activeVehicle` case for why). Empty outside an
+ * online match — every existing single-player/vs-AI path is unaffected,
+ * since the candidate list below always falls back to just `vehicles.active`
+ * when this map has nothing else in it.
+ *
+ * Never caches an instance reference, only an id — re-resolved from the live
+ * `vehicles.instances` array each frame, same reasoning as
+ * harvesterAI.js/aiCommander.js: the vehicle behind an id can die at any time.
+ */
+const remoteActiveVehicles = new Map();
+/** So a change in `vehicles.active` is only broadcast once, not every frame. */
+let lastSentActiveVehicleId = undefined;
 
 const terraform = new Terraform(world);
 // Permanent terrain damage. Simulation state — it changes ground height, and
@@ -2132,6 +2151,11 @@ async function startOnlineMatch(matchId, difficulty) {
   // wipe the names this match just learned. Seats are reassigned every match,
   // so a stale entry would put the previous opponent's name on a new player.
   game.playerNames = {};
+  // Same reasoning as game.playerNames just above: seats are reassigned
+  // every match, so a stale entry here would light up the wrong vehicle for
+  // a team that has since been reassigned to a different player.
+  remoteActiveVehicles.clear();
+  lastSentActiveVehicleId = undefined;
   const { match: info } = await api.getMatch(matchId);
   const client = new MatchClient(matchId, {
     // Fires on every welcome, not just the first — including the one a
@@ -2210,6 +2234,15 @@ async function startOnlineMatch(matchId, difficulty) {
           'waiting for them to reconnect.',
         4000
       );
+      // Their old seat's vehicle would otherwise keep a stale claim on the
+      // real-light pool until someone happens to overwrite it.
+      remoteActiveVehicles.delete(msg.teamId);
+    },
+    // Presence only (see remoteActiveVehicles' own comment) — never applied
+    // to sim state, never affects anything but which vehicles the local
+    // headlightPool candidate list considers.
+    onActiveVehicle: (msg) => {
+      remoteActiveVehicles.set(msg.teamId, msg.vehicleId);
     },
     onError: (msg) => {
       if (msg.error !== 'turn_already_released') return;
@@ -2274,6 +2307,14 @@ async function startOnlineMatch(matchId, difficulty) {
   // vehicles at coordinates that mean nothing on it (a base station left
   // hovering over the wrong ground is the classic tell).
   world.regenerate({ ...DEFAULT_TERRAIN, seed: welcome.seed });
+  // A fresh Atmosphere always starts at its fixed construction-time phase —
+  // fine for a client that has been ticking continuously since turn 0, but a
+  // rejoining client's session resumes at the current turn without ever
+  // simulating the ticks before it, so its sky would otherwise be stuck at
+  // dawn while everyone else has moved on. See Atmosphere.seedFromElapsedTicks
+  // for the full reasoning. `welcome.releasedTurn` is at or near 0 for a
+  // fresh join, so this is a no-op there.
+  world.atmosphere.seedFromElapsedTicks((welcome.releasedTurn ?? 0) * welcome.ticksPerTurn, SIM_DT);
   beginMatch(difficulty);
   // Human seats are the low team ids (join hands out the lowest free one), so
   // this split is the same on every client without needing to be communicated.
@@ -2926,12 +2967,44 @@ function simTick(dt) {
   p.time('vehicles', () => {
     const headlights = headlightsWanted();
     vehicles.update(dt, heightmap, headlights, camera);
+
+    // Tell peers when the locally-piloted vehicle changes — on change only,
+    // not every tick. `undefined` !== any real id or `null`, so the very
+    // first tick after a match starts always sends once, even if nothing is
+    // active yet.
+    if (match) {
+      const activeId = vehicles.active?.id ?? null;
+      if (activeId !== lastSentActiveVehicleId) {
+        lastSentActiveVehicleId = activeId;
+        match.client.sendActiveVehicle(activeId);
+      }
+    }
+
+    // Real-light candidates: this client's own driven vehicle, plus whatever
+    // every other team is reported to be driving (remoteActiveVehicles —
+    // empty outside an online match, so this is just `[vehicles.active]`
+    // everywhere else). Re-resolved by id each frame rather than cached,
+    // same reasoning as harvesterAI.js/aiCommander.js: the vehicle behind an
+    // id can die at any time.
+    const candidates = [];
+    if (vehicles.active) candidates.push(vehicles.active);
+    for (const vehicleId of remoteActiveVehicles.values()) {
+      if (vehicleId == null) continue;
+      const inst = vehicles.instances.find((v) => v.id === vehicleId && !v.dead);
+      if (inst && inst !== vehicles.active) candidates.push(inst);
+    }
+    // Only a vehicle whose own headlightsOn is true can usefully cast real
+    // light — one that doesn't want lights on right now would just show an
+    // idle, dark rig, wasting a slot another vehicle could use.
+    const lit = candidates.filter((inst) => inst.headlightsOn);
+    lit.sort((a, b) => camera.position.distanceToSquared(a.group.position)
+      - camera.position.distanceToSquared(b.group.position));
     // Called every frame rather than only on selection change: attach() is a
-    // no-op when the target is unchanged, and driving it from here means the
-    // pool also recovers on its own when the active vehicle is destroyed and
-    // the 2B handoff picks a replacement (or leaves none).
-    headlightPool.attach(vehicles.active);
-    headlightPool.update(headlights);
+    // no-op for any slot whose target is unchanged, and driving it from here
+    // means the pool also recovers on its own when a lit vehicle is
+    // destroyed or a closer candidate takes its slot.
+    headlightPool.attach(lit);
+    headlightPool.update();
     // Testing-only flood mode. Both calls are no-ops while it's off, so the
     // normal path pays nothing for it.
     headlightPool.setFlood(lighting.floodHeadlights);

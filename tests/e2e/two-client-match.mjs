@@ -103,7 +103,10 @@ async function makeUser(tag) {
  * was simply never called.
  */
 function connectClient(user, matchId) {
-  const seen = { begin: null, waiting: [], turns: [], welcome: null, resyncNeeded: [], snapshot: null };
+  const seen = {
+    begin: null, waiting: [], turns: [], welcome: null, resyncNeeded: [], snapshot: null,
+    activeVehicle: [],
+  };
   const ws = new WebSocket(`ws://127.0.0.1:3999/ws/match/${matchId}?protocolVersion=${PROTOCOL_VERSION}`, {
     headers: { cookie: user.cookie() },
   });
@@ -133,6 +136,8 @@ function connectClient(user, matchId) {
       seen.resyncNeeded.push(msg);
     } else if (msg.t === 'snapshot') {
       seen.snapshot = msg;
+    } else if (msg.t === 'activeVehicle') {
+      seen.activeVehicle.push(msg);
     }
   });
 
@@ -252,6 +257,28 @@ const tickA = turnA * a.session().ticksPerTurn + a.session().tickInTurn;
 const tickB = turnB * b.session().ticksPerTurn + b.session().tickInTurn;
 ok('neither client is ahead of the other in sim ticks',
    tickA === tickB, `tickA=${tickA} tickB=${tickB}`);
+
+// ---- 4B. headlight sync: which vehicle a peer is driving is relayed to
+//          everyone else, but not echoed back to the sender ----
+//
+// Reported alongside the time-of-day sync bug: only the locally-piloted
+// vehicle ever cast a real light, because no client had any way to know
+// *which* vehicle a remote peer was driving. `activeVehicle` (main.js's
+// sendActiveVehicle, server/src/ws/match.js's relay) is the fix — presence
+// info, deliberately outside the turn/lockstep system entirely, so this
+// checks it works over a real server rather than trusting the relay code
+// was correct by inspection alone.
+a.send({ t: 'activeVehicle', vehicleId: 42 });
+await sleep(200);
+ok('a peer\'s active-vehicle change reaches the other client',
+   b.seen.activeVehicle.at(-1)?.vehicleId === 42,
+   JSON.stringify(b.seen.activeVehicle));
+ok('the teamId is attached server-side from the roster, not trusted from the sender',
+   b.seen.activeVehicle.at(-1)?.teamId === 0, // host is always team 0
+   JSON.stringify(b.seen.activeVehicle));
+ok('the sender does not get its own activeVehicle message echoed back',
+   a.seen.activeVehicle.length === 0,
+   JSON.stringify(a.seen.activeVehicle));
 
 // ---- 5. b drops. a must PAUSE, not run ahead alone ----
 //
