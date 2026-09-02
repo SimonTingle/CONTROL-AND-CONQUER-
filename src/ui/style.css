@@ -1362,7 +1362,22 @@ body.settings-open #hud { transform: translateX(calc(var(--panel-width) + 8px));
 
 #auth-screen.hidden { opacity: 0; pointer-events: none; }
 
-.auth-panel { max-width: 380px; }
+.auth-panel { max-width: 380px; position: relative; }
+
+.auth-back {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.auth-back:hover { color: var(--accent); }
 
 .auth-form {
   display: flex;
