@@ -29,9 +29,13 @@ export const DIFFICULTIES = [
 export class DifficultyScreen {
   /**
    * @param {(difficulty: object) => void} onChoose called once, with the picked entry
+   * @param {() => void} [onBack] returns to the portal without choosing —
+   *   optional so existing test/embedding call sites without a portal to
+   *   return to still work.
    */
-  constructor(onChoose) {
+  constructor(onChoose, onBack) {
     this.onChoose = onChoose;
+    this.onBack = onBack;
     this.root = document.getElementById('difficulty');
     this.open = false;
     this.build();
@@ -85,6 +89,16 @@ export class DifficultyScreen {
     }
 
     panel.appendChild(grid);
+
+    // A discreet way out — clicking into this screen from the portal used to
+    // be a one-way door; a reload was the only way back.
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'portal-card portal-back';
+    back.textContent = '← Back';
+    back.addEventListener('click', () => this.back());
+    panel.appendChild(back);
+
     this.root.replaceChildren(panel);
   }
 
@@ -93,5 +107,12 @@ export class DifficultyScreen {
     this.open = false;
     this.root.classList.add('hidden');
     this.onChoose?.(difficulty);
+  }
+
+  back() {
+    if (!this.open) return;
+    this.open = false;
+    this.root.classList.add('hidden');
+    this.onBack?.();
   }
 }

@@ -39,6 +39,18 @@ export class AuthScreen {
     this.panel = document.createElement('div');
     this.panel.className = 'portal-panel auth-panel';
 
+    // A discreet way back to the portal without signing in — distinct from
+    // `skip` below ("Continue without an account"), which reads as a choice
+    // about the account itself, not as "I opened this by mistake." Matches
+    // the same "← Back" affordance difficultyScreen.js/aiDifficultyScreen.js
+    // now have, for the same reason: this used to be a one-way door.
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'auth-back';
+    back.textContent = '← Back';
+    back.addEventListener('click', () => this.close(null));
+    this.panel.appendChild(back);
+
     this.heading = document.createElement('h1');
     this.panel.appendChild(this.heading);
 

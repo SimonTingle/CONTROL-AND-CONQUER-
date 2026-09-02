@@ -2596,16 +2596,27 @@ function deployStartingForces() {
   });
 }
 
+/**
+ * Back out of a picker screen (difficulty, AI difficulty, sign-in, lobby)
+ * to the portal's own chooser — the one thing every one of those screens
+ * needs and previously had no way to do short of a full reload.
+ */
+function returnToPortal() {
+  game.portalScreen.buildGrid();
+  game.portalScreen.open = true;
+  game.portalScreen.root.classList.remove('hidden');
+}
+
 game.difficultyScreen = new DifficultyScreen((difficulty) => {
   game.mode = 'sandbox';
   beginMatch(difficulty);
-});
+}, returnToPortal);
 
 game.aiDifficultyScreen = new AiDifficultyScreen(({ difficulty, teamCount, buildDelaySeconds }) => {
   game.mode = 'multiplayer-ai';
   game.aiMatch = { teamCount, buildDelaySeconds };
   beginMatch(difficulty);
-});
+}, returnToPortal);
 
 game.matchEndScreen = new MatchEndScreen(() => {
   // Simplest honest "play again": a full reload puts every system back to a
@@ -2656,16 +2667,10 @@ game.lobbyScreen = new LobbyScreen({
       .catch((err) => {
         console.error('could not join match', err);
         showToast(`Could not join the match: ${err.message}`, 6000);
-        game.portalScreen.buildGrid();
-        game.portalScreen.open = true;
-        game.portalScreen.root.classList.remove('hidden');
+        returnToPortal();
       });
   },
-  onBack: () => {
-    game.portalScreen.buildGrid();
-    game.portalScreen.open = true;
-    game.portalScreen.root.classList.remove('hidden');
-  },
+  onBack: returnToPortal,
 });
 
 game.portalScreen = new PortalScreen(
