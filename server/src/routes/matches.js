@@ -341,7 +341,19 @@ export async function matchRoutes(app) {
     return { match: toMatch(rows[0]) };
   });
 
-  /** Leave a lobby. The host leaving abandons the match for everyone. */
+  /**
+   * Leave a lobby or a running match. The host leaving an open (not yet
+   * started) lobby abandons it for everyone else too.
+   *
+   * Separately: whoever just left might have been the last one still in the
+   * roster — a non-host leaving a running match, or the host leaving one
+   * (the rule above only covers `status = 'open'`), previously left the
+   * match stuck at `status = 'running'` forever with nobody in it. Same bug
+   * as the WS close handler's own empty-room case
+   * (ws/match.js's `socket.on('close', ...)`) — this is the deliberate-leave
+   * path into the identical gap, closed the same way: if the roster is now
+   * empty, the match is over regardless of status or who left.
+   */
   app.post('/matches/:id/leave', authWrite, async (req, reply) => {
     if (!uuid.safeParse(req.params.id).success) {
       return reply.code(404).send({ error: 'not_found' });
@@ -356,6 +368,17 @@ export async function matchRoutes(app) {
           where id = $1 and host_user_id = $2 and status = 'open'`,
         [req.params.id, req.user.id]
       );
+      const remaining = await client.query(
+        'select 1 from match_players where match_id = $1 limit 1',
+        [req.params.id]
+      );
+      if (remaining.rows.length === 0) {
+        await client.query(
+          `update matches set status = 'finished'
+            where id = $1 and status in ('open', 'running')`,
+          [req.params.id]
+        );
+      }
     });
     return { ok: true };
   });

@@ -35,6 +35,27 @@ tuning/balance changes are not included unless they were fixing broken behavior.
   correspond to. See `docs/plans/orphaned-match-hijack.md` for the full
   investigation. **User-confirmed live in production: "it works."**
 
+- **A match stayed `status = 'running'` forever once every player left it,
+  and the next player to open the lobby or start a new match got
+  auto-rejoined into that stale one instead** — the same practical symptom
+  as the orphaned-match bug above, but reached without a server restart:
+  `server/src/ws/match.js`'s socket `close` handler already deleted the
+  emptied match's *in-memory* room, but never told the database, so
+  `GET /matches/mine` kept treating it as live. A second, related gap: the
+  `leave` route only ever ended a match when the *host* left an *open*
+  (not-yet-started) lobby — a non-host leaving a running match, or the host
+  leaving one, never ended it even as the last player out. Fixed both: the
+  socket close handler now marks the match `finished`/`abandoned` when its
+  roster empties, and `leave` does the same regardless of status or who
+  left. See `docs/plans/match-ends-when-empty.md`. **Verified with a real
+  end-to-end test** (`tests/e2e/two-client-match.mjs`, extended): a real
+  server, two real WebSocket clients, both sockets closed, `GET
+  /matches/:id` confirms `status` left `running` — reverting the fix and
+  re-running against a real server reproduces the exact reported symptom
+  (`status=running` after both sockets close), restored and confirmed
+  passing again. Plus 3 new dependency-free-against-a-real-database tests
+  for the `leave` route's own gap.
+
 - **MILESTONE: matches were hard-capped at 2 players, with no way for a
   host to ask for more and no way for a 3rd player to ever join** (a
   3rd-player join attempt correctly, if confusingly, got "2/2 match full" —

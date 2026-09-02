@@ -330,6 +330,22 @@ a.ws.close();
 b2.ws.close();
 await sleep(200);
 
+// ---- 8. the match ends when its last player leaves, not just at the next
+//         server restart — see server/src/ws/match.js's close handler and
+//         docs/plans/match-ends-when-empty.md. Both sockets just closed
+//         above; this checks the one side effect only a real server process
+//         can produce: matches.status actually leaving 'running' in the
+//         database, read back through the ordinary GET /matches/:id route
+//         (no direct DB access from this harness, on purpose — the same
+//         path a client would use). server/test/leave-empties-match.test.mjs
+//         covers the deliberate-leave route directly; this is the only place
+//         that can observe the socket-close path, since it needs a real
+//         relay actually noticing both sockets are gone.
+const afterClose = await host.call(`/matches/${matchId}`);
+ok('the match is no longer running once both sockets have closed',
+   afterClose.match.status !== 'running',
+   `status=${afterClose.match.status}`);
+
 const failed = results.filter((r) => !r.pass).length;
 console.log(`\n${results.length - failed}/${results.length} passed`);
 process.exit(failed ? 1 : 0);
