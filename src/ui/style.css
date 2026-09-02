@@ -1017,7 +1017,7 @@ body.settings-open #hud { transform: translateX(calc(var(--panel-width) + 8px));
   justify-content: flex-start;
   background:
     linear-gradient(to bottom, rgba(5, 8, 12, 0.6) 0%, rgba(5, 8, 12, 0.2) 45%, rgba(5, 8, 12, 0) 62%),
-    url('/landscape-game-photo.png') center / cover no-repeat;
+    var(--portal-bg-url) center / cover no-repeat;
 }
 
 #portal.hidden, #lobby.hidden { opacity: 0; pointer-events: none; }

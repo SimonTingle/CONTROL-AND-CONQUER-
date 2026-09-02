@@ -44,6 +44,14 @@ export class PortalScreen {
     this.account = account;
     this.root = document.getElementById('portal');
     this.open = true;
+    // Same root-absolute-path problem as the logo <img> below, but CSS
+    // url() can't read import.meta.env — set it as a custom property instead
+    // of hardcoding the path in style.css. Resolved to an absolute URL first:
+    // a relative url() inside a custom property resolves against the
+    // *stylesheet's* location, not the document's, so on itch.io './x.png'
+    // here would 404 as dist/assets/x.png instead of dist/x.png.
+    const bgUrl = new URL(`${import.meta.env.BASE_URL}landscape-game-photo.png`, document.baseURI).href;
+    this.root.style.setProperty('--portal-bg-url', `url('${bgUrl}')`);
     this.buildGrid();
   }
 
@@ -152,7 +160,11 @@ export class PortalScreen {
 
     const logo = document.createElement('img');
     logo.className = 'portal-logo';
-    logo.src = '/control-conquer-font.png';
+    // Root-absolute would 404 on itch.io, which serves this build from a
+    // hashed non-root path — see itch.io/vite.config.js's `base: './'`.
+    // BASE_URL is '/' there and './' here, so concatenation gives the right
+    // path in both builds without special-casing either.
+    logo.src = `${import.meta.env.BASE_URL}control-conquer-font.png`;
     logo.alt = 'Control & Conquer';
     panel.appendChild(logo);
 
