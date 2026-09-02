@@ -369,6 +369,20 @@ async function handleMatchSocket(socket, req) {
     // player to come back rather than releasing turns without them (see the
     // file header). Emptying the room entirely is the one case with nobody
     // left to wait for.
-    if (room.players.size === 0) rooms.delete(matchId);
+    if (room.players.size === 0) {
+      rooms.delete(matchId);
+      // The in-memory room is gone, but nothing had ever told the database
+      // this match was over — `matches.status` stayed 'running' forever,
+      // and GET /matches/mine (routes/matches.js) kept handing the next
+      // player who opened the lobby straight back into it. Same bug class
+      // as abandonOrphanedMatches() (routes/matches.js), just reached by a
+      // live room emptying out instead of a server restart. Fire-and-forget:
+      // the in-memory room is already gone regardless of whether this
+      // succeeds, so a failure here must not block anything else.
+      query(
+        `update matches set status = $2 where id = $1 and status in ('open', 'running')`,
+        [matchId, room.started ? 'finished' : 'abandoned']
+      ).catch((err) => console.error(`[match] failed to mark ${matchId} done after emptying:`, err));
+    }
   });
 }
