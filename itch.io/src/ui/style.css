@@ -669,6 +669,17 @@ body.settings-open #hud { transform: translateX(calc(var(--panel-width) + 8px));
   user-select: none;
 }
 
+/* The portal shows its own copy directly above Sandbox Test
+   (.portal-version-hint, portalScreen.js) — hide the real corner badge
+   while it would otherwise show twice. `#portal` is a static child of
+   <body> in index.html, always present before mountVersionBadge() ever
+   runs (main.js), so it is always the earlier sibling here — this matches
+   on every other screen exactly as before, since #portal.hidden is what
+   flips this back off. */
+#portal:not(.hidden) ~ #version-badge {
+  display: none;
+}
+
 .hud-name {
   font-size: 12px;
   font-weight: 600;
@@ -1020,12 +1031,11 @@ body.settings-open #hud { transform: translateX(calc(var(--panel-width) + 8px));
 
 /* Empty (zero height) whenever there's no backend configured —
    renderAccountBar() leaves it childless in that case, so it collapses to
-   nothing rather than leaving a gap. In normal document flow (not absolutely
-   positioned) so it can't clip off-screen on short viewports. */
+   nothing rather than leaving a gap. Lives in `.portal-info-row`'s slot 0
+   now (see portalScreen.js), directly above the sign-in button. */
 .portal-account-bar {
   display: flex;
-  justify-content: flex-end;
-  margin-bottom: 16px;
+  justify-content: center;
 }
 
 .portal-account-btn {
@@ -1062,13 +1072,56 @@ body.settings-open #hud { transform: translateX(calc(var(--panel-width) + 8px));
 }
 
 /* Sits directly on #portal (not inside .portal-panel) so it can be pinned to
-   the image's black lower third independently of where the title lands. */
-.portal-button-row {
+   the image's black lower third independently of where the title lands.
+   Wraps `.portal-info-row` (the account line / build version, stacked
+   directly above their buttons) and `.portal-button-row` in normal
+   top-to-bottom flow, so the two rows' columns line up via flexbox itself —
+   see portalScreen.js's renderButtonRow() for why that beats computing
+   pixel offsets by hand. */
+.portal-button-stack {
   position: absolute;
   left: 50%;
   bottom: 6%;
   transform: translateX(-50%);
   width: min(94vw, 920px);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Small-text row: the account line above the sign-in button, the build
+   version above Sandbox Test. Same flex shape as `.portal-button-row`
+   below it (`flex: 1 1 0` per slot, same gap, same wrap breakpoint) so
+   every column lines up regardless of viewport width — an empty slot
+   (portalScreen.js appends one per button with nothing to show above it)
+   is just a zero-content flex item, no placeholder needed. */
+.portal-info-row {
+  display: flex;
+  gap: 12px;
+  width: 100%;
+}
+
+.portal-info-row > * {
+  flex: 1 1 0;
+  min-width: 0; /* a long display name must ellipsize, never force the row wider */
+}
+
+.portal-version-hint {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  user-select: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.portal-button-row {
+  width: 100%;
   display: flex;
   gap: 12px;
 }
@@ -1116,8 +1169,11 @@ body.settings-open #hud { transform: translateX(calc(var(--panel-width) + 8px));
 }
 
 @media (max-width: 620px) {
-  .portal-button-row { flex-wrap: wrap; bottom: 4%; }
-  .portal-mode-btn { flex: 1 1 40%; }
+  .portal-button-stack { bottom: 4%; }
+  /* Both rows wrap the same way, at the same width — see .portal-info-row's
+     own comment for why they have to move together. */
+  .portal-button-row, .portal-info-row { flex-wrap: wrap; }
+  .portal-mode-btn, .portal-info-row > * { flex: 1 1 40%; }
 }
 
 .portal-card {

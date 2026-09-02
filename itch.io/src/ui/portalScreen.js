@@ -5,6 +5,7 @@
  * rather than the portal having to know about either.
  */
 import { isGodModeAccount } from '../core/adminAccount.js';
+import { getBuildVersion } from './versionBadge.js';
 export const PORTAL_MODES = [
   {
     id: 'sandbox',
@@ -76,9 +77,22 @@ export class PortalScreen {
    * The five buttons pinned to the image's black lower third: sign-in,
    * the three mode buttons, and God Mode last — visible only for that one
    * account, since it isn't a general-purpose admin role yet.
+   *
+   * Also (re)builds `.portal-info-row`, the small-text row stacked directly
+   * above this one — the account line above the sign-in button, the build
+   * version above Sandbox Test. It must be rebuilt in lockstep with this
+   * row and with the exact same number of slots, or the two rows' columns
+   * (each independently `flex: 1 1 0`) stop lining up the moment the
+   * button count changes, e.g. God Mode appearing/disappearing.
    */
   renderButtonRow() {
     this.buttonRow.replaceChildren();
+    this.infoRow.replaceChildren();
+
+    // Slot 0: the account line lives here now, moved out of the top of the
+    // panel — reuses the same `this.accountBar` element renderAccountBar()
+    // already knows how to fill, just relocated.
+    this.infoRow.appendChild(this.accountBar);
 
     const authBtn = document.createElement('button');
     authBtn.type = 'button';
@@ -87,6 +101,15 @@ export class PortalScreen {
     authBtn.addEventListener('click', () => this.account.onSignIn?.());
     this.buttonRow.appendChild(authBtn);
 
+    // Slot 1: the build's commit hash, directly above Sandbox Test — a
+    // duplicate of the real #version-badge's text, not the element itself.
+    // See versionBadge.js's getBuildVersion() for why it can't just move.
+    const versionSlot = document.createElement('div');
+    versionSlot.className = 'portal-info-slot portal-version-hint';
+    versionSlot.textContent = getBuildVersion();
+    versionSlot.setAttribute('aria-hidden', 'true'); // decorative, matches #version-badge
+    this.infoRow.appendChild(versionSlot);
+
     for (const mode of PORTAL_MODES) {
       const btn = document.createElement('button');
       btn.type = 'button';
@@ -94,6 +117,9 @@ export class PortalScreen {
       btn.textContent = mode.name;
       btn.addEventListener('click', () => this.choose(mode.id));
       this.buttonRow.appendChild(btn);
+      // Empty slot — just keeps this row's column count matching the
+      // button row's, so flexbox lines every column up on its own.
+      this.infoRow.appendChild(document.createElement('div'));
     }
 
     // One button, not one per app. God mode now holds more than a single
@@ -109,6 +135,7 @@ export class PortalScreen {
       godBtn.textContent = 'God Mode';
       godBtn.addEventListener('click', () => this.showGodMode());
       this.buttonRow.appendChild(godBtn);
+      this.infoRow.appendChild(document.createElement('div'));
     }
   }
 
@@ -116,10 +143,12 @@ export class PortalScreen {
     const panel = document.createElement('div');
     panel.className = 'portal-panel';
 
+    // Built here, filled by renderAccountBar(), but appended into
+    // `.portal-info-row` by renderButtonRow() below rather than into the
+    // panel — see that method's own comment for why.
     this.accountBar = document.createElement('div');
     this.accountBar.className = 'portal-account-bar';
     this.renderAccountBar();
-    panel.appendChild(this.accountBar);
 
     const h1 = document.createElement('h1');
     h1.textContent = 'Procedural Terrain';
@@ -130,11 +159,19 @@ export class PortalScreen {
     hint.textContent = 'Choose how you want to play.';
     panel.appendChild(hint);
 
+    const stack = document.createElement('div');
+    stack.className = 'portal-button-stack';
+
+    this.infoRow = document.createElement('div');
+    this.infoRow.className = 'portal-info-row';
+
     this.buttonRow = document.createElement('div');
     this.buttonRow.className = 'portal-button-row';
+
     this.renderButtonRow();
 
-    this.root.replaceChildren(panel, this.buttonRow);
+    stack.append(this.infoRow, this.buttonRow);
+    this.root.replaceChildren(panel, stack);
   }
 
   choose(modeId) {

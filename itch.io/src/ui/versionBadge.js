@@ -21,6 +21,18 @@
 // ReferenceError rather than just being undefined.
 const BUILD_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'unknown';
 
+/**
+ * The same commit-stamp text this badge shows, for anywhere else that wants
+ * to display it — e.g. portalScreen.js's button-row duplicate, shown while
+ * the real badge (below) is hidden specifically on the portal screen so the
+ * two never show at once. See portalScreen.js for why it's a duplicate
+ * rather than the real element moved: the real one has to stay outside
+ * #portal's subtree to remain visible on every other screen.
+ */
+export function getBuildVersion() {
+  return BUILD_VERSION;
+}
+
 export function mountVersionBadge(version = BUILD_VERSION) {
   const el = document.createElement('div');
   el.id = 'version-badge';
