@@ -150,9 +150,11 @@ export class PortalScreen {
     this.accountBar.className = 'portal-account-bar';
     this.renderAccountBar();
 
-    const h1 = document.createElement('h1');
-    h1.textContent = 'Procedural Terrain';
-    panel.appendChild(h1);
+    const logo = document.createElement('img');
+    logo.className = 'portal-logo';
+    logo.src = '/control-conquer-font.png';
+    logo.alt = 'Control & Conquer';
+    panel.appendChild(logo);
 
     const hint = document.createElement('p');
     hint.className = 'hint';
