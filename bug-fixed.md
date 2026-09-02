@@ -35,6 +35,21 @@ tuning/balance changes are not included unless they were fixing broken behavior.
   correspond to. See `docs/plans/orphaned-match-hijack.md` for the full
   investigation. **User-confirmed live in production: "it works."**
 
+- **MILESTONE: matches were hard-capped at 2 players, with no way for a
+  host to ask for more and no way for a 3rd player to ever join** (a
+  3rd-player join attempt correctly, if confusingly, got "2/2 match full" —
+  every match up to that point really had been created with the old
+  hardcoded `maxPlayers: 2`, not a bug in the join check itself). Raised the
+  cap to 20: a new `matches_max_players_check` migration, the create-match
+  route's validation bound, and a player-count slider in the lobby's create
+  flow (`src/ui/lobbyScreen.js`) so a host can actually ask for more than 2
+  seats. The simulation side needed no changes — `findTeamSpawnPoints`
+  (`src/core/pick.js`) already split a full circle into equal slices for any
+  team count. See `docs/plans/twenty-player-matches.md` for the full
+  change and its spawn-separation test coverage. **User-confirmed live:
+  three real players joined and played correctly together on one shared
+  map.**
+
 - **After the fix below shipped, a follow-up redeploy showed the same match
   still split — this time each screen showed "waiting for the other player",
   then one client reached turn 14 (with 8 vehicles) while the other sat at
