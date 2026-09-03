@@ -124,6 +124,8 @@ export class FacilityControl {
     this.heightmap = heightmap;
     /** facilityId -> { cleared, docked, holders[], slots:Set }. Rebuilt every tick. */
     this._index = new Map();
+    /** Structures by id, rebuilt each `_rebuild` — see `_reindexFacilities`. */
+    this._byId = new Map();
   }
 
   // ---------------------------------------------------------------- lifecycle
@@ -303,11 +305,28 @@ export class FacilityControl {
     return facility ? this._index.get(facility.id) ?? null : null;
   }
 
+  /**
+   * Structures by id, rebuilt once per `_rebuild` rather than re-scanned per
+   * claimant.
+   *
+   * This was a linear scan over every structure, called once for each vehicle
+   * holding a clearance, inside a pass that runs every tick — O(claimants x
+   * structures) where a Map makes it O(structures + claimants). Never a cliff
+   * on its own, but it scales with both unit and structure count, and a
+   * 20-team match has a lot of both. See
+   * docs/plans/fps-regression-second-pass.md.
+   *
+   * Rebuilt each pass rather than cached across ticks, deliberately: a
+   * structure can die at any time, and this file's own rule is to re-resolve
+   * from the live `instances` array rather than hold a reference across ticks.
+   */
+  _reindexFacilities() {
+    this._byId.clear();
+    for (const s of this.structures?.instances ?? []) this._byId.set(s.id, s);
+  }
+
   _facilityById(id) {
-    for (const s of this.structures?.instances ?? []) {
-      if (s.id === id) return s;
-    }
-    return null;
+    return this._byId.get(id) ?? null;
   }
 
   /**
@@ -318,6 +337,7 @@ export class FacilityControl {
    */
   _rebuild() {
     this._index.clear();
+    this._reindexFacilities();
 
     const claimants = [];
     for (const inst of this.vehicles?.instances ?? []) {

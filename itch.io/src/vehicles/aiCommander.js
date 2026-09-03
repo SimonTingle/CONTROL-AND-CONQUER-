@@ -308,10 +308,14 @@ export class AiCommander {
     // rotate its search sweep.
     this.engineerState = new Map();
 
-    // What the commander currently thinks it is doing. Recomputed every tick
-    // by _updatePosture — this field is the *result* of that decision, not
-    // state that persists a choice, which is why it is not snapshotted.
+    // What the commander currently thinks it is doing. Recomputed by
+    // _updatePosture on the same cadence as army target selection — this
+    // field is the *result* of that decision, not state that persists a
+    // choice, which is why it is not snapshotted.
     this.posture = 'economy';
+    // Runs _updatePosture on ARMY_TARGET_INTERVAL rather than every tick.
+    // Starts at 0 so the first tick still computes a posture.
+    this.postureTimer = 0;
     // Last computed strengths, kept only so the tests and any future HUD can
     // read what the decision was made on. Same reasoning as posture: derived.
     this.myStrength = 0;
@@ -715,7 +719,26 @@ export class AiCommander {
     // how an AI talks itself into an attack with an army that is leaving.
     const committable = army.filter((u) => !this._isRetreating(u));
 
-    this._updatePosture(committable);
+    // Throttled to the same cadence as target selection below, and for the
+    // same reason: posture is what *chooses* the target, so recomputing it
+    // more often than the target can change is work nothing can act on.
+    //
+    // It was the single most expensive thing this commander did per tick.
+    // `_homeUnderThreat`, `_checkOpportunisticStrike` and
+    // `_scoutedEnemyStrength` each walk every vehicle (the last also every
+    // structure, with a fog lookup per entity), so at 60Hz x up to 20 teams
+    // this was millions of iterations a second — all of it feeding a decision
+    // that is only read once every ARMY_TARGET_INTERVAL. See
+    // docs/plans/fps-regression-second-pass.md.
+    //
+    // The cost: a defensive reaction can lag by up to the interval. The army
+    // target it would pick was already on that cadence, so this does not make
+    // the commander any less responsive than its own retargeting allowed.
+    this.postureTimer -= dt;
+    if (this.postureTimer <= 0) {
+      this.postureTimer = AiCommander.ARMY_TARGET_INTERVAL;
+      this._updatePosture(committable);
+    }
     if (this.posture === 'economy' || this.posture === 'mass') return;
 
     this.armyTargetTimer -= dt;

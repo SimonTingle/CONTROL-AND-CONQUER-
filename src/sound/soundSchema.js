@@ -179,10 +179,19 @@ export const LAYER_CONTROLS = {
   ],
 };
 
+import { MIN_AMBIENCE_SEGMENT_SECONDS } from '../audio/synth.js';
+
 /** Hard ceilings a recipe cannot exceed however it was authored or received. */
 export const MAX_LAYERS = 8;
 /** Seconds. The `OfflineAudioContext` allocation is linear in this. */
 export const MAX_DURATION = 6;
+/**
+ * Seconds. Floor on an ambience bed's segment length — re-exported from
+ * synth.js, which owns it because it is a property of how a bed renders.
+ * MAX_DURATION bounds how *big* one render is; this bounds how *often* one
+ * happens. See docs/plans/fps-regression-second-pass.md.
+ */
+export { MIN_AMBIENCE_SEGMENT_SECONDS };
 
 // ---------------------------------------------------------------------------
 // Fixed-path controls
@@ -305,7 +314,7 @@ export const AMBIENCE_GROUPS = [
       num('ambience.lfoHz', 'Wander rate (Hz)', 0.01, 2, 0.01, 'medium'),
       num('ambience.lfoDepth', 'Wander depth (Hz)', 0, 2000, 10, 'medium'),
       num('ambience.filterQ', 'Resonance', 0.1, 12, 0.1, 'advanced'),
-      num('ambience.segmentSeconds', 'Segment length', 1, 20, 0.5, 'advanced'),
+      num('ambience.segmentSeconds', 'Segment length', MIN_AMBIENCE_SEGMENT_SECONDS, 20, 0.5, 'advanced'),
     ],
   },
   {

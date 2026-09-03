@@ -25,7 +25,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { HeadlightPool } from '../src/vehicles/headlightPool.js';
+import { HeadlightPool, LIGHTS_PER_RIG, POOL_LIGHT_COUNT } from '../src/vehicles/headlightPool.js';
 
 function makeFakeInstance(id, { headlightsOn = false, braking = false, reversing = false } = {}) {
   const group = new THREE.Group();
@@ -100,4 +100,50 @@ test('re-attaching the same instance to the same slot is a cheap no-op (no re-pa
   const beamBeforeParent = pool.rigs[0].beams[0].spot.parent;
   pool.attach([a]); // same instance again
   assert.equal(pool.rigs[0].beams[0].spot.parent, beamBeforeParent);
+});
+
+/**
+ * The regression guard, added after the pool's light count cost roughly two
+ * thirds of the frame rate (docs/plans/fps-regression-second-pass.md).
+ *
+ * Three.js compiles the number of *visible* lights into every lit material's
+ * shader and evaluates all of them per fragment regardless of intensity, so
+ * the scene's real light count — not the rig count — is the number that
+ * costs. These rigs are added to the scene at construction and never hidden,
+ * so `POOL_LIGHT_COUNT` is exactly what every material pays for, in every
+ * game mode, whether or not anyone is driving at night.
+ *
+ * The bound is 16: the pool's own measured cost curve is flat below it and
+ * "turns sharply nonlinear" past it. The bug being guarded against was
+ * shipping 32 while quoting that same curve — the reasoning counted rigs and
+ * the curve counts lights.
+ */
+test('the pool puts a known, sub-knee number of real lights in the scene', () => {
+  const scene = new THREE.Scene();
+  const pool = new HeadlightPool(scene);
+
+  let lights = 0;
+  scene.traverse((o) => { if (o.isLight) lights++; });
+
+  // Counted from the live scene, not from the constants, so the assertion
+  // fails if construction ever stops matching the declared arithmetic.
+  assert.equal(lights, POOL_LIGHT_COUNT);
+  assert.equal(POOL_LIGHT_COUNT, pool.rigs.length * LIGHTS_PER_RIG);
+  assert.ok(
+    POOL_LIGHT_COUNT <= 16,
+    `pool puts ${POOL_LIGHT_COUNT} lights in the scene; the measured cost curve turns sharply nonlinear past 16`,
+  );
+});
+
+test('unattached rigs still count against the scene light budget', () => {
+  // The whole reason the count is fixed: parking a rig mutes it but does not
+  // hide it, so "only one vehicle is driving" never reduces the cost. If this
+  // ever becomes false the constant above stops being the real budget.
+  const scene = new THREE.Scene();
+  const pool = new HeadlightPool(scene);
+  pool.attach([]); // nothing attached at all
+
+  let visibleLights = 0;
+  scene.traverse((o) => { if (o.isLight && o.visible) visibleLights++; });
+  assert.equal(visibleLights, POOL_LIGHT_COUNT);
 });

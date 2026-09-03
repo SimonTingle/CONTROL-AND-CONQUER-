@@ -214,3 +214,78 @@ test('NavGrid built with no structures reference behaves exactly as before', () 
   const path = walkRoute(grid, FROM, TO);
   for (const p of path) assert.equal(p.z, ROW_Z);
 });
+
+// ---------------------------------------------------------------------------
+// 3. Cache invalidation is driven by passability, not by terrain edits
+//
+// Every ground shell bumps `heightmap.terrainVersion` (craters.js's `dig()`),
+// and NavGrid used to clear its entire flow-field cache on that — so a
+// firefight destroyed every cached field several times a second, each one
+// costing a fresh Dijkstra solve. That is what put an O(n log n) solve on a
+// per-tick path. See docs/plans/fps-regression-second-pass.md.
+//
+// The rule now: a crater that does not change *what is passable* keeps the
+// cache; anything that does (a cell submerging, a structure appearing or
+// going away) still clears it.
+
+test('a crater that changes no passability does not re-solve', () => {
+  let depth = 0;
+  const heightmap = makeHeightmap();
+  heightmap.heightAt = () => 10 - depth; // still well above sea level
+  const grid = new NavGrid(heightmap, makeStructures());
+
+  grid.nextWaypoint(FROM.x, FROM.z, TO.x, TO.z);
+  const solvesAfterFirst = grid.solveCount;
+  assert.ok(solvesAfterFirst > 0, 'expected the first query to solve');
+
+  // Dig: terrain genuinely changed, and the grid must notice the new heights.
+  depth = 2;
+  heightmap.terrainVersion++;
+  grid.nextWaypoint(FROM.x, FROM.z, TO.x, TO.z);
+
+  assert.equal(grid.solveCount, solvesAfterFirst, 'crater re-solved a cached field');
+  assert.equal(grid._height[0], 8, 'grid did not pick up the new terrain heights');
+});
+
+test('terrain that submerges a cell does clear the cache', () => {
+  let flooded = false;
+  const heightmap = makeHeightmap();
+  heightmap.heightAt = (x) => (flooded && x < -100 ? -5 : 10);
+  const grid = new NavGrid(heightmap, makeStructures());
+
+  grid.nextWaypoint(FROM.x, FROM.z, TO.x, TO.z);
+  const before = grid.solveCount;
+
+  flooded = true;
+  heightmap.terrainVersion++;
+  grid.nextWaypoint(0, ROW_Z, TO.x, TO.z);
+
+  assert.ok(grid.solveCount > before, 'a real passability change must re-solve');
+});
+
+test('a structure going up still clears the cache', () => {
+  const structures = makeStructures();
+  const grid = new NavGrid(makeHeightmap(), structures);
+
+  grid.nextWaypoint(FROM.x, FROM.z, TO.x, TO.z);
+  const before = grid.solveCount;
+
+  structures.instances.push(makeStructure(0, ROW_Z));
+  structures.version++;
+  grid.nextWaypoint(FROM.x, FROM.z, TO.x, TO.z);
+
+  assert.ok(grid.solveCount > before, 'a new structure must re-solve');
+});
+
+test('the field cache scales with team count instead of a fixed 24', () => {
+  const grid = new NavGrid(makeHeightmap({ size: 960 }), makeStructures());
+  const base = grid._cacheLimit;
+
+  grid.setTeamCount(20);
+  assert.ok(grid._cacheLimit > base, 'a 20-team match must get a bigger cache than the 4-team default');
+
+  // Only ever grows — a team leaving must not evict everyone else's fields.
+  const grown = grid._cacheLimit;
+  grid.setTeamCount(2);
+  assert.equal(grid._cacheLimit, grown);
+});

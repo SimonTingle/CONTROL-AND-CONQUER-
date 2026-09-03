@@ -61,7 +61,93 @@ const NEIGHBORS = [
 // live targets), so this is a generous ceiling, not a tight budget — it
 // exists so a fast-moving fight can't grow the cache without bound, not to
 // pinch the common case.
-const MAX_CACHED_FIELDS = 24;
+//
+// Sized per *team*, not globally: 24 was chosen when four teams shared the
+// cache, and a 20-team match (docs/plans/twenty-player-matches.md) wants
+// 40-60 live goals — one advance point per AI commander plus each team's
+// harvester field and depot. Against a fixed 24 that thrashes, and a thrashed
+// entry costs a full solve, which is the expensive thing this cache exists to
+// avoid. See docs/plans/fps-regression-second-pass.md.
+const FIELDS_PER_TEAM = 6;
+const MIN_CACHED_FIELDS = 24; // never smaller than the old fixed ceiling
+const MAX_CACHED_FIELDS = 160; // 20 teams' worth; a hard stop on memory
+
+/**
+ * Min-heap of cell indices ordered by `(distance, cell index)`.
+ *
+ * The tie-break on cell index is **load-bearing, not tidiness**. `_solve`'s
+ * `next[]` records the first neighbour that achieved a cell's best distance,
+ * so it depends on the order cells are settled in — and the linear scan this
+ * replaced settled ties by lowest index, because `dist[i] < best` is strict
+ * and it walked `i` upward. Any other tie-break yields equally-shortest but
+ * *different* routes, which in a lockstep match is a desync between a patched
+ * and an unpatched client. `tests/nav-grid-heap-parity.test.mjs` diffs the two
+ * solvers' output to hold this.
+ *
+ * Distances are pushed by value rather than read back from `dist[]`, so a
+ * stale entry keeps the distance it was pushed with and still orders
+ * correctly relative to its own replacement.
+ */
+class CellHeap {
+  constructor() {
+    this.cells = [];
+    this.dists = [];
+  }
+
+  get size() {
+    return this.cells.length;
+  }
+
+  /** True when `(da, a)` must be settled before `(db, b)`. */
+  _before(da, a, db, b) {
+    return da !== db ? da < db : a < b;
+  }
+
+  push(cell, dist) {
+    this.cells.push(cell);
+    this.dists.push(dist);
+    let i = this.cells.length - 1;
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (!this._before(this.dists[i], this.cells[i], this.dists[parent], this.cells[parent])) break;
+      this._swap(i, parent);
+      i = parent;
+    }
+  }
+
+  pop() {
+    const top = this.cells[0];
+    const lastCell = this.cells.pop();
+    const lastDist = this.dists.pop();
+    if (this.cells.length > 0) {
+      this.cells[0] = lastCell;
+      this.dists[0] = lastDist;
+      let i = 0;
+      for (;;) {
+        const left = 2 * i + 1;
+        const right = left + 1;
+        let best = i;
+        if (
+          left < this.cells.length &&
+          this._before(this.dists[left], this.cells[left], this.dists[best], this.cells[best])
+        ) best = left;
+        if (
+          right < this.cells.length &&
+          this._before(this.dists[right], this.cells[right], this.dists[best], this.cells[best])
+        ) best = right;
+        if (best === i) break;
+        this._swap(i, best);
+        i = best;
+      }
+    }
+    return top;
+  }
+
+  _swap(a, b) {
+    const c = this.cells[a]; this.cells[a] = this.cells[b]; this.cells[b] = c;
+    const d = this.dists[a]; this.dists[a] = this.dists[b]; this.dists[b] = d;
+  }
+}
 
 export class NavGrid {
   /**
@@ -81,7 +167,25 @@ export class NavGrid {
     this._cache = new Map();
     this._builtForVersion = -1;
     this._builtForStructuresVersion = -1;
+    this._builtForPassabilityVersion = -1;
+    /** Grown by `setTeamCount`; see FIELDS_PER_TEAM. */
+    this._cacheLimit = MIN_CACHED_FIELDS;
+    /**
+     * Solves performed, for the perf probes and
+     * `tests/nav-grid-heap-parity.test.mjs`. Never read by gameplay — a
+     * counter is the only way to observe "this used to run every tick".
+     */
+    this.solveCount = 0;
     this._build();
+  }
+
+  /**
+   * Size the flow-field cache to the match. Safe to call repeatedly; only
+   * grows, so a team joining mid-match never evicts by shrinking.
+   */
+  setTeamCount(teams) {
+    const wanted = Math.max(MIN_CACHED_FIELDS, Math.min(MAX_CACHED_FIELDS, teams * FIELDS_PER_TEAM));
+    if (wanted > this._cacheLimit) this._cacheLimit = wanted;
   }
 
   _build() {
@@ -134,10 +238,40 @@ export class NavGrid {
       }
     }
 
+    // Whether anything a cached flow field depends on for *validity* moved.
+    // Heights alone do not qualify — see the comment on the clear below.
+    const passabilityChanged =
+      !this._passable ||
+      this._passable.length !== passable.length ||
+      !passable.every((v, i) => v === this._passable[i]);
+
     this._height = height;
     this._terrainPassable = terrainPassable;
     this._passable = passable;
-    this._cache.clear();
+
+    // The cache is only cleared when passability actually changed, not merely
+    // because the terrain did.
+    //
+    // Every ground shell bumps `heightmap.terrainVersion` (craters.js's
+    // `dig()`), and clearing here meant a firefight destroyed every cached
+    // flow field several times a second — each one costing a fresh Dijkstra
+    // solve to rebuild. That is what turned an O(n log n) solve that "runs
+    // once per unique goal" into a per-tick cost. See
+    // docs/plans/fps-regression-second-pass.md.
+    //
+    // What is given up: a crater's rim can steepen an edge past
+    // MAX_CLIMB_GRADE, and a field cached before the crater will not know
+    // until the next passability change rebuilds it. A unit may therefore
+    // route over ground it now has to go around, and its own local steering
+    // handles that the same way it already handles every obstacle the grid
+    // does not model. What is *not* given up is correctness of the thing that
+    // matters: a cell that drops below sea level, or a structure going up or
+    // down, still flips a passability bit and still clears the cache.
+    //
+    // Deterministic across clients because it is a pure function of shared
+    // simulation state — every peer clears on exactly the same builds.
+    if (passabilityChanged) this._cache.clear();
+
     this._builtForVersion = this.heightmap.terrainVersion;
     this._builtForStructuresVersion = this.structures?.version ?? -1;
   }
@@ -199,17 +333,15 @@ export class NavGrid {
     const next = new Int32Array(n).fill(-1); // best neighbor to step to, per cell
     dist[goalCell] = 0;
 
-    // A small binary-heap-free approach is fine at ~1,850 nodes: a sorted
-    // insert queue would be worse, but a plain array scan is simplest and
-    // this runs once per unique goal, not per frame.
     const visited = new Uint8Array(n);
-    for (let iter = 0; iter < n; iter++) {
-      let u = -1;
-      let best = Infinity;
-      for (let i = 0; i < n; i++) {
-        if (!visited[i] && dist[i] < best) { best = dist[i]; u = i; }
-      }
-      if (u === -1) break; // everything left is unreachable
+    const heap = new CellHeap();
+    heap.push(goalCell, 0);
+
+    while (heap.size > 0) {
+      const u = heap.pop();
+      // Lazy deletion: a cell whose distance improved was pushed again, so
+      // the stale entry surfaces later and is dropped here.
+      if (visited[u]) continue;
       visited[u] = 1;
 
       const urow = Math.floor(u / this.cols);
@@ -228,6 +360,56 @@ export class NavGrid {
         if (nd < dist[v]) {
           dist[v] = nd;
           next[v] = u; // stepping from v toward the goal means stepping to u
+          heap.push(v, nd);
+        }
+      }
+    }
+
+    return { dist, next };
+  }
+
+  /**
+   * The original linear-min-scan solver, kept **only** as the oracle
+   * `tests/nav-grid-heap-parity.test.mjs` checks `_solve` against.
+   *
+   * It must never be called from gameplay: it is O(n²) — ~3.4M iterations at
+   * this grid size — which is what made it a frame-rate problem once the
+   * assumption in its original comment ("runs once per unique goal, not per
+   * frame") stopped holding. It survives because `next[]` depends on the
+   * order cells are settled in, so "the heap is faster" is not enough: the
+   * heap has to settle them in *exactly* the same order, and the only
+   * convincing evidence of that is diffing the two outputs.
+   */
+  _solveReference(goalCell) {
+    const n = this.cols * this.rows;
+    const dist = new Float32Array(n).fill(Infinity);
+    const next = new Int32Array(n).fill(-1);
+    dist[goalCell] = 0;
+
+    const visited = new Uint8Array(n);
+    for (let iter = 0; iter < n; iter++) {
+      let u = -1;
+      let best = Infinity;
+      for (let i = 0; i < n; i++) {
+        if (!visited[i] && dist[i] < best) { best = dist[i]; u = i; }
+      }
+      if (u === -1) break; // everything left is unreachable
+      visited[u] = 1;
+
+      const urow = Math.floor(u / this.cols);
+      const ucol = u % this.cols;
+      for (const [dc, dr, dm] of NEIGHBORS) {
+        const vcol = ucol + dc;
+        const vrow = urow + dr;
+        if (vcol < 0 || vrow < 0 || vcol >= this.cols || vrow >= this.rows) continue;
+        const v = vrow * this.cols + vcol;
+        if (visited[v]) continue;
+        const cost = this._edgeCost(v, u, dm, goalCell);
+        if (cost === Infinity) continue;
+        const nd = dist[u] + cost;
+        if (nd < dist[v]) {
+          dist[v] = nd;
+          next[v] = u;
         }
       }
     }
@@ -255,9 +437,10 @@ export class NavGrid {
     let field = this._cache.get(goalCell);
     if (!field) {
       field = this._solve(goalCell);
+      this.solveCount++;
       // Evict oldest first — Map iterates insertion order, so this is a
       // plain FIFO with no extra bookkeeping.
-      if (this._cache.size >= MAX_CACHED_FIELDS) {
+      if (this._cache.size >= this._cacheLimit) {
         this._cache.delete(this._cache.keys().next().value);
       }
       this._cache.set(goalCell, field);

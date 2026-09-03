@@ -150,6 +150,14 @@ export class AutoQuality {
     this.low = wantsLow;
     this.flips++;
     this.stateAge = 0;
+    // Counting the first flip toward the backoff is deliberate, and was
+    // re-examined during the fps second pass (see
+    // docs/plans/fps-regression-second-pass.md): "the first change is free"
+    // was tried, on the theory that a machine needing one honest drop to low
+    // should not then wait 12s to recover. It makes
+    // tests/auto-quality-damping.test.mjs's narrow-band case strobe an extra
+    // time, which is the exact dusk/dawn symptom the damping was written to
+    // fix. A slower recovery is the cheaper of the two, so this stays as-is.
     this.dwellSeconds = Math.min(MAX_DWELL_SECONDS, BASE_DWELL_SECONDS * 2 ** this.flips);
     // The window still holds frames rendered at the quality we just left. Kept,
     // it would make the next verdict from measurements of a state that no

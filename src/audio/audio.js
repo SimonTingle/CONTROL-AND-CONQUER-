@@ -73,9 +73,20 @@ let dayBed = null; // AmbienceBed
 let nightBed = null;
 let lastNightFactor = 0;
 
-/** Cached baked buffers, keyed `${id}:${variation}`. Synthesis runs once per
- * distinct key and is reused for every subsequent play. */
+/** Cached baked buffers, keyed by `cacheKey()`. Synthesis runs once per
+ * distinct key and is reused for every subsequent play. LRU by insertion
+ * order — see `touchCached`/`evictCachedIfOverBudget`. */
 const bufferCache = new Map();
+/**
+ * Hard ceiling on cached buffers.
+ *
+ * Sized above the working set geometric quantisation actually produces (a
+ * handful of ids x ~8 doubling buckets x 3 variations), so in practice this
+ * never evicts and never re-bakes; it exists so an unexpected spread of
+ * parameters costs bounded memory instead of growing all match. At roughly
+ * 70KB an explosion buffer this is ~14MB worst case.
+ */
+const MAX_CACHED_BUFFERS = 200;
 /** In-flight bakes, so two shots fired the same frame don't double-render. */
 const bakingPromises = new Map();
 
@@ -472,6 +483,45 @@ function dropCached(id) {
 }
 
 /**
+ * Snap a generator parameter to the nearest power of two.
+ *
+ * Bounded *and* audible is the requirement, and a linear step cannot be both:
+ * a step fine enough to separate a 5-damage plink from a 7-damage one leaves
+ * hundreds of buckets at the top of the range. Loudness and pitch are
+ * ratio-perceived, so a geometric step spends its buckets where they can be
+ * heard — the gap from 5 to 10 is one bucket, and so is 50 to 100.
+ *
+ * Returned rather than mutated in place, and applied to the generator call as
+ * well as the key: baking with the raw value while keying on the snapped one
+ * would mean the buffer a key names depends on which shot happened to bake it
+ * first.
+ *
+ * Non-finite and non-positive values pass through — `Math.log2` has nothing
+ * useful to say about them, and the generators clamp their own inputs anyway.
+ *
+ * The accepted cost: a gun whose damage band straddles a power of two shifts
+ * timbre slightly as veterancy ranks it up, because its band lands in two
+ * buckets rather than one. Any bucketing has this at some boundary; a finer
+ * ratio shrinks the step but multiplies the bakes, which is the thing being
+ * bounded. `tests/sound-recipe.test.mjs` pins it at "at most two" rather than
+ * pretending it does not happen.
+ */
+export function quantiseParam(value) {
+  if (!Number.isFinite(value) || value <= 0) return value;
+  return 2 ** Math.round(Math.log2(value));
+}
+
+/** `params` with every numeric field snapped, or `null`/`undefined` unchanged. */
+export function quantiseParams(params) {
+  if (!params) return params;
+  const out = {};
+  for (const [name, value] of Object.entries(params)) {
+    out[name] = typeof value === 'number' ? quantiseParam(value) : value;
+  }
+  return out;
+}
+
+/**
  * A stable cache key for one bake.
  *
  * The bug this fixes: the key used to be `${id}:${variation}`, with `params`
@@ -488,8 +538,23 @@ function dropCached(id) {
  * Params are quantised rather than used raw. `intensity` is a continuous
  * `sqrt(damage / REFERENCE)`, so keying on the exact float would mean a fresh
  * offline render for practically every shot — trading a correctness bug for a
- * performance one. Two decimal places keeps distinct calibres distinct while
- * still hitting the cache for repeated fire from the same gun.
+ * performance one.
+ *
+ * The first version of this fix quantised to two decimal places, which is not
+ * coarse enough to be a bound at all: damage scales with veterancy rank, and
+ * a custom turret's damage is any integer in 1..100, so the key space ran to
+ * hundreds of values per id. Each new one is an `OfflineAudioContext` render
+ * whose noise fill is synchronous on the main thread, and they landed inside
+ * gameplay frames at every shot and every explosion. `fps-regression.md` had
+ * named this exact outcome in advance as the cost of fixing the key without a
+ * bound. See docs/plans/fps-regression-second-pass.md.
+ *
+ * So the quantisation is now **geometric, one bucket per doubling**
+ * (`quantiseParam`). A gun twice the calibre of another still gets its own
+ * bake — which is the whole audible contract the key fix existed to restore —
+ * while the number of distinct bakes per id is bounded by how many doublings
+ * fit in the parameter's range, about eight, rather than by how finely the
+ * damage numbers happen to be spread.
  */
 export function cacheKey(id, params, variation) {
   let suffix = '';
@@ -497,7 +562,7 @@ export function cacheKey(id, params, variation) {
     for (const name of Object.keys(params).sort()) {
       const value = params[name];
       if (value === undefined || value === null) continue;
-      suffix += `:${name}=${typeof value === 'number' ? value.toFixed(2) : value}`;
+      suffix += `:${name}=${typeof value === 'number' ? quantiseParam(value).toFixed(4) : value}`;
     }
   }
   return `${id}:${variation}${suffix}`;
@@ -516,20 +581,53 @@ async function bufferFor(id, params) {
   // recipes can never share a cache entry, and re-binding the same recipe
   // re-uses the buffer already baked for it.
   const variation = recipe ? recipe.id : Math.floor(synth.variedSeed() * 3);
-  const key = cacheKey(id, recipe ? null : params, variation);
-  if (bufferCache.has(key)) return bufferCache.get(key);
+  // Snapped once, then used for both the key and the bake, so the buffer a
+  // key names never depends on which shot happened to bake it first.
+  const baked = recipe ? null : quantiseParams(params);
+  const key = cacheKey(id, baked, variation);
+  if (bufferCache.has(key)) return touchCached(key);
   if (bakingPromises.has(key)) return bakingPromises.get(key);
 
   const bake = recipe
     ? synth.bakeRecipe(recipe, recipeDuration(recipe))
-    : generator(params);
+    : generator(baked);
   const promise = bake.then((buffer) => {
     bufferCache.set(key, buffer);
+    evictCachedIfOverBudget();
     bakingPromises.delete(key);
     return buffer;
   });
   bakingPromises.set(key, promise);
   return promise;
+}
+
+/**
+ * Read a cached buffer, marking it most-recently-used.
+ *
+ * Re-inserting is how a `Map` records recency: it iterates in insertion order,
+ * so deleting and re-setting moves a key to the back of the eviction queue.
+ */
+function touchCached(key) {
+  const buffer = bufferCache.get(key);
+  bufferCache.delete(key);
+  bufferCache.set(key, buffer);
+  return buffer;
+}
+
+/**
+ * Keep the buffer cache bounded.
+ *
+ * It never needed a bound before because the old key ignored params, which
+ * capped it at three variations per id by accident. Fixing the key removed
+ * that accident without replacing it, so the cache became an unbounded map of
+ * decoded audio held for the life of the page. Geometric quantisation makes
+ * the working set small on its own; this is the backstop that holds when a
+ * match somehow produces more distinct sounds than expected.
+ */
+function evictCachedIfOverBudget() {
+  while (bufferCache.size > MAX_CACHED_BUFFERS) {
+    bufferCache.delete(bufferCache.keys().next().value);
+  }
 }
 
 /**

@@ -427,3 +427,89 @@ test('presets carry their own content-addressed id', () => {
     assert.equal(preset.recipe.id, soundIdFor(preset.recipe), `preset "${preset.id}" id is stale`);
   }
 });
+
+// --- the key's cardinality, not just its correctness ----------------------
+
+/**
+ * The follow-up defect (docs/plans/fps-regression-second-pass.md).
+ *
+ * Putting params in the key was right, but two decimal places is not a bound:
+ * turret damage scales continuously with veterancy rank and a custom turret's
+ * damage is any integer in 1..100, so the key space ran to hundreds of values
+ * per id. Every new key is an `OfflineAudioContext` render whose noise fill is
+ * synchronous on the main thread, and they landed inside gameplay frames at
+ * every shot. `fps-regression.md` predicted exactly this in writing as the
+ * cost of fixing the key without bounding it.
+ *
+ * These tests hold the two halves that have to stay true together: distinct
+ * calibres still sound distinct (the original contract), and the number of
+ * distinct bakes stays bounded (the new one).
+ */
+const { quantiseParam, quantiseParams } = await import('../src/audio/audio.js');
+
+test('a doubling of a param is still its own bake', () => {
+  // The audible contract. A gun twice the calibre gets its own sound.
+  assert.notEqual(
+    cacheKey('weaponFire', { calibre: 20 }, 0),
+    cacheKey('weaponFire', { calibre: 40 }, 0),
+  );
+  assert.notEqual(
+    cacheKey('explosionGround', { intensity: 0.5 }, 0),
+    cacheKey('explosionGround', { intensity: 2 }, 0),
+  );
+});
+
+test('veterancy-sized param drift collapses to at most a boundary straddle', () => {
+  // Veterancy multiplies damage by 1 + 0.05*rank, so ranks 0-4 of one turret
+  // spread damage across a narrow band — five keys before this change.
+  //
+  // At most two, not exactly one: any bucketing splits a band that happens to
+  // cross a boundary, and 20..24 crosses 2^4.5. A gun whose damage sits near a
+  // boundary therefore shifts timbre slightly as it ranks up. That is a real
+  // (small) cosmetic effect and the accepted cost of a hard bound — recorded
+  // here rather than papered over by picking a band that avoids it.
+  for (const base of [20, 30, 45, 7]) {
+    const keys = new Set();
+    for (let rank = 0; rank < 5; rank++) {
+      keys.add(cacheKey('weaponFire', { calibre: base * (1 + 0.05 * rank) }, 0));
+    }
+    assert.ok(keys.size <= 2, `damage ${base} across five ranks produced ${keys.size} distinct bakes`);
+  }
+});
+
+test('the whole plausible damage range stays within a small number of bakes', () => {
+  // The bound itself. Every integer damage the vehicle builder allows
+  // (builderSchema caps turret damage at 100), across every veterancy rank.
+  const keys = new Set();
+  for (let damage = 1; damage <= 100; damage++) {
+    for (let rank = 0; rank < 5; rank++) {
+      keys.add(cacheKey('weaponFire', { calibre: damage * (1 + 0.05 * rank) }, 0));
+    }
+  }
+  assert.ok(
+    keys.size <= 10,
+    `expected the damage range to collapse to a handful of bakes, got ${keys.size}`,
+  );
+});
+
+test('quantiseParam snaps to doublings and leaves non-positives alone', () => {
+  assert.equal(quantiseParam(20), 16);
+  assert.equal(quantiseParam(40), 32);
+  assert.equal(quantiseParam(1), 1);
+  // Ratio-perceived, so the buckets are wide at the top and narrow at the
+  // bottom — which is where small guns actually differ from each other.
+  assert.notEqual(quantiseParam(1), quantiseParam(3));
+  // Nothing useful to snap; the generators clamp their own inputs.
+  assert.equal(quantiseParam(0), 0);
+  assert.equal(quantiseParam(-4), -4);
+  assert.ok(Number.isNaN(quantiseParam(NaN)));
+});
+
+test('the value baked is the value keyed', () => {
+  // If the generator got the raw param while the key got the snapped one, the
+  // buffer a key names would depend on which shot happened to bake it first.
+  const snapped = quantiseParams({ calibre: 20, label: 'x' });
+  assert.equal(snapped.calibre, quantiseParam(20));
+  assert.equal(snapped.label, 'x'); // non-numbers pass through
+  assert.equal(quantiseParams(null), null);
+});
