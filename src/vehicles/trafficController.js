@@ -117,6 +117,87 @@ export class TrafficController {
     this._cooldowns = new Map();
   }
 
+  /**
+   * Candidate `[i, j]` index pairs close enough to be worth measuring, in
+   * exactly the order the old nested loop would have produced them.
+   *
+   * The pass was O(U^2): every vehicle measured against every other, every
+   * tick, at 60Hz. At the 40-unit matches it was written for that is 780
+   * pairs a tick; a 20-team match pushes unit counts high enough for the
+   * square to matter (200 units is 19,900 pairs a tick, 1.2M a second). A
+   * uniform grid makes it O(U + pairs-actually-near).
+   *
+   * **Order is preserved deliberately, and that is the whole subtlety.**
+   * `_resolveAvoidance` and `_resolveCollision` mutate the instances they are
+   * given, so the sequence pairs are visited in is part of the simulation's
+   * result, not an implementation detail. A spatial hash naturally yields
+   * pairs in bucket order, which would be a different sequence and therefore
+   * a different simulation — a desync between a patched and an unpatched
+   * client, in a lockstep match. So candidates are collected and then sorted
+   * back into ascending `(i, j)`, which is the order the nested loop emitted.
+   * `tests/traffic-avoidance-swerve.test.mjs` checks this against a
+   * brute-force reference.
+   *
+   * Cells are sized to the widest possible interaction, so a pair that can
+   * interact at all is always in the same or an adjacent cell.
+   */
+  _nearPairs(instances) {
+    let maxRadius = 0;
+    for (const inst of instances) {
+      if (inst.dead) continue;
+      const r = hullRadius(inst.def);
+      if (r > maxRadius) maxRadius = r;
+    }
+    // The largest distance at which any pair can do anything: two widest
+    // hulls plus the avoidance margin (which exceeds the collision radius).
+    const reach = maxRadius * 2 + AVOIDANCE_MARGIN;
+    const pairs = [];
+    if (reach <= 0) return pairs;
+
+    const buckets = new Map();
+    const key = (cx, cz) => `${cx},${cz}`;
+    for (let i = 0; i < instances.length; i++) {
+      const inst = instances[i];
+      // Dead but not yet flushed — a corpse should not be yielded to, bumped
+      // apart, or handed collision damage on its way out.
+      if (inst.dead) continue;
+      const cx = Math.floor(inst.group.position.x / reach);
+      const cz = Math.floor(inst.group.position.z / reach);
+      const k = key(cx, cz);
+      let bucket = buckets.get(k);
+      if (!bucket) buckets.set(k, (bucket = []));
+      bucket.push(i);
+    }
+
+    const reachSq = reach * reach;
+    for (let i = 0; i < instances.length; i++) {
+      const a = instances[i];
+      if (a.dead) continue;
+      const cx = Math.floor(a.group.position.x / reach);
+      const cz = Math.floor(a.group.position.z / reach);
+      for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const bucket = buckets.get(key(cx + dx, cz + dz));
+          if (!bucket) continue;
+          for (const j of bucket) {
+            if (j <= i) continue; // the old loop's `j = i + 1`, without the scan
+            const b = instances[j];
+            const ddx = a.group.position.x - b.group.position.x;
+            const ddz = a.group.position.z - b.group.position.z;
+            // Squared compare, so the broad phase costs no square roots; the
+            // exact distance is measured once, in update(), for pairs that
+            // survive. Anything beyond `reach` could not have triggered
+            // either branch there, so dropping it changes nothing.
+            if (ddx * ddx + ddz * ddz <= reachSq) pairs.push([i, j]);
+          }
+        }
+      }
+    }
+
+    pairs.sort((p, q) => (p[0] - q[0]) || (p[1] - q[1]));
+    return pairs;
+  }
+
   update(dt) {
     const instances = this.vehicles.instances;
 
@@ -126,25 +207,19 @@ export class TrafficController {
     }
     this._tickCooldowns(dt);
 
-    for (let i = 0; i < instances.length; i++) {
+    for (const [i, j] of this._nearPairs(instances)) {
       const a = instances[i];
-      // Dead but not yet flushed — a corpse should not be yielded to, bumped
-      // apart, or handed collision damage on its way out.
-      if (a.dead) continue;
-      for (let j = i + 1; j < instances.length; j++) {
-        const b = instances[j];
-        if (b.dead) continue;
-        const dist = Math.hypot(
-          a.group.position.x - b.group.position.x,
-          a.group.position.z - b.group.position.z
-        );
+      const b = instances[j];
+      const dist = Math.hypot(
+        a.group.position.x - b.group.position.x,
+        a.group.position.z - b.group.position.z
+      );
 
-        const avoidRadius = hullRadius(a.def) + hullRadius(b.def) + AVOIDANCE_MARGIN;
-        if (dist < avoidRadius) this._resolveAvoidance(a, b);
+      const avoidRadius = hullRadius(a.def) + hullRadius(b.def) + AVOIDANCE_MARGIN;
+      if (dist < avoidRadius) this._resolveAvoidance(a, b);
 
-        const hitRadius = hullRadius(a.def) + hullRadius(b.def) - COLLISION_MARGIN;
-        if (dist < hitRadius) this._resolveCollision(a, b, dist, hitRadius);
-      }
+      const hitRadius = hullRadius(a.def) + hullRadius(b.def) - COLLISION_MARGIN;
+      if (dist < hitRadius) this._resolveCollision(a, b, dist, hitRadius);
     }
 
     // A vehicle that's been yielding continuously for a while — not just this

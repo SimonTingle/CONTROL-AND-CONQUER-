@@ -1093,6 +1093,9 @@ const view = {
     // And the coins were hovering over ground that has moved.
     bounties.clear();
     bountyFx.clear();
+    // Same reason: both sat on the heightfield that has just been replaced.
+    clearWreckage();
+    world.scorchMask.clear();
     // Buildings stand on the old heightfield, and harvesters hold references to
     // fields that no longer exist.
     structures.clear();
@@ -1640,6 +1643,40 @@ function handleImpact(impact) {
  * *not a unit* at a glance, or a battlefield of corpses becomes unparseable.
  * Left permanently — this is the record of what happened here.
  */
+/**
+ * Every wreck currently in the scene, oldest first.
+ *
+ * Kept because they were previously added with **no reference retained at
+ * all** — which made removal impossible even in principle, so nothing cleared
+ * them on `regenerate` or `beginMatch` and a brand new match started littered
+ * with the last one's dead. Each wreck is three shadow-casting meshes in the
+ * sun's map-wide shadow frustum, so the cost is paid every frame regardless of
+ * where the camera is looking. See docs/plans/fps-regression-second-pass.md.
+ */
+const wrecks = [];
+/**
+ * Oldest wrecks are removed past this. Battlefield litter is atmosphere, and
+ * atmosphere does not need to be unbounded: what a player reads as "there was
+ * a fight here" is the nearest dozen or two, not the four hundredth.
+ */
+const MAX_WRECKS = 40;
+
+function disposeWreck(group) {
+  world.scene.remove(group);
+  for (const chunk of group.children) {
+    chunk.geometry?.dispose();
+    // The material is shared across one wreck's three chunks, and disposing it
+    // twice is harmless, but do it once per wreck rather than once per chunk.
+  }
+  group.children[0]?.material?.dispose();
+}
+
+/** Drop every wreck. Called when a match starts or the world regenerates. */
+function clearWreckage() {
+  for (const group of wrecks) disposeWreck(group);
+  wrecks.length = 0;
+}
+
 function leaveWreckage(inst) {
   const scale = inst.kind === 'structure' ? 3 : Math.max(1.2, (inst.def.dims?.hullLength ?? 5) * 0.28);
   const group = new THREE.Group();
@@ -1657,6 +1694,9 @@ function leaveWreckage(inst) {
   const p = inst.x !== undefined ? { x: inst.x, z: inst.z } : inst.group.position;
   group.position.set(p.x, heightmap.heightAt(p.x, p.z), p.z);
   world.scene.add(group);
+
+  wrecks.push(group);
+  while (wrecks.length > MAX_WRECKS) disposeWreck(wrecks.shift());
 }
 
 // Built once and reused for the whole match — see navGrid.js's own header for
@@ -1667,6 +1707,10 @@ function leaveWreckage(inst) {
 // commandContext, rather than reaching for a module-level binding that
 // didn't exist yet at its own construction time.
 const navGrid = new NavGrid(heightmap, structures);
+// console access, same convention as window.__headlightPool. `solveCount` is
+// the number worth watching: it should climb when units pick new destinations
+// and stay flat while a firefight only digs craters.
+window.__navGrid = navGrid;
 
 // Ground control for every dock. Constructed before its two consumers because
 // both take it as a dependency — it owns the claim bookkeeping they each used
@@ -2496,8 +2540,20 @@ function beginMatch(difficulty) {
   bounties.clear();
   bountyFx.clear();
   resetCoinIds();
+  // Both of these outlived the match they were made in, because neither had a
+  // lifecycle call site at all: wrecks were added to the scene with no
+  // reference kept, and ScorchMask.clear() was written but never called. A new
+  // match started with the previous one's dead still casting shadows and its
+  // scorch marks still on the ground. See docs/plans/fps-regression-second-pass.md.
+  clearWreckage();
+  world.scorchMask.clear();
   // Sandbox is a one-team match; Multiplayer AI adds one team per AI opponent.
   game.teams = createTeams(game.aiMatch?.teamCount ?? 0);
+  // Each team brings its own live goals — an AI commander's advance point plus
+  // its harvesters' field and depot — and a goal that misses the flow-field
+  // cache costs a full solve. Sized from the roster rather than left at the
+  // fixed 24 that was chosen when four teams shared it.
+  navGrid.setTeamCount(game.teams.length);
 
   // The player keeps the mask the world already built (the shaders point at
   // its texture and must not be re-pointed). Every AI team gets a CPU-only
@@ -2993,10 +3049,20 @@ function simTick(dt) {
     // id can die at any time.
     const candidates = [];
     if (vehicles.active) candidates.push(vehicles.active);
-    for (const vehicleId of remoteActiveVehicles.values()) {
-      if (vehicleId == null) continue;
-      const inst = vehicles.instances.find((v) => v.id === vehicleId && !v.dead);
-      if (inst && inst !== vehicles.active) candidates.push(inst);
+    if (remoteActiveVehicles.size > 0) {
+      // One pass over the fleet rather than a `.find()` per remote player:
+      // that was O(teams x vehicles) every frame, and both terms grew when
+      // matches went to 20 players. Built only when there is actually a
+      // remote player, so single-player pays nothing for it.
+      const byId = new Map();
+      for (const v of vehicles.instances) {
+        if (!v.dead) byId.set(v.id, v);
+      }
+      for (const vehicleId of remoteActiveVehicles.values()) {
+        if (vehicleId == null) continue;
+        const inst = byId.get(vehicleId);
+        if (inst && inst !== vehicles.active) candidates.push(inst);
+      }
     }
     // Only a vehicle whose own headlightsOn is true can usefully cast real
     // light — one that doesn't want lights on right now would just show an

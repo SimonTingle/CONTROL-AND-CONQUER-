@@ -17,21 +17,31 @@
  * threshold. These rigs are therefore created once and left `visible = true`
  * forever; only their intensity and their parent change.
  *
- * Why RIG_COUNT is 8. Originally this pool held exactly one rig, matching
- * "only the vehicle you personally drive casts real light" — every other
- * player's driven vehicle showed only its static emissive lamp lenses to
- * everyone else, which is exactly what a real-multiplayer report asked to
- * fix: a teammate or opponent's real headlight beam should be visible to
- * other players too, not just to whoever is behind the wheel. 8 rigs (32
- * SpotLights) stays comfortably inside the flat part of the measured cost
- * curve — 4 lights cost ~0.8ms, and the curve "turns sharply nonlinear" only
- * past 16 — while covering "one real-lit vehicle per team" for any match up
- * to 8 teams outright. Matches larger than that (now up to 20 players, see
- * docs/plans/twenty-player-matches.md) fall back to picking the 8 closest
- * candidates to each viewer's own camera each frame (see main.js's
- * candidate-selection code, not this file) — the same graceful "far vehicles
- * keep emissive-only lamps" behavior this pool already had for every vehicle
- * beyond the very first one, just with a wider net.
+ * Why RIG_COUNT is 2. **The number that costs anything is lights, not rigs:
+ * a rig is 4 SpotLights, so the scene pays `RIG_COUNT * 4`.** Read every
+ * figure below in lights, and convert before comparing.
+ *
+ * Originally this pool held exactly one rig (4 lights), matching "only the
+ * vehicle you personally drive casts real light" — every other player's
+ * driven vehicle showed only its static emissive lamp lenses to everyone
+ * else, which is what a real-multiplayer report asked to fix: a teammate or
+ * opponent's real headlight beam should be visible to other players too.
+ *
+ * That fix shipped as 8 rigs, and 8 rigs is 32 lights. The justification
+ * given at the time — "comfortably inside the flat part of the measured cost
+ * curve" — misread the curve by counting rigs where the curve counts lights:
+ * 4 lights cost ~0.8ms and the curve turns sharply nonlinear past *16
+ * lights*, so 32 was double the knee, not inside the flat part. It was never
+ * re-measured (docs/plans/synced-headlights-and-time-of-day.md says so), and
+ * it cost roughly two thirds of the frame rate. See
+ * docs/plans/fps-regression-second-pass.md.
+ *
+ * 2 rigs is 8 lights: half the knee, and it still keeps the reported feature
+ * — your own vehicle plus the nearest other piloted one cast real beams.
+ * Every match size beyond that degrades the way this pool always degraded,
+ * by picking the closest candidates to the viewer's own camera each frame
+ * (see main.js's candidate-selection code, not this file) and leaving the
+ * rest with emissive-only lamps.
  *
  * What the player sees. Real beams follow up to RIG_COUNT vehicles at once —
  * their own, plus whichever other currently-piloted, headlights-on vehicles
@@ -43,8 +53,17 @@
 
 import * as THREE from 'three';
 
-/** See the header above for why this number and not some other. */
-const RIG_COUNT = 8;
+/**
+ * See the header above for why this number and not some other. Changing it
+ * changes the scene's real light count by 4x this — the single most
+ * expensive number in the renderer. `LIGHTS_PER_RIG` exists so a test can
+ * assert the product rather than the factor.
+ */
+const RIG_COUNT = 2;
+/** Two driving beams, one brake pool, one reversing lamp. */
+export const LIGHTS_PER_RIG = 4;
+/** The number that actually costs: what this pool adds to the scene. */
+export const POOL_LIGHT_COUNT = RIG_COUNT * LIGHTS_PER_RIG;
 
 export class HeadlightPool {
   constructor(scene) {

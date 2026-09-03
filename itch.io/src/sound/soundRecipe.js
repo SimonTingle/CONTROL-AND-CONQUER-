@@ -34,7 +34,7 @@
 import { fnv1a64 } from '../core/fnv1a.js';
 import { canonicalJson, CUSTOM_ID_PREFIX, isCustomId } from '../builder/vehicleDraft.js';
 import {
-  LAYER_CONTROLS, LEVELS, MAX_DURATION, MAX_LAYERS, RECIPE_KINDS,
+  LAYER_CONTROLS, LEVELS, MAX_DURATION, MAX_LAYERS, MIN_AMBIENCE_SEGMENT_SECONDS, RECIPE_KINDS,
   deriveBounds, deriveLayerBounds, getPath, groupsFor,
 } from './soundSchema.js';
 import { DEFAULT_ENGINE_SPEC, DEFAULT_AMBIENCE_SPEC } from '../audio/synth.js';
@@ -303,6 +303,26 @@ export function validateRecipe(recipe, { catalog = [] } = {}) {
         else if (value < min || value > max) problems.push(`Layer ${i + 1}: ${field} must be between ${min} and ${max}.`);
       }
     });
+  }
+
+  // An ambience bed's *rate* needs bounding, not just its size.
+  //
+  // A bed re-renders a fresh OfflineAudioContext every `segmentSeconds`
+  // minus the crossfade, each preceded by a synchronous per-sample
+  // Math.random() fill on the main thread. Per render that is small, which is
+  // why the note below correctly says the size is already bounded — but the
+  // schema's floor of 1s turns two beds into ~5 offline renders a second
+  // instead of ~0.45, an 11x increase in main-thread bake work, and recipes
+  // arrive over the wire from other players. Bounding the size while leaving
+  // the rate open is the gap. See docs/plans/fps-regression-second-pass.md.
+  if (kind === 'ambience') {
+    const segment = recipe.ambience?.segmentSeconds;
+    if (Number.isFinite(segment) && segment < MIN_AMBIENCE_SEGMENT_SECONDS) {
+      problems.push(
+        `An ambience segment must be at least ${MIN_AMBIENCE_SEGMENT_SECONDS} seconds ` +
+        `(this one is ${segment}s) — shorter beds re-render faster than they play.`,
+      );
+    }
   }
 
   // Only a baked sound has a render length to bound. An engine is a live

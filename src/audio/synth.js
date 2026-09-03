@@ -381,6 +381,18 @@ export function notification() {
  * wobble inside a segment reads as weather, not a trill.
  */
 export const AMBIENCE_SEGMENT_SECONDS = 5;
+/**
+ * Floor on an authored segment length.
+ *
+ * Bounds the *rate* of offline renders, where MAX_DURATION bounds their size.
+ * A bed re-renders every segment minus its crossfade, each starting with a
+ * synchronous per-sample noise fill on the main thread, so the shorter the
+ * segment the more main-thread bake work per second of playback — at the old
+ * floor of 1s, about eleven times the default. Lives here rather than in
+ * soundSchema.js because it is a property of how `ambienceSegment` renders;
+ * the schema and the validator both read it from here.
+ */
+export const MIN_AMBIENCE_SEGMENT_SECONDS = 4;
 
 /**
  * One take on an ambience bed's character — filtered noise with a slow LFO
@@ -448,7 +460,12 @@ export function ambienceSegment(kind, spec) {
   const lfoHz = num(s.lfoHz, 0.13) * (1 - num(s.lfoJitter, 0) / 2 + variedSeed() * num(s.lfoJitter, 0));
   const lfoDepth = num(s.lfoDepth, 400) * (1 - num(s.depthJitter, 0) / 2 + variedSeed() * num(s.depthJitter, 0));
   const gain = Math.min(1, Math.max(0, num(s.gain, 0.5)));
-  const duration = Math.min(20, Math.max(1, num(s.segmentSeconds, AMBIENCE_SEGMENT_SECONDS)));
+  // Floor of 4, not 1: a bed re-renders every segment (minus the crossfade),
+  // and each render starts with a synchronous per-sample noise fill on the
+  // main thread. A 1s segment is ~11x the bake rate of the default for no
+  // audible gain. `validateRecipe` rejects it first; this is the backstop for
+  // a spec that reaches the synth another way.
+  const duration = Math.min(20, Math.max(MIN_AMBIENCE_SEGMENT_SECONDS, num(s.segmentSeconds, AMBIENCE_SEGMENT_SECONDS)));
   const filterQ = num(s.filterQ, 0.4);
 
   return bake(duration, (ctx) => {
