@@ -5,7 +5,7 @@
  */
 
 import { showToast } from './toast.js';
-import { isSkirmishMode } from './controlSchema.js';
+import { settingsHintFor } from './controlSchema.js';
 
 const REBUILD_DEBOUNCE_MS = 90;
 const LONG_PRESS_MS = 500; // touch equivalent of a right-click
@@ -63,10 +63,10 @@ export class Menu {
    *   calls whatever main.js hands it, the same way every other schema
    *   control's `action`/`onClick` does.
    * @param {object} [opts.game] the live game object, read only for its
-   *   `.mode` — purely so the chooser's "World Settings" hint can describe
-   *   what buildSchema() is actually about to show (isSkirmishMode() trims it
-   *   to Performance/Camera/Sound during a skirmish). Optional: with no game
-   *   passed the hint falls back to the full-schema description.
+   *   `.mode` — purely so the chooser's "World Settings" hint
+   *   (settingsHintFor(), controlSchema.js) can describe what buildSchema()
+   *   is actually about to show, which differs by mode. Optional: with no
+   *   game passed the hint falls back to the full-schema description.
    */
   constructor(schema, statsScreen = null, { isMatchActive, onCloseGame, game } = {}) {
     this.buildSchema = typeof schema === 'function' ? schema : () => schema;
@@ -161,13 +161,11 @@ export class Menu {
     };
 
     // In a skirmish (vs AI or online) buildSchema() has already trimmed
-    // World Settings down to Performance/Camera/Sound — everything else
-    // authors the world itself, which nobody mid-match should be doing. The
-    // hint says so, rather than still promising "Terrain, atmosphere,
-    // camera" for a page two of those three no longer contain.
-    const settingsHint = isSkirmishMode(this.game)
-      ? 'Shadows, camera, sound'
-      : 'Terrain, atmosphere, camera';
+    // World Settings down to a mode-specific subset — everything hidden
+    // authors the world itself, which nobody mid-match should be doing.
+    // settingsHintFor() derives from the same mode logic buildSchema() uses,
+    // so the hint can't drift from what the page actually shows.
+    const settingsHint = settingsHintFor(this.game);
 
     this.body.append(
       item('Statistics', 'How this match is going', () => this.showStatistics()),
