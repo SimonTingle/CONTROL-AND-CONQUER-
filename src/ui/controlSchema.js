@@ -13,6 +13,32 @@ import { api } from '../net/api.js';
 import * as audio from '../audio/audio.js';
 import * as radio from '../audio/radio.js';
 
+/**
+ * Same "multi-team match on a shared island" test main.js's own isSkirmish()
+ * uses, duplicated rather than imported: main.js doesn't export it, and this
+ * file already checks `game.mode` directly elsewhere (see simState below), so
+ * a second literal check here matches the codebase's existing convention
+ * (statisticsScreen.js does the same for its own online-only branch) rather
+ * than introducing a shared module for one boolean.
+ */
+export const isSkirmishMode = (game) =>
+  game?.mode === 'multiplayer-ai' || game?.mode === 'multiplayer-online';
+
+/**
+ * Group titles left reachable once a skirmish starts.
+ *
+ * Every other group is either an authoring/debug affordance for shaping the
+ * world (Terrain shape, Ground, Water, Atmosphere, Game/debug) or account and
+ * save management that makes no sense mid-match against another person or an
+ * AI commander who is already playing the world as generated. Locking their
+ * *controls* via simState() already stopped a click from desyncing anything
+ * online, but leaving them merely disabled still showed a wall of greyed-out
+ * sliders with no bearing on the match — this hides the wall instead.
+ * High-quality shadows, Camera and Sound are all purely local rendering/audio
+ * preferences with no simulation effect, so they stay reachable in every mode.
+ */
+const SKIRMISH_VISIBLE_GROUPS = ['Performance', 'Camera', 'Sound'];
+
 export function buildSchema(world, view, game) {
   const atmo = world.atmosphere;
   const terrain = world.heightmap.params;
@@ -75,7 +101,7 @@ export function buildSchema(world, view, game) {
       ]
     : [];
 
-  return [
+  const groups = [
     ...accountGroup,
     {
       title: 'Save / Load',
@@ -339,4 +365,8 @@ export function buildSchema(world, view, game) {
       ],
     },
   ];
+
+  return isSkirmishMode(game)
+    ? groups.filter((g) => SKIRMISH_VISIBLE_GROUPS.includes(g.title))
+    : groups;
 }
