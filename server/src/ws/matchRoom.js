@@ -50,12 +50,15 @@ export const INPUT_DELAY_TURNS = 2;
  * which is what catches an *old* server that predates this file's check
  * entirely and so never rejects the query param at all.
  */
-// Bumped to 4 alongside the client. Same reasoning as the v3 bump — no wire
-// format changed, but the simulation behind it did: harvesters now consult
-// team-shared danger zones when picking a field, and the AI commander's army
-// budget no longer counts scouts. Two peers on either side of that route their
-// economies and armies differently within seconds.
-export const PROTOCOL_VERSION = 4;
+// Bumped to 5: `hashState` changed shape. Structure positions and def ids
+// joined the hash, and the generated island's own digest with them — a match
+// was played to completion with each player unable to find the other's base
+// while this check reported agreement the whole way, because a structure could
+// stand anywhere on either client and still hash equal. Two peers straddling
+// this bump would compute different hashes for the same world and desync
+// permanently, so refusing to connect is the only honest option. See
+// docs/plans/split-brain-invisible-to-the-hash.md.
+export const PROTOCOL_VERSION = 5;
 /** A player silent this long is dropped so the rest of the match can continue. */
 const DROP_AFTER_MS = 15000;
 /**

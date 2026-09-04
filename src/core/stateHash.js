@@ -49,8 +49,21 @@ function byId(a, b) {
  *   never be compared against one from a different point in time.
  * @returns {string} `"<tick>:<hex>"`
  */
-export function hashState({ vehicles, structures, game, projectiles, bounties, blooms, harvesterAI }, tick) {
+export function hashState({ vehicles, structures, game, projectiles, bounties, blooms, harvesterAI, heightmap }, tick) {
   const parts = [`t${tick}`];
+
+  // The island itself is part of what two clients must agree on, and until now
+  // nothing checked it: only the *seed* crosses the wire, while resolution,
+  // amplitude, octaves and the noise implementation all come from each
+  // client's own bundle. Every spawn point is derived from the heightfield, so
+  // two peers who generated different islands place their bases in different
+  // places — and then play two different games while every other number on
+  // screen agrees. Folding the digest in here means that shows up as a desync
+  // at the first checkpoint, through the comparison machinery that already
+  // exists, rather than as a match nobody can explain.
+  //
+  // Optional so single-player and the existing tests can omit it.
+  if (heightmap?.digest) parts.push(`land${heightmap.digest()}`);
 
   const vs = vehicles.instances.filter((v) => !v.dead).sort(byId);
   for (const v of vs) {
@@ -65,9 +78,23 @@ export function hashState({ vehicles, structures, game, projectiles, bounties, b
     );
   }
 
+  // Position and def id are here because they were once missing, and a real
+  // match was lost to it: two players, same seed, this hash reporting
+  // agreement the whole time, each unable to find the other's base — because a
+  // structure could stand anywhere on either client and still hash equal. A
+  // base station is a structure, so the only cross-client check the game has
+  // was blind to where every building on the map actually was. Vehicles were
+  // always hashed with their position; structures simply never were. See
+  // docs/plans/split-brain-invisible-to-the-hash.md.
+  //
+  // Read from `s.x`/`s.z` rather than a mesh position, matching what
+  // `serializeStructure` (core/snapshot.js) treats as the authoritative
+  // placement — the mesh follows those, not the other way round.
   const ss = structures.instances.filter((s) => !s.dead).sort(byId);
   for (const s of ss) {
-    parts.push(`s${s.id},${s.teamId},${q(s.health)},${q(s.progress)},${s.mode}`);
+    parts.push(
+      `s${s.id},${s.teamId},${q(s.x)},${q(s.z)},${s.def?.id ?? '?'},${q(s.health)},${q(s.progress)},${s.mode}`
+    );
   }
 
   // Blocked crystal fields. This now decides where a team's harvesters go —

@@ -49,7 +49,16 @@ const API_BASE = typeof __API_URL__ === 'string' ? __API_URL__ : '';
 // zones when choosing a field (harvesterAI.js) and the AI commander's army
 // budget no longer counts scouts (aiCommander.js). Both decide where units
 // drive, so two peers straddling this bump diverge within seconds.
-export const PROTOCOL_VERSION = 4;
+//
+// v5 changes what `hashState` covers: structure positions and def ids, plus a
+// digest of the generated island. This is the bump the wider rule exists for —
+// a real match was played to completion with each player unable to find the
+// other's base while the desync check reported agreement throughout, because a
+// structure could stand anywhere on either client and still hash equal. Two
+// peers on either side of this bump compute different hashes for the identical
+// world, which would desync permanently; refusing the connection is the honest
+// answer. See docs/plans/split-brain-invisible-to-the-hash.md.
+export const PROTOCOL_VERSION = 5;
 
 // Exported so the query-string construction can be checked directly without a
 // browser `location` global — see matchClient-protocol.test.mjs, which sets
