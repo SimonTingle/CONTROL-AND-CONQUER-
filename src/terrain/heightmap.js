@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { SimplexNoise } from './noise.js';
+import { fnv1a64 } from '../core/fnv1a.js';
 import { heightmapLinearFilterSupported } from '../core/deviceTier.js';
 
 export const DEFAULT_TERRAIN = {
@@ -116,6 +117,7 @@ export class Heightmap {
     this.data = data;
     this.min = min;
     this.max = max;
+    this._digest = null; // invalidated by every regenerate; see digest()
 
     if (this.texture) this.texture.dispose();
     // Half-float, not float — see the class header. `texelData` is a separate
@@ -157,6 +159,44 @@ export class Heightmap {
       }
     }
     if (this.texture) this.texture.needsUpdate = true;
+  }
+
+  /**
+   * A digest of the generated island, for two clients to compare at connect.
+   *
+   * The seed is the only terrain input that crosses the wire; every other
+   * parameter (`resolution`, `amplitude`, `octaves`, the noise implementation
+   * itself) comes from each client's own bundle. So two peers could build
+   * entirely different islands from the same seed and nothing would say so —
+   * and because every spawn point is derived from the heightfield, they would
+   * place their bases in different places and play two different games. This
+   * is the check that makes that impossible to do quietly. See
+   * docs/plans/split-brain-invisible-to-the-hash.md.
+   *
+   * Quantised to 1e-4 of normalised height before hashing, for the same reason
+   * stateHash quantises: `Math.sin/cos` are not bit-pinned across JS engines,
+   * so raw bits would report a mismatch between two clients that agree to
+   * within a millimetre. Coarser than any real divergence, finer than any
+   * plausible transcendental drift.
+   *
+   * Every Nth sample rather than all 263k: a genuine parameter difference
+   * changes the field everywhere, not in one corner, and a stride keeps this
+   * off the critical path of joining a match. Cached — the field only changes
+   * on `generate()`, and craters/terraform deliberately do not invalidate it
+   * (they are replayed identically on every client from the shared intent
+   * stream, so they are not a source of disagreement about the *island*).
+   */
+  digest() {
+    if (this._digest) return this._digest;
+    if (!this.data) return null;
+    const p = this.params;
+    const stride = 7; // coprime with the row length, so it walks the whole grid
+    let s = `${p.resolution}x${p.size}:`;
+    for (let i = 0; i < this.data.length; i += stride) {
+      s += `${Math.round(this.data[i] * 10000)},`;
+    }
+    this._digest = fnv1a64(s);
+    return this._digest;
   }
 
   /** Normalised height [0,1] at world position, bilinearly filtered. */

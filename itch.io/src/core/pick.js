@@ -274,6 +274,9 @@ export function findSpawnPointNear(
     // genuinely different answer. Default 0 leaves every existing caller's
     // result bit-identical.
     angleOffset = 0,
+    // Refuse the camera-dependent fallback below rather than return a
+    // per-client answer. Set by any caller placing a *simulated* unit.
+    deterministic = false,
   }
 ) {
   const radiusStep = Math.max(2, (maxRadius - minRadius) / 6);
@@ -311,5 +314,17 @@ export function findSpawnPointNear(
       heading: firstDry.heading,
     };
   }
+  // Last resort: nothing in the whole ring was even dry land.
+  //
+  // `findEdgeSpawnPoint` reads the *local camera's* yaw, which is per-client
+  // state. Reaching it from a caller that spawns a simulated unit would put
+  // that unit in a different place on every machine — a split-brain seeded at
+  // tick zero, from a line that looks like a harmless fallback. It is
+  // effectively unreachable from `deployStartingForces` (the base it searches
+  // around was itself placed on dry land by this same heightmap), but
+  // "effectively unreachable" is not a guarantee, so a caller that cannot
+  // afford the risk says so and gets a deterministic refusal instead.
+  // See docs/plans/split-brain-invisible-to-the-hash.md.
+  if (!camera || deterministic) return null;
   return findEdgeSpawnPoint(heightmap, camera, target);
 }

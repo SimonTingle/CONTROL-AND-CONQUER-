@@ -2335,10 +2335,28 @@ async function startOnlineMatch(matchId, difficulty) {
     }
   }
   game.matchDefs = matchDefs;
-  // Team count comes from the lobby row rather than from who happens to be
-  // connected: a client that joins the socket late must still build the same
-  // number of teams as everyone else, or it diverges before it starts.
-  const totalTeams = info.maxPlayers + info.aiCount;
+  // Team count comes from the *roster*, not from the lobby's capacity.
+  //
+  // It must still be a value every client agrees on — a client joining the
+  // socket late has to build the same number of teams as everyone else, or it
+  // diverges before it starts — and `welcome.expectedPlayers` is exactly that:
+  // the server fixes it once per room from the `match_players` count and sends
+  // the identical number in every welcome. It is already what the relay's own
+  // start barrier and turn quorum use; `max_players` is used nowhere in the
+  // relay at all.
+  //
+  // This used to read `info.maxPlayers`, the lobby's *capacity*, so a 6-seat
+  // match that two people joined built six teams and spawned six base
+  // stations. Four of them belonged to a seat nobody was sitting in, and
+  // because those seats are flagged human they got no AI commander either —
+  // inert bases that a player can find, attack and destroy with no opponent
+  // behind them. Every client built the same phantoms, so nothing reported a
+  // desync. Joins are refused once a match leaves `open`
+  // (server/src/routes/matches.js), so the roster is frozen before any socket
+  // connects and team ids are always < expectedPlayers.
+  // See docs/plans/split-brain-invisible-to-the-hash.md.
+  const humanSeats = welcome.expectedPlayers ?? info.maxPlayers;
+  const totalTeams = humanSeats + info.aiCount;
   game.aiMatch = { teamCount: totalTeams - 1, buildDelaySeconds: 5 };
 
   // Same island for everyone, from the seed the lobby fixed at creation.
@@ -2362,7 +2380,7 @@ async function startOnlineMatch(matchId, difficulty) {
   beginMatch(difficulty);
   // Human seats are the low team ids (join hands out the lowest free one), so
   // this split is the same on every client without needing to be communicated.
-  for (const team of game.teams) team.isHuman = team.id < info.maxPlayers;
+  for (const team of game.teams) team.isHuman = team.id < humanSeats;
   game.aiCommanders = game.aiCommanders.filter((c) => !c.team.isHuman);
 
   const session = new LockstepSession({
@@ -2455,7 +2473,7 @@ function onMatchTurn(inputs, turn) {
   }
 
   if (turn % HASH_EVERY_TURNS === 0) {
-    const hash = hashState({ vehicles, structures, game, projectiles, bounties, blooms: world.blooms, harvesterAI }, simClock.tick);
+    const hash = hashState({ vehicles, structures, game, projectiles, bounties, blooms: world.blooms, harvesterAI, heightmap }, simClock.tick);
     // Kept as well as sent: the on-screen readout shows this turn-aligned
     // value so two devices are always comparing the same simulated moment.
     match.checkpoint = { turn, hash: hash.split(':')[1] ?? hash };
@@ -2632,11 +2650,17 @@ function deployStartingForces() {
     // flipping. Applying the same flip here pointed every team out to sea.
     vehicles.spawn(baseDef, point, heading, { activate: false, teamId: team.id });
 
+    // `deterministic` because this places a *simulated* unit: the fallback
+    // inside findSpawnPointNear reads the local camera's yaw, which would put
+    // each client's scout somewhere different from tick zero. It refuses
+    // instead, and the base's own point is the deterministic answer — the two
+    // overlap for a frame, which the vehicles push apart, and that is strictly
+    // better than a split-brain. See docs/plans/split-brain-invisible-to-the-hash.md.
     const beside = findSpawnPointNear(heightmap, point, {
       minRadius: baseDef.dims.hullLength / 2 + scoutDef.dims.hullLength / 2 + 4,
       maxRadius: baseDef.sightRadius * 0.8,
-      camera,
-    });
+      deterministic: true,
+    }) ?? { point: point.clone(), heading };
     beside.point.y += 0.05;
     // `beside.heading` faces the scout back at the base it was placed next to,
     // which on a coastal spawn means facing the water as well. The whole team
@@ -3544,7 +3568,35 @@ window.__step = (seconds, dt = SIM_DT) => {
  * disagree, the first question is always "disagree about what" — and being able
  * to read and diff the hash from a console on each side is the cheapest way in.
  */
-window.__hashState = () => hashState({ vehicles, structures, game, projectiles, bounties, blooms: world.blooms, harvesterAI }, simClock.tick);
+window.__hashState = () => hashState({ vehicles, structures, game, projectiles, bounties, blooms: world.blooms, harvesterAI, heightmap }, simClock.tick);
+/**
+ * Everything two players need to answer "are we in the same world?", in one
+ * object, so it can be read from a console on each machine and diffed by eye.
+ *
+ * Written because that question once took a whole match to answer. Two players
+ * reported finding bases that were not each other's while every number on
+ * screen agreed; the hash could not see structure positions, and nothing
+ * compared the islands at all. `land` is the terrain digest — if that differs,
+ * the two clients built different islands from the same seed and nothing else
+ * here is worth reading. `bases` is where each team's buildings actually
+ * stand, which is the thing the players could see was wrong and the game could
+ * not. See docs/plans/split-brain-invisible-to-the-hash.md.
+ */
+window.__worldCheck = () => ({
+  tick: simClock.tick,
+  hash: hashState({ vehicles, structures, game, projectiles, bounties, blooms: world.blooms, harvesterAI, heightmap }, simClock.tick),
+  land: heightmap.digest(),
+  localTeamId: game.localTeamId,
+  teams: game.teams.length,
+  bases: structures.instances
+    .filter((s) => !s.dead)
+    .map((s) => `t${s.teamId} ${s.def?.id} @ ${Math.round(s.x)},${Math.round(s.z)}`)
+    .sort(),
+  units: vehicles.instances
+    .filter((v) => !v.dead)
+    .map((v) => `t${v.teamId} ${v.def?.id} @ ${Math.round(v.group.position.x)},${Math.round(v.group.position.z)}`)
+    .sort(),
+});
 // Console/e2e debug access to the audio engine — mirrors every other
 // window.__ hook here, and is how a headless smoke test confirms the
 // AudioContext actually reached 'running' rather than staying suspended.
@@ -3599,7 +3651,7 @@ window.__determinismCheck = ({ ticks = 900, sampleEvery = 60 } = {}) => {
   if (!game.teams?.length) return { ok: false, error: 'Start a match first.' };
 
   const baseline = JSON.stringify(serialize(snapshotContext()));
-  const hashCtx = { vehicles, structures, game, projectiles, bounties, blooms: world.blooms, harvesterAI };
+  const hashCtx = { vehicles, structures, game, projectiles, bounties, blooms: world.blooms, harvesterAI, heightmap };
 
   const run = () => {
     deserialize(snapshotContext(), JSON.parse(baseline));

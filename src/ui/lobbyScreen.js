@@ -295,8 +295,16 @@ export class LobbyScreen {
     // button is hidden for guests as a courtesy, not as the security boundary.
     if (this.isHost) {
       const start = this.button('Start match', () => this.start(), { primary: true });
-      // Starting alone is legal (the other seats fill with AI), so this is never
-      // disabled — a host who wants a solo run against AI can have one.
+      // Starting before the lobby fills is legal and never disabled: the match
+      // is sized to whoever actually joined, so unfilled seats simply do not
+      // become teams.
+      //
+      // This comment used to say the empty seats "fill with AI". They did not
+      // — an unoccupied *human* seat became a team with a base station and no
+      // commander driving it, which is how a two-player match ended up with
+      // inert bases that neither player owned. Only `aiCount` seats (which
+      // this build always creates as 0) ever get an AI. See
+      // docs/plans/split-brain-invisible-to-the-hash.md.
       this.panel.appendChild(start);
     } else {
       const hint = document.createElement('p');
