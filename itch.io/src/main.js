@@ -1303,6 +1303,7 @@ const menu = new Menu(() => buildSchema(world, view, game), statisticsScreen, {
   // holds whatever is currently true.
   isMatchActive: () => !!match,
   onCloseGame: () => leaveOnlineMatchDeliberately(),
+  game,
 });
 
 const hud = new Hud();

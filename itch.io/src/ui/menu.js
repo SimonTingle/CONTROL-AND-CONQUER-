@@ -5,6 +5,7 @@
  */
 
 import { showToast } from './toast.js';
+import { isSkirmishMode } from './controlSchema.js';
 
 const REBUILD_DEBOUNCE_MS = 90;
 const LONG_PRESS_MS = 500; // touch equivalent of a right-click
@@ -61,14 +62,20 @@ export class Menu {
    *   return to the lobby. Not this file's business to know how — it just
    *   calls whatever main.js hands it, the same way every other schema
    *   control's `action`/`onClick` does.
+   * @param {object} [opts.game] the live game object, read only for its
+   *   `.mode` — purely so the chooser's "World Settings" hint can describe
+   *   what buildSchema() is actually about to show (isSkirmishMode() trims it
+   *   to Performance/Camera/Sound during a skirmish). Optional: with no game
+   *   passed the hint falls back to the full-schema description.
    */
-  constructor(schema, statsScreen = null, { isMatchActive, onCloseGame } = {}) {
+  constructor(schema, statsScreen = null, { isMatchActive, onCloseGame, game } = {}) {
     this.buildSchema = typeof schema === 'function' ? schema : () => schema;
     // The Statistics page. Owned elsewhere because its content is a live table,
     // not a list of tunables — the schema/createControl pipeline below has no
     // vocabulary for that, and bending it into one would serve neither.
     this.statsScreen = statsScreen;
     this.isMatchActive = isMatchActive;
+    this.game = game;
     this.onCloseGame = onCloseGame;
     this.toggleButton = document.getElementById('menu-toggle');
     this.panel = document.getElementById('panel');
@@ -153,9 +160,18 @@ export class Menu {
       return button;
     };
 
+    // In a skirmish (vs AI or online) buildSchema() has already trimmed
+    // World Settings down to Performance/Camera/Sound — everything else
+    // authors the world itself, which nobody mid-match should be doing. The
+    // hint says so, rather than still promising "Terrain, atmosphere,
+    // camera" for a page two of those three no longer contain.
+    const settingsHint = isSkirmishMode(this.game)
+      ? 'Shadows, camera, sound'
+      : 'Terrain, atmosphere, camera';
+
     this.body.append(
       item('Statistics', 'How this match is going', () => this.showStatistics()),
-      item('World Settings', 'Terrain, atmosphere, camera', () => this.showSettings())
+      item('World Settings', settingsHint, () => this.showSettings())
     );
 
     // Only while an online match is actually live — nothing to close in
