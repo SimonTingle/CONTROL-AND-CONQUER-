@@ -539,6 +539,32 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
   opacity: 1;
 }
 
+/* There is no hover on a touch screen, so the rule above never fires there and
+   the stat line stays collapsed to max-height:0 forever — measured
+   clientHeight 0 on a real phone viewport. Speed and turning circle were
+   simply unavailable to every phone player. Shown outright instead: a
+   reveal-on-press gesture would hide the numbers behind exactly the kind of
+   undiscoverable interaction the on-screen hints exist to apologise for.
+
+   `hover: none` rather than a width query — this is about the input device,
+   not the screen size, and a small window on a desktop should keep the hover
+   behaviour. It is a fourth platform predicate in a codebase that already has
+   three that disagree (core/platform.js, main.js's `input.tapToMove`,
+   radialMenu.js's maxTouchPoints); it earns its place by being the only one
+   CSS can ask on its own, with no JS round-trip to style a static card. */
+@media (hover: none) {
+  .vehicle-card-stats {
+    /* Wrapping, not just un-collapsing. Un-hiding the line alone still left it
+       `nowrap` in a 63-82px cell holding 94px of text, so it rendered as
+       "22 u/s · turning circ…" — visible and still unreadable. Two lines fit
+       every string in the catalog. */
+    max-height: 24px;
+    opacity: 1;
+    white-space: normal;
+    text-overflow: clip;
+  }
+}
+
 /* ---- locked vehicle cards ---- */
 
 .vehicle-card.locked {
@@ -553,13 +579,22 @@ button.action:hover { background: rgba(79, 209, 197, 0.22); }
   background: rgba(255, 255, 255, 0.03);
 }
 
+/* Wraps rather than ellipsising. This line carries the *unlock condition* —
+   "Locked — chart 15% of the island" — which needs 120px and had 63px to say
+   it in on a 320px phone, so it rendered as "Locked — char…" and the one piece
+   of information telling a player how to earn the vehicle was unreadable. Two
+   lines is enough for every string in the catalog; the clamp keeps a future
+   longer one from pushing the grid around. */
 .vehicle-card-lock {
-  display: block;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   font-size: 8px;
+  line-height: 1.25;
   color: var(--accent);
-  white-space: nowrap;
+  white-space: normal;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .vehicle-section {
@@ -1990,6 +2025,9 @@ button.panel-back {
   gap: 3px;
   max-width: min(52vw, 420px);
   pointer-events: none; /* never intercept a click meant for the world */
+  /* Matches #hud and #minimap, so the phone-width fade at the end of this file
+     can treat all three the same way. */
+  transition: opacity 0.25s ease;
 }
 
 .radio-line {
@@ -2119,4 +2157,59 @@ body.drawer-open .hint-layer {
 @media (max-width: 620px) {
   .hint-card { padding: 12px 14px; }
   .hint-card-text { font-size: 11.5px; }
+}
+
+/* ---- world chrome vs. the drawers, on a phone ---- */
+
+/* Both drawers are `min(88vw, 340px)` under 720px — nearly the whole screen.
+   That breaks an assumption the rest of this file was built on.
+
+   Each overlay was taught to dodge only the drawer sharing *its own* screen
+   edge: #hud slides away from the left-hand settings drawer, #minimap from the
+   right-hand vehicle drawer. On a desktop, where a drawer is a 320px panel
+   against one edge, that is exactly right. At 88vw the drawer covers *both*
+   edges, so each element is still fully exposed to the drawer on the far side —
+   and .radio-feed, at z-index 12 against the drawers' 15, was never given a
+   rule at all and simply disappears underneath whichever one opens.
+
+   Measured on a real match at 320/360/390px before this rule existed: the radio
+   feed 86-100% covered, #hud 90% covered by the right drawer, #minimap 67-78%
+   covered by the left. Worst case is the default first run — sandbox auto-opens
+   the vehicle picker in beginMatch, so a new player starts with the HUD and the
+   radio feed already buried.
+
+   Fading rather than shifting because at 320px an open drawer leaves ~38px of
+   world: there is nowhere to shift *to*. The two narrow-viewport overrides
+   above (#hud's and #minimap's) each reached that same conclusion in isolation;
+   this generalises them to every drawer/element pair instead of adding a third
+   one-off. The wide-screen slide-aside rules are deliberately untouched —
+   above 720px there is room, and sliding reads better than vanishing.
+
+   .hint-layer is already handled at every width by its own rule above; it is
+   listed here only so this stays the single place describing the behaviour. */
+@media (max-width: 720px) {
+  body.settings-open #hud,
+  body.settings-open .radio-feed,
+  body.settings-open #minimap,
+  body.settings-open .hint-layer,
+  body.drawer-open #hud,
+  body.drawer-open .radio-feed,
+  body.drawer-open #minimap,
+  body.drawer-open .hint-layer {
+    transform: none;
+    opacity: 0;
+    pointer-events: none;
+  }
+}
+
+/* The build stamp is z-index 45 — above the drawers, not behind them — so an
+   open drawer does not cover it, it collides with it: the hash lands directly
+   on top of the panel's own "Menu" heading and both become unreadable. Hidden
+   while a drawer is open at every width (the collision is not a phone-specific
+   one), and the same string is appended to the panel's own diagnostics line
+   (main.js's menu.setStats) so opening the drawer now *reveals* the version
+   instead of scribbling over it. */
+body.settings-open #version-badge,
+body.drawer-open #version-badge {
+  display: none;
 }
