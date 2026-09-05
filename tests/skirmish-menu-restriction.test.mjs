@@ -7,12 +7,20 @@
  * or manages accounts/saves, neither of which makes sense once a match is
  * already running against another player or an AI commander.
  *
+ * A follow-up report asked for Save/Load specifically back for vs-AI: loading
+ * a local snapshot mid-*online* match rewinds this client's world with no way
+ * to tell the peer — the exact "two clients silently disagree" failure
+ * docs/plans/split-brain-invisible-to-the-hash.md exists to close — but vs-AI
+ * has no peer, and `core/snapshot.js` fully serializes and restores
+ * `game.aiCommanders`, so a save/load round-trip there is self-consistent.
+ * See docs/plans/readd-save-load-vs-ai.md. So the two skirmish modes now show
+ * genuinely different group sets, not one shared restriction.
+ *
  * `simState()` already disabled the individual *controls* that write
  * simulation state during an online match specifically — this is a different,
- * coarser rule: hide whole groups, and for both online and vs-AI, not just
- * online. The two are independent (a group can be shown-but-locked, or
- * hidden outright), so this needs its own coverage rather than assuming the
- * simState() tests already imply it.
+ * coarser rule: hide whole groups, per mode. The two are independent (a group
+ * can be shown-but-locked, or hidden outright), so this needs its own
+ * coverage rather than assuming the simState() tests already imply it.
  *
  * `buildSchema()` only *describes* controls — every `get`/`set` is a closure
  * that is stored, not called, while the schema array itself is built — so it
@@ -31,7 +39,7 @@ import assert from 'node:assert/strict';
 
 globalThis.__API_URL__ = '';
 
-const { buildSchema, isSkirmishMode } = await import('../src/ui/controlSchema.js');
+const { buildSchema, isSkirmishMode, settingsHintFor } = await import('../src/ui/controlSchema.js');
 
 /** Just enough of `world`/`view`/`game` for buildSchema() to construct its
  * closures without dereferencing anything eagerly. */
@@ -63,6 +71,15 @@ function titlesFor(mode) {
   return buildSchema(world, view, game).map((g) => g.title);
 }
 
+function groupsFor(mode) {
+  return buildSchema(...Object.values(makeStubs(mode)));
+}
+
+const ALL_GROUPS = [
+  'Save / Load', 'Performance', 'Atmosphere', 'Terrain shape',
+  'Ground', 'Water', 'Camera', 'Sound', 'Game / debug',
+];
+
 test('isSkirmishMode is true for both online and vs-AI, false otherwise', () => {
   assert.equal(isSkirmishMode({ mode: 'multiplayer-online' }), true);
   assert.equal(isSkirmishMode({ mode: 'multiplayer-ai' }), true);
@@ -73,45 +90,77 @@ test('isSkirmishMode is true for both online and vs-AI, false otherwise', () => 
 
 test('sandbox sees every settings group, unrestricted', () => {
   const titles = titlesFor('sandbox');
-  // The full, pre-restriction group set — Account is absent only because
-  // __API_URL__ is unset above (api.isConfigured === false), matching a
-  // backend-less build exactly as accountGroup's own comment describes.
-  for (const expected of [
-    'Save / Load', 'Performance', 'Atmosphere', 'Terrain shape',
-    'Ground', 'Water', 'Camera', 'Sound', 'Game / debug',
-  ]) {
+  // Account is absent only because __API_URL__ is unset above
+  // (api.isConfigured === false), matching a backend-less build exactly as
+  // accountGroup's own comment describes.
+  for (const expected of ALL_GROUPS) {
     assert.ok(titles.includes(expected), `sandbox is missing "${expected}"`);
   }
 });
 
-for (const mode of ['multiplayer-online', 'multiplayer-ai']) {
-  test(`${mode} shows only Performance, Camera and Sound`, () => {
-    assert.deepEqual(titlesFor(mode), ['Performance', 'Camera', 'Sound']);
-  });
+// --- online: unchanged by the Save/Load follow-up ---------------------------
 
+test('multiplayer-online still shows only Performance, Camera and Sound', () => {
+  assert.deepEqual(titlesFor('multiplayer-online'), ['Performance', 'Camera', 'Sound']);
+});
+
+test('multiplayer-online still hides Save/Load along with the world-shaping groups', () => {
+  const titles = titlesFor('multiplayer-online');
+  for (const hidden of [
+    'Save / Load', 'Atmosphere', 'Terrain shape', 'Ground', 'Water', 'Game / debug',
+  ]) {
+    assert.ok(!titles.includes(hidden), `online still shows "${hidden}" — this is the desync risk`);
+  }
+});
+
+// --- vs-AI: Save/Load is back -----------------------------------------------
+
+test('multiplayer-ai shows Save/Load, Performance, Camera and Sound', () => {
+  assert.deepEqual(titlesFor('multiplayer-ai'), ['Save / Load', 'Performance', 'Camera', 'Sound']);
+});
+
+test('multiplayer-ai still hides the genuinely world-shaping and account groups', () => {
+  const titles = titlesFor('multiplayer-ai');
+  for (const hidden of ['Atmosphere', 'Terrain shape', 'Ground', 'Water', 'Game / debug']) {
+    assert.ok(!titles.includes(hidden), `vs-AI still shows "${hidden}"`);
+  }
+});
+
+test("Save/Load's own controls are unchanged between sandbox and vs-AI — the fix only toggles group visibility", () => {
+  const full = groupsFor('sandbox').find((g) => g.title === 'Save / Load');
+  const restricted = groupsFor('multiplayer-ai').find((g) => g.title === 'Save / Load');
+  assert.deepEqual(
+    restricted.controls.map((c) => c.type),
+    full.controls.map((c) => c.type),
+  );
+});
+
+// --- shared across both skirmish modes --------------------------------------
+
+for (const mode of ['multiplayer-online', 'multiplayer-ai']) {
   test(`${mode}'s Performance group is exactly High-quality shadows`, () => {
-    const group = buildSchema(...Object.values(makeStubs(mode))).find((g) => g.title === 'Performance');
+    const group = groupsFor(mode).find((g) => g.title === 'Performance');
     assert.equal(group.controls.length, 1);
     assert.equal(group.controls[0].label, 'High-quality shadows');
-  });
-
-  test(`${mode} hides world-shaping and account/save groups`, () => {
-    const titles = titlesFor(mode);
-    for (const hidden of [
-      'Save / Load', 'Atmosphere', 'Terrain shape', 'Ground', 'Water', 'Game / debug',
-    ]) {
-      assert.ok(!titles.includes(hidden), `${mode} still shows "${hidden}"`);
-    }
   });
 }
 
 test('Camera and Sound keep every one of their existing controls in a skirmish — the fix hides groups, not controls within a kept group', () => {
-  const full = buildSchema(...Object.values(makeStubs('sandbox')));
-  const restricted = buildSchema(...Object.values(makeStubs('multiplayer-online')));
+  const full = groupsFor('sandbox');
+  const restricted = groupsFor('multiplayer-online');
 
   for (const title of ['Camera', 'Sound']) {
     const fullLabels = full.find((g) => g.title === title).controls.map((c) => c.label);
     const restrictedLabels = restricted.find((g) => g.title === title).controls.map((c) => c.label);
     assert.deepEqual(restrictedLabels, fullLabels, `${title}'s own controls changed under restriction`);
   }
+});
+
+// --- the chooser hint -------------------------------------------------------
+
+test('settingsHintFor describes what each mode actually shows', () => {
+  assert.equal(settingsHintFor({ mode: 'multiplayer-online' }), 'Shadows, camera, sound');
+  assert.equal(settingsHintFor({ mode: 'multiplayer-ai' }), 'Save/load, shadows, camera, sound');
+  assert.equal(settingsHintFor({ mode: 'sandbox' }), 'Terrain, atmosphere, camera');
+  assert.equal(settingsHintFor(undefined), 'Terrain, atmosphere, camera');
 });
