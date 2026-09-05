@@ -111,7 +111,7 @@ export class AiDifficultyScreen {
 
     const note = document.createElement('p');
     note.className = 'hint ai-difficulty-note';
-    note.textContent = 'AI opponents are coming in a future update — this starts a solo match with these settings saved.';
+    note.textContent = 'This starts a match against AI-controlled bases at the chosen difficulty.';
     panel.appendChild(note);
 
     const start = document.createElement('button');
