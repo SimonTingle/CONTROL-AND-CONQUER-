@@ -74,7 +74,7 @@ import * as playerProfile from './core/playerProfile.js';
 import { HintSystem } from './ui/hintSystem.js';
 import { HINT_DEFS } from './ui/hintDefs.js';
 import { showHintCard, hideHintCard } from './ui/hintCard.js';
-import { mountVersionBadge } from './ui/versionBadge.js';
+import { mountVersionBadge, getBuildVersion } from './ui/versionBadge.js';
 
 // __APP_VERSION__/__BUILD_TIME__ are literal strings substituted at build
 // time by vite.config.js's `define` — not runtime values, so they describe
@@ -3545,7 +3545,15 @@ function renderTick(dt) {
     }
     menu.setStats(
       `${fps} fps · ${info.calls} draws · ${(info.triangles / 1000).toFixed(0)}k tris\n` +
-      `sun ${world.atmosphere.params.elevation.toFixed(0)}° · seed ${heightmap.params.seed}` +
+      // The build stamp moves in here while the drawer is open. #version-badge
+      // is z-index 45, so an open drawer doesn't cover it — it collides with
+      // the panel's own "Menu" heading, and both become unreadable on a phone
+      // (see style.css's body.settings-open #version-badge). Reading it from
+      // the same getBuildVersion() the badge itself uses, so the two can't
+      // disagree about which build this is — the one question the badge exists
+      // to answer.
+      `build ${getBuildVersion()} · sun ${world.atmosphere.params.elevation.toFixed(0)}° · ` +
+      `seed ${heightmap.params.seed}` +
       line3
     );
   }
