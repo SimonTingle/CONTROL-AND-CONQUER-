@@ -12,6 +12,7 @@
 import { api } from '../net/api.js';
 import * as audio from '../audio/audio.js';
 import * as radio from '../audio/radio.js';
+import { hintsEnabled, setHintsEnabled, resetHints } from '../core/playerProfile.js';
 
 /**
  * Same "multi-team match on a shared island" test main.js's own isSkirmish()
@@ -35,8 +36,11 @@ export const isSkirmishMode = (game) =>
  * simState() already stopped a click from desyncing anything online, but
  * leaving them merely disabled still showed a wall of greyed-out sliders with
  * no bearing on the match — this hides the wall instead. High-quality
- * shadows, Camera and Sound are all purely local rendering/audio preferences
- * with no simulation effect, so they stay reachable in every mode.
+ * shadows, Hints, Camera and Sound are all purely local preferences with no
+ * simulation effect, so they stay reachable in every mode. Hints for a
+ * stronger reason than the other three: they only ever appear *during* a
+ * match, so a toggle that vanished the moment one started would be
+ * unreachable exactly when somebody wants it.
  *
  * Save/Load is the one group that differs. Loading a local snapshot mid-*online*
  * match rewinds this client's world with no way to tell the peer — exactly
@@ -50,8 +54,8 @@ export const isSkirmishMode = (game) =>
  * caught by the same broad-brush "hide everything but Performance/Camera/
  * Sound" rule. See docs/plans/readd-save-load-vs-ai.md.
  */
-const ONLINE_VISIBLE_GROUPS = ['Performance', 'Camera', 'Sound'];
-const AI_VISIBLE_GROUPS = ['Save / Load', 'Performance', 'Camera', 'Sound'];
+const ONLINE_VISIBLE_GROUPS = ['Performance', 'Hints', 'Camera', 'Sound'];
+const AI_VISIBLE_GROUPS = ['Save / Load', 'Performance', 'Hints', 'Camera', 'Sound'];
 
 /** Which groups `buildSchema()` should keep, or `null` for "everything" outside a skirmish. */
 function visibleGroupTitles(game) {
@@ -67,8 +71,8 @@ function visibleGroupTitles(game) {
  * truth for which groups a mode reveals.
  */
 export function settingsHintFor(game) {
-  if (game?.mode === 'multiplayer-online') return 'Shadows, camera, sound';
-  if (game?.mode === 'multiplayer-ai') return 'Save/load, shadows, camera, sound';
+  if (game?.mode === 'multiplayer-online') return 'Hints, shadows, camera, sound';
+  if (game?.mode === 'multiplayer-ai') return 'Hints, save/load, shadows, camera, sound';
   return 'Terrain, atmosphere, camera';
 }
 
@@ -329,6 +333,26 @@ export function buildSchema(world, view, game) {
         slider('Depth falloff', 2, 60, 1, () => wu.uDepthFade.value, (v) => (wu.uDepthFade.value = v)),
         color('Shallow', () => wu.uShallow.value, (c) => wu.uShallow.value.set(c)),
         color('Deep', () => wu.uDeep.value, (c) => wu.uDeep.value.set(c)),
+      ],
+    },
+    {
+      /**
+       * Purely local preferences with no simulation effect, so no simState()
+       * wrapper — turning your own hints off cannot desync anybody.
+       *
+       * Reads and writes go straight through playerProfile rather than being
+       * mirrored onto a game field: the toggle and the hint system must never
+       * be able to disagree about whether hints are on, and one source of
+       * truth is how that is guaranteed rather than remembered.
+       */
+      title: 'Hints',
+      controls: [
+        toggle('Show hints', () => hintsEnabled(), (v) => setHintsEnabled(v)),
+        {
+          type: 'button',
+          label: 'Show all hints again',
+          action: () => resetHints(),
+        },
       ],
     },
     {

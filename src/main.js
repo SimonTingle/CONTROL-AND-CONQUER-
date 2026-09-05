@@ -70,6 +70,10 @@ import { AutoQuality } from './core/autoQuality.js';
 import { IS_MOBILE } from './core/platform.js';
 import { initDeviceTier } from './core/deviceTier.js';
 import { showToast } from './ui/toast.js';
+import * as playerProfile from './core/playerProfile.js';
+import { HintSystem } from './ui/hintSystem.js';
+import { HINT_DEFS } from './ui/hintDefs.js';
+import { showHintCard, hideHintCard } from './ui/hintCard.js';
 import { mountVersionBadge } from './ui/versionBadge.js';
 
 // __APP_VERSION__/__BUILD_TIME__ are literal strings substituted at build
@@ -842,6 +846,10 @@ function pickSelectable(clientX, clientY) {
  * double-tap detector in `pointerdown` above.
  */
 function openMenuAt(clientX, clientY) {
+  // Reaching here at all means the player found the gesture, whether or not
+  // anything was under the press — which is the thing the command-ring hint
+  // exists to teach, so it retires on the attempt rather than on a hit.
+  hintProgress.openedRadial = true;
   let instance = pickSelectable(clientX, clientY);
 
   if (instance) {
@@ -1397,6 +1405,37 @@ const radialMenu = new RadialMenu(camera, {
     submitIntent(Intent.command(instance.id, instance.kind, cmd.id));
   },
 });
+
+/**
+ * On-screen hints for new players.
+ *
+ * Presentation only, and pointedly so: it is handed a snapshot of match state
+ * from the half-second poll in renderTick and reads nothing itself, the same
+ * observe-and-diff shape as audio/chatter.js. Nothing here queues an intent or
+ * writes a field the simulation can see, so it cannot desync a match — see
+ * ui/hintSystem.js's header for why that shape was chosen rather than
+ * callbacks from structures.onComplete.
+ */
+const hints = new HintSystem({
+  profile: playerProfile,
+  defs: HINT_DEFS,
+  // The wording differs by input, not by screen size: `input.tapToMove` is
+  // already the game's answer to "does this person have a touch screen", so
+  // reuse it rather than adding a fourth platform predicate to the three that
+  // already disagree with each other.
+  isTouch: input.tapToMove,
+  onShow: (hint) => showHintCard(hint, () => hints.dismiss()),
+  onHide: () => hideHintCard(),
+});
+
+/**
+ * Whether the player has ever opened a command ring or a drawer this session.
+ *
+ * Latched here rather than derived per poll because both are momentary: a hint
+ * teaching the gesture must retire the instant it is first performed, and by
+ * the next half-second tick the menu may well be closed again.
+ */
+const hintProgress = { openedRadial: false, openedDrawer: false };
 
 /**
  * Check if a route from facility to spawn point is drivable (climb grade acceptable).
@@ -2054,8 +2093,17 @@ const vehiclePicker = new VehiclePicker(VEHICLE_CATALOG, {
 // opening one now closes the other; above it, both can stay open exactly as
 // they always could, since nothing here changes desktop behaviour at all.
 const NARROW_VIEWPORT = matchMedia('(max-width: 720px)');
-menu.onOpen = () => { if (NARROW_VIEWPORT.matches) vehiclePicker.setOpen(false); };
-vehiclePicker.onOpen = () => { if (NARROW_VIEWPORT.matches) menu.setOpen(false); };
+// Latching hintProgress here rather than in the hint poll: opening a drawer is
+// momentary, and the "here are your menus" hint has to retire on the fact that
+// it happened at all, not on it still being true half a second later.
+menu.onOpen = () => {
+  hintProgress.openedDrawer = true;
+  if (NARROW_VIEWPORT.matches) vehiclePicker.setOpen(false);
+};
+vehiclePicker.onOpen = () => {
+  hintProgress.openedDrawer = true;
+  if (NARROW_VIEWPORT.matches) menu.setOpen(false);
+};
 
 vehiclePicker.lockText = (def) =>
   def.unlock === 'exploration'
@@ -2546,6 +2594,14 @@ function beginMatch(difficulty) {
   chatter.reset();
   radio.cancelSpeech();
   clearRadioFeed();
+  // Same reasoning for the hints: per-match pacing starts over, the persisted
+  // record of what has already been read does not. Counting the match here
+  // rather than at the portal means an abandoned mode-select doesn't spend one
+  // of the novice's matches. `hintProgress` is reset at the *end* of this
+  // function, not here — see the note there.
+  playerProfile.recordMatchStarted();
+  hints.clear();
+  hints.reset();
   // A match is the unit of simulated time — tick 0 is its first step. Every
   // ban, threat memory and (later) lockstep turn number is relative to this.
   resetSimClock(0);
@@ -2620,6 +2676,13 @@ function beginMatch(difficulty) {
   // The drawer is only the opening move in sandbox; an AI match has already
   // put everyone on the board.
   if (!isSkirmish()) vehiclePicker.setOpen(true);
+
+  // Deliberately after that auto-open, which fires the picker's `onOpen` and
+  // would otherwise latch `openedDrawer` on the player's behalf — retiring the
+  // "here are your menus" hint for a drawer they never touched. Resetting last
+  // means only a drawer the player opens themselves counts.
+  hintProgress.openedRadial = false;
+  hintProgress.openedDrawer = false;
 }
 
 /**
@@ -3380,6 +3443,9 @@ function renderTick(dt) {
   frames++;
   statsTimer += dt;
   if (statsTimer >= 0.5) {
+    // Captured before the reset below: the hint system paces itself in real
+    // seconds, and this block is "at least half a second", not exactly half.
+    const pollDt = statsTimer;
     fps = Math.round(frames / statsTimer);
     frames = 0;
     statsTimer = 0;
@@ -3434,6 +3500,34 @@ function renderTick(dt) {
         (v) => !v.dead && v.teamId === localTeamId && v.def?.tags?.includes('economy')
           && zones.some((z) => Math.hypot(z.x - v.group.position.x, z.z - v.group.position.z) <= z.radius),
       ).length,
+    });
+
+    // Hints, on the same cadence and for the same reason as the radio: they
+    // react to things that change at human pace. Handed a snapshot rather than
+    // the live objects, so nothing downstream can reach into the simulation —
+    // see ui/hintSystem.js. `dangerNearBase` is deliberately reused from the
+    // chatter call above rather than recomputed.
+    // structures.instanceOf is already the team-scoped "have *I* built one of
+    // these?" question this needs — see its comment there.
+    const hasStructure = (defId) => !!structures.instanceOf(defId, localTeamId);
+    hints.observe({
+      dt: pollDt,
+      mode: game.mode,
+      baseDeployed: vehicles.instances.some(
+        (v) => !v.dead && v.teamId === localTeamId && v.mode === 'deployed',
+      ),
+      hasHarvesterFacility: hasStructure('harvester-facility'),
+      hasArmedFactory: hasStructure('armed-factory'),
+      hasRepairBay: hasStructure('repair-bay'),
+      harvesterEarnings: game.playerTeam?.stats?.harvesterEarningsTotal ?? 0,
+      unitsLost: game.playerTeam?.stats?.unitsLost ?? 0,
+      hasOpenedRadial: hintProgress.openedRadial,
+      hasOpenedDrawer: hintProgress.openedDrawer,
+      radialOpen: radialMenu.isOpen,
+      drawerOpen: menu.open || vehiclePicker.open,
+      underAttack: !!home && zones.some(
+        (z) => Math.hypot(z.x - home.x, z.z - home.z) <= z.radius + BASE_ALERT_RADIUS,
+      ),
     });
 
     const info = renderer.info.render;

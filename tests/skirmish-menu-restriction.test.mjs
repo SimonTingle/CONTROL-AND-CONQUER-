@@ -2,10 +2,10 @@
  * The hamburger menu's World Settings page, restricted during a skirmish.
  *
  * Reported directly: in online and vs-AI multiplayer, only "High-quality
- * shadows" (Performance), Camera and Sound should be reachable — every other
- * group either reshapes the world (Terrain shape, Ground, Water, Atmosphere)
- * or manages accounts/saves, neither of which makes sense once a match is
- * already running against another player or an AI commander.
+ * shadows" (Performance), Hints, Camera and Sound should be reachable — every
+ * other group either reshapes the world (Terrain shape, Ground, Water,
+ * Atmosphere) or manages accounts/saves, neither of which makes sense once a
+ * match is already running against another player or an AI commander.
  *
  * A follow-up report asked for Save/Load specifically back for vs-AI: loading
  * a local snapshot mid-*online* match rewinds this client's world with no way
@@ -98,10 +98,15 @@ test('sandbox sees every settings group, unrestricted', () => {
   }
 });
 
-// --- online: unchanged by the Save/Load follow-up ---------------------------
+// --- online: unchanged by the Save/Load follow-up, but Hints joined both ----
+// modes when on-screen hints were added. It belongs for a stronger reason
+// than Performance/Camera/Sound: hints only ever appear *during* a match, so
+// a toggle that vanished the moment one started would be unreachable exactly
+// when somebody wants it. Like them, it writes no simulation state — it is a
+// local display preference.
 
-test('multiplayer-online still shows only Performance, Camera and Sound', () => {
-  assert.deepEqual(titlesFor('multiplayer-online'), ['Performance', 'Camera', 'Sound']);
+test('multiplayer-online still shows only Performance, Hints, Camera and Sound', () => {
+  assert.deepEqual(titlesFor('multiplayer-online'), ['Performance', 'Hints', 'Camera', 'Sound']);
 });
 
 test('multiplayer-online still hides Save/Load along with the world-shaping groups', () => {
@@ -115,8 +120,8 @@ test('multiplayer-online still hides Save/Load along with the world-shaping grou
 
 // --- vs-AI: Save/Load is back -----------------------------------------------
 
-test('multiplayer-ai shows Save/Load, Performance, Camera and Sound', () => {
-  assert.deepEqual(titlesFor('multiplayer-ai'), ['Save / Load', 'Performance', 'Camera', 'Sound']);
+test('multiplayer-ai shows Save/Load, Performance, Hints, Camera and Sound', () => {
+  assert.deepEqual(titlesFor('multiplayer-ai'), ['Save / Load', 'Performance', 'Hints', 'Camera', 'Sound']);
 });
 
 test('multiplayer-ai still hides the genuinely world-shaping and account groups', () => {
@@ -159,8 +164,8 @@ test('Camera and Sound keep every one of their existing controls in a skirmish �
 // --- the chooser hint -------------------------------------------------------
 
 test('settingsHintFor describes what each mode actually shows', () => {
-  assert.equal(settingsHintFor({ mode: 'multiplayer-online' }), 'Shadows, camera, sound');
-  assert.equal(settingsHintFor({ mode: 'multiplayer-ai' }), 'Save/load, shadows, camera, sound');
+  assert.equal(settingsHintFor({ mode: 'multiplayer-online' }), 'Hints, shadows, camera, sound');
+  assert.equal(settingsHintFor({ mode: 'multiplayer-ai' }), 'Hints, save/load, shadows, camera, sound');
   assert.equal(settingsHintFor({ mode: 'sandbox' }), 'Terrain, atmosphere, camera');
   assert.equal(settingsHintFor(undefined), 'Terrain, atmosphere, camera');
 });

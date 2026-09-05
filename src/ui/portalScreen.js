@@ -198,8 +198,8 @@ export class PortalScreen {
   /**
    * The god-mode app chooser — a second portal, one level in.
    *
-   * Deliberately the same shape as showComingSoon() below: replace the root's
-   * children with a panel that ends in a Back button wired to buildGrid().
+   * Deliberately the same shape as buildGrid()'s other panels: replace the
+   * root's children with a panel that ends in a Back button wired to buildGrid().
    * That is this screen's established way of going one level deep and coming
    * back, and reusing it means Back behaves identically wherever it appears.
    *
@@ -235,29 +235,6 @@ export class PortalScreen {
       row.appendChild(card);
     }
     panel.appendChild(row);
-
-    const back = document.createElement('button');
-    back.type = 'button';
-    back.className = 'portal-card portal-back';
-    back.textContent = 'Back';
-    back.addEventListener('click', () => this.buildGrid());
-    panel.appendChild(back);
-
-    this.root.replaceChildren(panel);
-  }
-
-  showComingSoon() {
-    const panel = document.createElement('div');
-    panel.className = 'portal-panel';
-
-    const h1 = document.createElement('h1');
-    h1.textContent = 'Multiplayer Online';
-    panel.appendChild(h1);
-
-    const hint = document.createElement('p');
-    hint.className = 'hint';
-    hint.textContent = 'Networked play is not built yet — coming in a future update.';
-    panel.appendChild(hint);
 
     const back = document.createElement('button');
     back.type = 'button';
