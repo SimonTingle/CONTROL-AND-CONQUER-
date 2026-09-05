@@ -26,23 +26,55 @@ export const isSkirmishMode = (game) =>
   game?.mode === 'multiplayer-ai' || game?.mode === 'multiplayer-online';
 
 /**
- * Group titles left reachable once a skirmish starts.
+ * Group titles left reachable in each skirmish mode. The two modes diverge on
+ * exactly one group — see the note on Save/Load below — so this is two named
+ * lists rather than one shared constant with a mode check bolted on.
  *
- * Every other group is either an authoring/debug affordance for shaping the
- * world (Terrain shape, Ground, Water, Atmosphere, Game/debug) or account and
- * save management that makes no sense mid-match against another person or an
- * AI commander who is already playing the world as generated. Locking their
- * *controls* via simState() already stopped a click from desyncing anything
- * online, but leaving them merely disabled still showed a wall of greyed-out
- * sliders with no bearing on the match — this hides the wall instead.
- * High-quality shadows, Camera and Sound are all purely local rendering/audio
- * preferences with no simulation effect, so they stay reachable in every mode.
+ * Every hidden group is either an authoring/debug affordance for shaping the
+ * world (Terrain shape, Ground, Water, Atmosphere, Game/debug) or account
+ * management that makes no sense mid-match. Locking their *controls* via
+ * simState() already stopped a click from desyncing anything online, but
+ * leaving them merely disabled still showed a wall of greyed-out sliders with
+ * no bearing on the match — this hides the wall instead. High-quality
+ * shadows, Hints, Camera and Sound are all purely local preferences with no
+ * simulation effect, so they stay reachable in every mode. Hints for a
+ * stronger reason than the other three: they only ever appear *during* a
+ * match, so a toggle that vanished the moment one started would be
+ * unreachable exactly when somebody wants it.
  *
- * Hints are on that list for a stronger reason than the others: they only ever
- * appear *during* a match, so a hints toggle that vanished the moment one
- * started would be unreachable exactly when somebody wants it.
+ * Save/Load is the one group that differs. Loading a local snapshot mid-*online*
+ * match rewinds this client's world with no way to tell the peer — exactly
+ * the "two clients silently disagree" failure
+ * docs/plans/split-brain-invisible-to-the-hash.md exists to close, so it stays
+ * hidden there. Vs AI has no peer to disagree with, and `core/snapshot.js`
+ * fully serializes and restores `game.aiCommanders`
+ * (`serializeAiCommanders`), so a save/load round-trip there is
+ * self-consistent — it was never actually the risk the original restriction
+ * (docs/plans/skirmish-settings-restriction.md) was written to close, just
+ * caught by the same broad-brush "hide everything but Performance/Camera/
+ * Sound" rule. See docs/plans/readd-save-load-vs-ai.md.
  */
-const SKIRMISH_VISIBLE_GROUPS = ['Performance', 'Camera', 'Sound', 'Hints'];
+const ONLINE_VISIBLE_GROUPS = ['Performance', 'Hints', 'Camera', 'Sound'];
+const AI_VISIBLE_GROUPS = ['Save / Load', 'Performance', 'Hints', 'Camera', 'Sound'];
+
+/** Which groups `buildSchema()` should keep, or `null` for "everything" outside a skirmish. */
+function visibleGroupTitles(game) {
+  if (game?.mode === 'multiplayer-online') return ONLINE_VISIBLE_GROUPS;
+  if (game?.mode === 'multiplayer-ai') return AI_VISIBLE_GROUPS;
+  return null;
+}
+
+/**
+ * The chooser's "World Settings" hint, kept in this file rather than
+ * hand-duplicated in menu.js so it can never drift from what
+ * `visibleGroupTitles()` actually shows — menu.js has no other source of
+ * truth for which groups a mode reveals.
+ */
+export function settingsHintFor(game) {
+  if (game?.mode === 'multiplayer-online') return 'Hints, shadows, camera, sound';
+  if (game?.mode === 'multiplayer-ai') return 'Hints, save/load, shadows, camera, sound';
+  return 'Terrain, atmosphere, camera';
+}
 
 export function buildSchema(world, view, game) {
   const atmo = world.atmosphere;
@@ -391,7 +423,6 @@ export function buildSchema(world, view, game) {
     },
   ];
 
-  return isSkirmishMode(game)
-    ? groups.filter((g) => SKIRMISH_VISIBLE_GROUPS.includes(g.title))
-    : groups;
+  const visible = visibleGroupTitles(game);
+  return visible ? groups.filter((g) => visible.includes(g.title)) : groups;
 }

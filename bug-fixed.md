@@ -216,6 +216,30 @@ tuning/balance changes are not included unless they were fixing broken behavior.
   caught and fixed during testing so the verification harnesses themselves
   were trustworthy.
 
+- **MILESTONE: two players in the same online match could not see or affect
+  each other** — each explored and found "an enemy base" that was not the
+  other's, neither could see the other, and destroying a base had no effect
+  on the opposing player, all while every debug number on screen (seed,
+  checkpoint hash, per-team statistics) reported agreement. Root cause: the
+  state hash — the only cross-client correctness check the game has — hashed
+  vehicle positions but never structure positions, and a base station is a
+  structure, so two clients could hold every building on the map in a
+  different place and still report `AGREED`. A second gap compounded it:
+  only the world seed crossed the wire, with every other terrain parameter
+  (resolution, amplitude, octaves) coming from each client's own bundle, so
+  nothing would have caught two builds generating different islands from
+  that seed either. Fixed by folding structure position/def id and a digest
+  of the generated heightfield into the hash, bumping `PROTOCOL_VERSION` 4 →
+  5 so a stale build fails the connection loudly instead of silently
+  disagreeing forever. See `docs/plans/split-brain-invisible-to-the-hash.md`.
+  A separate real bug found on the way — teams sized from the lobby's
+  *capacity* rather than its actual roster, spawning inert bases for seats
+  nobody sat in — was fixed alongside it, though it was not the cause of
+  this specific report. **User-confirmed live in production, after
+  redeploying the API service from protocol version 4 to version 5: "I can
+  now see both players/teams on the same map and interact."** Tagged
+  `v0.2.0` at the commit that landed this fix.
+
 ## AI units that stop permanently
 
 Ten defects from one player-supplied diagnostic (expert, four AI teams, 44

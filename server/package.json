@@ -1,7 +1,7 @@
 {
   "name": "procedural-terrain-server",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Accounts, cloud saves, and match relay for the procedural terrain RTS. Deployed as its own CapRover app alongside the static frontend.",
   "scripts": {
