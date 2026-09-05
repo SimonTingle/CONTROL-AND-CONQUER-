@@ -2,10 +2,10 @@
  * The hamburger menu's World Settings page, restricted during a skirmish.
  *
  * Reported directly: in online and vs-AI multiplayer, only "High-quality
- * shadows" (Performance), Camera and Sound should be reachable — every other
- * group either reshapes the world (Terrain shape, Ground, Water, Atmosphere)
- * or manages accounts/saves, neither of which makes sense once a match is
- * already running against another player or an AI commander.
+ * shadows" (Performance), Hints, Camera and Sound should be reachable — every
+ * other group either reshapes the world (Terrain shape, Ground, Water,
+ * Atmosphere) or manages accounts/saves, neither of which makes sense once a
+ * match is already running against another player or an AI commander.
  *
  * `simState()` already disabled the individual *controls* that write
  * simulation state during an online match specifically — this is a different,
@@ -85,8 +85,13 @@ test('sandbox sees every settings group, unrestricted', () => {
 });
 
 for (const mode of ['multiplayer-online', 'multiplayer-ai']) {
-  test(`${mode} shows only Performance, Camera and Sound`, () => {
-    assert.deepEqual(titlesFor(mode), ['Performance', 'Camera', 'Sound']);
+  test(`${mode} shows only Performance, Hints, Camera and Sound`, () => {
+    // Hints joined this list when on-screen hints were added. It belongs for a
+    // stronger reason than the other three: hints only ever appear *during* a
+    // match, so a toggle that vanished the moment one started would be
+    // unreachable exactly when somebody wants it. Like them, it writes no
+    // simulation state — it is a local display preference.
+    assert.deepEqual(titlesFor(mode), ['Performance', 'Hints', 'Camera', 'Sound']);
   });
 
   test(`${mode}'s Performance group is exactly High-quality shadows`, () => {

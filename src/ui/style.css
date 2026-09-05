@@ -2017,3 +2017,106 @@ button.panel-back {
 @media (max-width: 620px) {
   .radio-feed { bottom: 150px; max-width: 70vw; }
 }
+
+/* ---- hints ---- */
+
+/* The layer spans the screen so the card can be centred against it, but is
+   inert: pointer-events are re-enabled only on the card, and within the card
+   only the OK button is really a target. A player must be able to drag the
+   camera, tap the ground and open a command ring in the space around a hint,
+   otherwise the thing teaching the game is also blocking it.
+
+   z-index 30 places it above the radial menu (25) — a hint about the command
+   ring that rendered behind the command ring would be absurd — and below the
+   toast (40), which reports things that have actually happened and outranks
+   advice. */
+.hint-layer {
+  position: fixed;
+  left: 0;
+  right: 0;
+  /* Clear of the HUD block in the bottom-left and the minimap bottom-right by
+     sitting above both, and clear of the notch/home indicator via env(). */
+  bottom: calc(96px + env(safe-area-inset-bottom));
+  z-index: 30;
+  display: flex;
+  justify-content: center;
+  padding: 0 12px;
+  pointer-events: none;
+}
+
+.hint-card {
+  width: min(92vw, 460px);
+  padding: 14px 16px;
+  border: 1px solid var(--panel-border);
+  /* The accent edge marks this as the game talking to you, matching the radio
+     feed's left rule — the other surface that speaks rather than reports. */
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(14px);
+  color: var(--text);
+  pointer-events: auto;
+  opacity: 1;
+  transition: opacity 0.25s ease;
+}
+
+/* Hidden means gone, not merely invisible: a faded card that still swallowed
+   taps would be worse than one that never appeared. */
+.hint-card.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.hint-card-title {
+  margin-bottom: 4px;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.hint-card-text {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+/* Full-width and 44px tall: this is the one thing on the card that gets
+   pressed, often on a phone, and often by someone who is also steering. */
+.hint-card-ok {
+  margin-top: 12px;
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: rgba(79, 209, 197, 0.08);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.hint-card-ok:hover {
+  border-color: var(--accent);
+  background: rgba(79, 209, 197, 0.16);
+}
+
+/* Both drawers slide over this space when open. The hint system already
+   refuses to *raise* a card while a drawer is open, but one that was already
+   up when the player opened the menu must get out of the way rather than
+   float over the panel. */
+body.settings-open .hint-layer,
+body.drawer-open .hint-layer {
+  opacity: 0;
+  pointer-events: none;
+}
+
+@media (max-width: 720px) {
+  /* The HUD and minimap both grow taller relative to the viewport here, so the
+     card lifts to stay clear of them. */
+  .hint-layer { bottom: calc(150px + env(safe-area-inset-bottom)); }
+}
+
+@media (max-width: 620px) {
+  .hint-card { padding: 12px 14px; }
+  .hint-card-text { font-size: 11.5px; }
+}
